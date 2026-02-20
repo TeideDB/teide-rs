@@ -1,0 +1,161 @@
+# Scalar function tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE nums (x REAL, y REAL)
+
+statement ok
+INSERT INTO nums VALUES (4.0, 2.0), (9.0, 3.0), (16.0, 4.0), (-1.0, 0.5)
+
+statement ok
+CREATE TABLE strs (s VARCHAR)
+
+statement ok
+INSERT INTO strs VALUES ('Hello World'), ('  spaces  '), ('UPPER lower'), ('abc')
+
+# Utility one-row table for FROM-less expressions
+statement ok
+CREATE TABLE one (n INTEGER)
+
+statement ok
+INSERT INTO one VALUES (1)
+
+# === Math Functions ===
+
+# --- ABS ---
+
+query R rowsort
+SELECT ABS(x) FROM nums
+----
+1.0
+16.0
+4.0
+9.0
+
+# --- CEIL / FLOOR ---
+
+statement ok
+CREATE TABLE decimals (v REAL)
+
+statement ok
+INSERT INTO decimals VALUES (1.2), (2.7), (-1.5), (3.0)
+
+query R rowsort
+SELECT CEIL(v) FROM decimals
+----
+-1.0
+2.0
+3.0
+3.0
+
+query R rowsort
+SELECT FLOOR(v) FROM decimals
+----
+-2.0
+1.0
+2.0
+3.0
+
+# --- SQRT ---
+
+query R rowsort
+SELECT SQRT(x) FROM nums WHERE x > 0.0
+----
+2.0
+3.0
+4.0
+
+# --- ROUND ---
+
+query R rowsort
+SELECT ROUND(v) FROM decimals
+----
+-2.0
+1.0
+3.0
+3.0
+
+# --- LN / EXP ---
+
+statement ok
+CREATE TABLE consts (v REAL)
+
+statement ok
+INSERT INTO consts VALUES (1.0), (0.0)
+
+query R
+SELECT ROUND(LN(v), 6) FROM consts WHERE v = 1.0
+----
+0.0
+
+query R
+SELECT ROUND(EXP(v), 6) FROM consts WHERE v = 0.0
+----
+1.0
+
+# === String Functions ===
+
+# --- UPPER / LOWER ---
+
+query T
+SELECT UPPER(s) FROM strs WHERE s = 'abc'
+----
+ABC
+
+query T
+SELECT LOWER(s) FROM strs WHERE s = 'UPPER lower'
+----
+upper lower
+
+# --- LENGTH ---
+
+query I
+SELECT LENGTH(s) FROM strs WHERE s = 'abc'
+----
+3
+
+query I
+SELECT LENGTH(s) FROM strs WHERE s = 'Hello World'
+----
+11
+
+# --- TRIM ---
+
+query T
+SELECT TRIM(s) FROM strs WHERE s = '  spaces  '
+----
+spaces
+
+# --- SUBSTR / SUBSTRING ---
+
+query T
+SELECT SUBSTR(s, 1, 5) FROM strs WHERE s = 'Hello World'
+----
+Hello
+
+query T
+SELECT SUBSTR(s, 7, 5) FROM strs WHERE s = 'Hello World'
+----
+World
+
+# --- REPLACE ---
+
+query T
+SELECT REPLACE(s, 'World', 'Teide') FROM strs WHERE s = 'Hello World'
+----
+Hello Teide
+
+# --- CONCAT ---
+
+query T
+SELECT CONCAT(s, '!') FROM strs WHERE s = 'abc'
+----
+abc!
+
+# --- String concatenation operator || ---
+
+query T
+SELECT s || '!' FROM strs WHERE s = 'abc'
+----
+abc!

@@ -1,0 +1,170 @@
+# Aggregate function tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE agg (grp INTEGER, cat VARCHAR, val REAL, x INTEGER)
+
+statement ok
+INSERT INTO agg VALUES (1, 'a', 10.0, 100), (1, 'a', 20.0, 200), (1, 'b', 30.0, 300), (2, 'a', 40.0, 400), (2, 'b', 50.0, 500), (2, 'b', 60.0, 600)
+
+# --- Basic aggregates without GROUP BY (global aggregation) ---
+
+query R
+SELECT SUM(val) FROM agg
+----
+210.0
+
+query R
+SELECT AVG(val) FROM agg
+----
+35.0
+
+query I
+SELECT MIN(x) FROM agg
+----
+100
+
+query I
+SELECT MAX(x) FROM agg
+----
+600
+
+query I
+SELECT COUNT(*) FROM agg
+----
+6
+
+query I
+SELECT COUNT(val) FROM agg
+----
+6
+
+# --- GROUP BY single key ---
+
+query IR rowsort
+SELECT grp, SUM(val) FROM agg GROUP BY grp
+----
+1 60.0
+2 150.0
+
+query IR rowsort
+SELECT grp, AVG(val) FROM agg GROUP BY grp
+----
+1 20.0
+2 50.0
+
+query II rowsort
+SELECT grp, COUNT(*) FROM agg GROUP BY grp
+----
+1 3
+2 3
+
+query II rowsort
+SELECT grp, MIN(x) FROM agg GROUP BY grp
+----
+1 100
+2 400
+
+query II rowsort
+SELECT grp, MAX(x) FROM agg GROUP BY grp
+----
+1 300
+2 600
+
+# --- GROUP BY two keys ---
+
+query TIR rowsort
+SELECT cat, grp, SUM(val) FROM agg GROUP BY cat, grp
+----
+a 1 30.0
+a 2 40.0
+b 1 30.0
+b 2 110.0
+
+# --- Multiple aggregates in one query ---
+
+query IRRI rowsort
+SELECT grp, SUM(val), AVG(val), COUNT(*) FROM agg GROUP BY grp
+----
+1 60.0 20.0 3
+2 150.0 50.0 3
+
+# --- HAVING clause ---
+
+query IR
+SELECT grp, SUM(val) FROM agg GROUP BY grp HAVING SUM(val) > 100.0
+----
+2 150.0
+
+query II rowsort
+SELECT grp, COUNT(*) FROM agg GROUP BY grp HAVING COUNT(*) >= 3
+----
+1 3
+2 3
+
+# --- COUNT(DISTINCT) ---
+
+query I
+SELECT COUNT(DISTINCT grp) FROM agg
+----
+2
+
+query I
+SELECT COUNT(DISTINCT cat) FROM agg
+----
+2
+
+# --- Aggregate with expressions ---
+
+query R
+SELECT SUM(val * 2.0) FROM agg
+----
+420.0
+
+query R
+SELECT AVG(val + 10.0) FROM agg
+----
+45.0
+
+# --- GROUP BY with ORDER BY ---
+
+query IR
+SELECT grp, SUM(val) FROM agg GROUP BY grp ORDER BY grp
+----
+1 60.0
+2 150.0
+
+query IR
+SELECT grp, SUM(val) AS total FROM agg GROUP BY grp ORDER BY total DESC
+----
+2 150.0
+1 60.0
+
+# ORDER BY aggregate's input column name (resolves v1 → avg(val))
+query R
+SELECT AVG(val) FROM agg GROUP BY grp ORDER BY val
+----
+20.0
+50.0
+
+# Expression aggregate with WHERE filter (lazy sel → compact before expr eval)
+query R
+SELECT AVG(val + 10.0) FROM agg WHERE val > 20 GROUP BY grp ORDER BY 1
+----
+40.0
+60.0
+
+# --- DISTINCT ---
+
+query I rowsort
+SELECT DISTINCT grp FROM agg
+----
+1
+2
+
+query T rowsort
+SELECT DISTINCT cat FROM agg
+----
+a
+b

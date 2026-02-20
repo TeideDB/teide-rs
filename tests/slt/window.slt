@@ -1,0 +1,226 @@
+# Window function tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE w (grp VARCHAR, val INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO w VALUES ('a', 10, 'p'), ('a', 20, 'q'), ('a', 30, 'r'), ('b', 40, 's'), ('b', 50, 't'), ('b', 60, 'u')
+
+# --- ROW_NUMBER ---
+
+query TII
+SELECT grp, val, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY val) AS rn FROM w ORDER BY grp, val
+----
+a 10 1
+a 20 2
+a 30 3
+b 40 1
+b 50 2
+b 60 3
+
+# --- ROW_NUMBER without partition ---
+
+query II
+SELECT val, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM w ORDER BY val
+----
+10 1
+20 2
+30 3
+40 4
+50 5
+60 6
+
+# --- RANK ---
+
+statement ok
+CREATE TABLE wr (grp VARCHAR, val INTEGER)
+
+statement ok
+INSERT INTO wr VALUES ('a', 10), ('a', 10), ('a', 20), ('b', 30), ('b', 30), ('b', 40)
+
+query TII
+SELECT grp, val, RANK() OVER (PARTITION BY grp ORDER BY val) AS rnk FROM wr ORDER BY grp, val
+----
+a 10 1
+a 10 1
+a 20 3
+b 30 1
+b 30 1
+b 40 3
+
+# --- DENSE_RANK ---
+
+query TII
+SELECT grp, val, DENSE_RANK() OVER (PARTITION BY grp ORDER BY val) AS drnk FROM wr ORDER BY grp, val
+----
+a 10 1
+a 10 1
+a 20 2
+b 30 1
+b 30 1
+b 40 2
+
+# --- NTILE ---
+
+query TII
+SELECT grp, val, NTILE(2) OVER (PARTITION BY grp ORDER BY val) AS tile FROM w ORDER BY grp, val
+----
+a 10 1
+a 20 1
+a 30 2
+b 40 1
+b 50 1
+b 60 2
+
+# --- Running SUM (window SUM on INTEGER returns INTEGER) ---
+
+query TII
+SELECT grp, val, SUM(val) OVER (PARTITION BY grp ORDER BY val) AS running_sum FROM w ORDER BY grp, val
+----
+a 10 10
+a 20 30
+a 30 60
+b 40 40
+b 50 90
+b 60 150
+
+# --- Running SUM on REAL column ---
+
+statement ok
+CREATE TABLE wf (grp VARCHAR, fval REAL)
+
+statement ok
+INSERT INTO wf VALUES ('a', 1.5), ('a', 2.5), ('b', 3.0), ('b', 4.0)
+
+query TRR
+SELECT grp, fval, SUM(fval) OVER (PARTITION BY grp ORDER BY fval) AS rs FROM wf ORDER BY grp, fval
+----
+a 1.5 1.5
+a 2.5 4.0
+b 3.0 3.0
+b 4.0 7.0
+
+# --- Partition-only AVG (no ORDER BY = full partition frame) ---
+
+query TIR
+SELECT grp, val, AVG(val) OVER (PARTITION BY grp) AS avg_val FROM w ORDER BY grp, val
+----
+a 10 20.0
+a 20 20.0
+a 30 20.0
+b 40 50.0
+b 50 50.0
+b 60 50.0
+
+# --- MIN / MAX over partition ---
+
+query TII
+SELECT grp, val, MIN(val) OVER (PARTITION BY grp) AS min_val FROM w ORDER BY grp, val
+----
+a 10 10
+a 20 10
+a 30 10
+b 40 40
+b 50 40
+b 60 40
+
+query TII
+SELECT grp, val, MAX(val) OVER (PARTITION BY grp) AS max_val FROM w ORDER BY grp, val
+----
+a 10 30
+a 20 30
+a 30 30
+b 40 60
+b 50 60
+b 60 60
+
+# --- COUNT over partition ---
+
+query TII
+SELECT grp, val, COUNT(val) OVER (PARTITION BY grp) AS cnt FROM w ORDER BY grp, val
+----
+a 10 3
+a 20 3
+a 30 3
+b 40 3
+b 50 3
+b 60 3
+
+# --- LAG ---
+
+query TII
+SELECT grp, val, LAG(val, 1) OVER (PARTITION BY grp ORDER BY val) AS prev_val FROM w ORDER BY grp, val
+----
+a 10 0
+a 20 10
+a 30 20
+b 40 0
+b 50 40
+b 60 50
+
+# --- LEAD ---
+
+query TII
+SELECT grp, val, LEAD(val, 1) OVER (PARTITION BY grp ORDER BY val) AS next_val FROM w ORDER BY grp, val
+----
+a 10 20
+a 20 30
+a 30 0
+b 40 50
+b 50 60
+b 60 0
+
+# --- FIRST_VALUE ---
+
+query TII
+SELECT grp, val, FIRST_VALUE(val) OVER (PARTITION BY grp ORDER BY val) AS fv FROM w ORDER BY grp, val
+----
+a 10 10
+a 20 10
+a 30 10
+b 40 40
+b 50 40
+b 60 40
+
+# --- LAST_VALUE (full partition frame) ---
+
+query TII
+SELECT grp, val, LAST_VALUE(val) OVER (PARTITION BY grp ORDER BY val ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv FROM w ORDER BY grp, val
+----
+a 10 30
+a 20 30
+a 30 30
+b 40 60
+b 50 60
+b 60 60
+
+# --- Multiple window functions in same query ---
+
+query TIII
+SELECT grp, val, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY val) AS rn, RANK() OVER (PARTITION BY grp ORDER BY val) AS rnk FROM wr ORDER BY grp, val
+----
+a 10 1 1
+a 10 2 1
+a 20 3 3
+b 30 1 1
+b 30 2 1
+b 40 3 3
+
+# --- Window with multi-key PARTITION BY ---
+
+statement ok
+CREATE TABLE wm (g1 VARCHAR, g2 VARCHAR, v INTEGER)
+
+statement ok
+INSERT INTO wm VALUES ('a', 'x', 1), ('a', 'x', 2), ('a', 'y', 3), ('b', 'x', 4), ('b', 'y', 5)
+
+query TTII
+SELECT g1, g2, v, ROW_NUMBER() OVER (PARTITION BY g1, g2 ORDER BY v) AS rn FROM wm ORDER BY g1, g2, v
+----
+a x 1 1
+a x 2 2
+a y 3 1
+b x 4 1
+b y 5 1

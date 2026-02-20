@@ -1,0 +1,108 @@
+# Set operation tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE s1 (id INTEGER, val VARCHAR)
+
+statement ok
+INSERT INTO s1 VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+statement ok
+CREATE TABLE s2 (id INTEGER, val VARCHAR)
+
+statement ok
+INSERT INTO s2 VALUES (2, 'b'), (3, 'c'), (4, 'd')
+
+# --- UNION ALL (keeps duplicates) ---
+
+query IT rowsort
+SELECT id, val FROM s1 UNION ALL SELECT id, val FROM s2
+----
+1 a
+2 b
+2 b
+3 c
+3 c
+4 d
+
+query I
+SELECT COUNT(*) FROM (SELECT id, val FROM s1 UNION ALL SELECT id, val FROM s2)
+----
+6
+
+# --- UNION (removes duplicates) ---
+
+query IT rowsort
+SELECT id, val FROM s1 UNION SELECT id, val FROM s2
+----
+1 a
+2 b
+3 c
+4 d
+
+query I
+SELECT COUNT(*) FROM (SELECT id, val FROM s1 UNION SELECT id, val FROM s2)
+----
+4
+
+# --- INTERSECT ---
+
+query IT rowsort
+SELECT id, val FROM s1 INTERSECT SELECT id, val FROM s2
+----
+2 b
+3 c
+
+# --- EXCEPT ---
+
+query IT
+SELECT id, val FROM s1 EXCEPT SELECT id, val FROM s2
+----
+1 a
+
+query IT
+SELECT id, val FROM s2 EXCEPT SELECT id, val FROM s1
+----
+4 d
+
+# --- Set operations with ORDER BY ---
+
+query IT
+SELECT id, val FROM s1 UNION ALL SELECT id, val FROM s2 ORDER BY id
+----
+1 a
+2 b
+2 b
+3 c
+3 c
+4 d
+
+# --- Set operations with LIMIT ---
+
+query IT
+SELECT id, val FROM s1 UNION ALL SELECT id, val FROM s2 ORDER BY id LIMIT 3
+----
+1 a
+2 b
+2 b
+
+# --- Chained UNION ALL ---
+
+statement ok
+CREATE TABLE s3 (id INTEGER, val VARCHAR)
+
+statement ok
+INSERT INTO s3 VALUES (5, 'e'), (6, 'f')
+
+query IT rowsort
+SELECT id, val FROM s1 UNION ALL SELECT id, val FROM s2 UNION ALL SELECT id, val FROM s3
+----
+1 a
+2 b
+2 b
+3 c
+3 c
+4 d
+5 e
+6 f

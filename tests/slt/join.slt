@@ -1,0 +1,98 @@
+# JOIN tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE left_t (id INTEGER, lval INTEGER)
+
+statement ok
+INSERT INTO left_t VALUES (1, 100), (2, 200), (3, 300), (4, 400)
+
+statement ok
+CREATE TABLE right_t (id INTEGER, rval INTEGER)
+
+statement ok
+INSERT INTO right_t VALUES (2, 20), (3, 30), (5, 50)
+
+# --- INNER JOIN ---
+
+query III rowsort
+SELECT left_t.id, lval, rval FROM left_t INNER JOIN right_t ON left_t.id = right_t.id
+----
+2 200 20
+3 300 30
+
+query I
+SELECT COUNT(*) FROM left_t INNER JOIN right_t ON left_t.id = right_t.id
+----
+2
+
+# --- LEFT OUTER JOIN ---
+
+query I
+SELECT COUNT(*) FROM left_t LEFT JOIN right_t ON left_t.id = right_t.id
+----
+4
+
+# Verify matched rows
+query III rowsort
+SELECT left_t.id, lval, rval FROM left_t LEFT JOIN right_t ON left_t.id = right_t.id WHERE rval > 0
+----
+2 200 20
+3 300 30
+
+# --- CROSS JOIN ---
+
+query I
+SELECT COUNT(*) FROM left_t CROSS JOIN right_t
+----
+12
+
+# --- JOIN with WHERE ---
+
+query III
+SELECT left_t.id, lval, rval FROM left_t INNER JOIN right_t ON left_t.id = right_t.id WHERE left_t.id > 2
+----
+3 300 30
+
+# --- JOIN with aggregation ---
+
+query II rowsort
+SELECT left_t.id, SUM(rval) FROM left_t INNER JOIN right_t ON left_t.id = right_t.id GROUP BY left_t.id
+----
+2 20
+3 30
+
+# --- Multi-table JOIN ---
+
+statement ok
+CREATE TABLE t3 (id INTEGER, t3val INTEGER)
+
+statement ok
+INSERT INTO t3 VALUES (2, 2000), (3, 3000)
+
+query IIII rowsort
+SELECT left_t.id, lval, rval, t3val FROM left_t INNER JOIN right_t ON left_t.id = right_t.id INNER JOIN t3 ON left_t.id = t3.id
+----
+2 200 20 2000
+3 300 30 3000
+
+# --- JOIN with string columns ---
+
+statement ok
+CREATE TABLE str_l (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO str_l VALUES (1, 'alice'), (2, 'bob')
+
+statement ok
+CREATE TABLE str_r (id INTEGER, city VARCHAR)
+
+statement ok
+INSERT INTO str_r VALUES (1, 'london'), (2, 'paris')
+
+query ITT rowsort
+SELECT str_l.id, name, city FROM str_l INNER JOIN str_r ON str_l.id = str_r.id
+----
+1 alice london
+2 bob paris

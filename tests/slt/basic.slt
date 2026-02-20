@@ -1,0 +1,145 @@
+# Basic SELECT tests for Teide SQL
+
+# --- Setup: create and populate a small test table ---
+
+statement ok
+CREATE TABLE t (id INTEGER, val REAL, name VARCHAR)
+
+statement ok
+INSERT INTO t VALUES (1, 10.0, 'alice'), (2, 20.0, 'bob'), (3, 30.0, 'carol'), (4, 40.0, 'dave'), (5, 50.0, 'eve')
+
+# --- SELECT * ---
+
+query I
+SELECT COUNT(*) FROM t
+----
+5
+
+# --- Column projection ---
+
+query IT rowsort
+SELECT id, name FROM t
+----
+1 alice
+2 bob
+3 carol
+4 dave
+5 eve
+
+# --- WHERE clause ---
+
+query IRT
+SELECT id, val, name FROM t WHERE id > 3 ORDER BY id
+----
+4 40.0 dave
+5 50.0 eve
+
+query I
+SELECT COUNT(*) FROM t WHERE val >= 30.0
+----
+3
+
+# --- ORDER BY ASC ---
+
+query IT
+SELECT id, name FROM t ORDER BY id
+----
+1 alice
+2 bob
+3 carol
+4 dave
+5 eve
+
+# --- ORDER BY DESC ---
+
+query IT
+SELECT id, name FROM t ORDER BY id DESC
+----
+5 eve
+4 dave
+3 carol
+2 bob
+1 alice
+
+# --- LIMIT ---
+
+query IT
+SELECT id, name FROM t ORDER BY id LIMIT 3
+----
+1 alice
+2 bob
+3 carol
+
+# --- OFFSET + LIMIT ---
+
+query IT
+SELECT id, name FROM t ORDER BY id LIMIT 2 OFFSET 2
+----
+3 carol
+4 dave
+
+# --- DISTINCT ---
+
+statement ok
+CREATE TABLE d (x INTEGER)
+
+statement ok
+INSERT INTO d VALUES (1), (2), (2), (3), (3), (3)
+
+query I rowsort
+SELECT DISTINCT x FROM d
+----
+1
+2
+3
+
+# --- Arithmetic expressions ---
+
+query IR
+SELECT id, val * 2.0 AS doubled FROM t ORDER BY id LIMIT 3
+----
+1 20.0
+2 40.0
+3 60.0
+
+query I
+SELECT id + 10 AS shifted FROM t ORDER BY shifted LIMIT 2
+----
+11
+12
+
+# --- Aggregate functions ---
+
+query R
+SELECT SUM(val) FROM t
+----
+150.0
+
+query R
+SELECT AVG(val) FROM t
+----
+30.0
+
+query I
+SELECT MIN(id) FROM t
+----
+1
+
+query I
+SELECT MAX(id) FROM t
+----
+5
+
+# --- GROUP BY ---
+
+statement ok
+CREATE TABLE g (grp INTEGER, x INTEGER)
+
+statement ok
+INSERT INTO g VALUES (1, 10), (1, 20), (2, 30), (2, 40), (2, 50)
+
+query II rowsort
+SELECT grp, SUM(x) FROM g GROUP BY grp
+----
+1 30
+2 120

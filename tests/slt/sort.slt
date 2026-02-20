@@ -1,0 +1,165 @@
+# ORDER BY and sorting tests for Teide SQL
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE sortable (id INTEGER, name VARCHAR, val REAL, cat VARCHAR)
+
+statement ok
+INSERT INTO sortable VALUES (3, 'carol', 30.0, 'b'), (1, 'alice', 10.0, 'a'), (5, 'eve', 50.0, 'b'), (2, 'bob', 20.0, 'a'), (4, 'dave', 40.0, 'c')
+
+# === Single column sort (integer) ===
+
+query IT
+SELECT id, name FROM sortable ORDER BY id ASC
+----
+1 alice
+2 bob
+3 carol
+4 dave
+5 eve
+
+query IT
+SELECT id, name FROM sortable ORDER BY id DESC
+----
+5 eve
+4 dave
+3 carol
+2 bob
+1 alice
+
+# === Sort by float column ===
+
+query IR
+SELECT id, val FROM sortable ORDER BY val ASC
+----
+1 10.0
+2 20.0
+3 30.0
+4 40.0
+5 50.0
+
+query IR
+SELECT id, val FROM sortable ORDER BY val DESC
+----
+5 50.0
+4 40.0
+3 30.0
+2 20.0
+1 10.0
+
+# === Multi-key sort (integer keys) ===
+
+statement ok
+CREATE TABLE multi_sort (a INTEGER, b INTEGER, c VARCHAR)
+
+statement ok
+INSERT INTO multi_sort VALUES (1, 30, 'x'), (1, 10, 'y'), (2, 20, 'z'), (2, 10, 'w')
+
+query IIT
+SELECT a, b, c FROM multi_sort ORDER BY a ASC, b ASC
+----
+1 10 y
+1 30 x
+2 10 w
+2 20 z
+
+query IIT
+SELECT a, b, c FROM multi_sort ORDER BY a ASC, b DESC
+----
+1 30 x
+1 10 y
+2 20 z
+2 10 w
+
+query IIT
+SELECT a, b, c FROM multi_sort ORDER BY a DESC, b ASC
+----
+2 10 w
+2 20 z
+1 10 y
+1 30 x
+
+# === Sort by expression ===
+
+query IR
+SELECT id, val * -1.0 AS neg_val FROM sortable ORDER BY neg_val ASC
+----
+5 -50.0
+4 -40.0
+3 -30.0
+2 -20.0
+1 -10.0
+
+# === Sort by column position ===
+
+query IT
+SELECT id, name FROM sortable ORDER BY 1 ASC
+----
+1 alice
+2 bob
+3 carol
+4 dave
+5 eve
+
+# === ORDER BY with LIMIT ===
+
+query IT
+SELECT id, name FROM sortable ORDER BY id ASC LIMIT 3
+----
+1 alice
+2 bob
+3 carol
+
+query IT
+SELECT id, name FROM sortable ORDER BY id DESC LIMIT 2
+----
+5 eve
+4 dave
+
+# === ORDER BY with OFFSET ===
+
+query IT
+SELECT id, name FROM sortable ORDER BY id ASC LIMIT 2 OFFSET 1
+----
+2 bob
+3 carol
+
+query IT
+SELECT id, name FROM sortable ORDER BY id ASC LIMIT 2 OFFSET 3
+----
+4 dave
+5 eve
+
+# === Sort with GROUP BY ===
+
+query TR
+SELECT cat, SUM(val) AS total FROM sortable GROUP BY cat ORDER BY total ASC
+----
+a 30.0
+c 40.0
+b 80.0
+
+# === Sort stability (same values, preserve relative order) ===
+
+statement ok
+CREATE TABLE ties (a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO ties VALUES (1, 30), (1, 10), (2, 20), (2, 10)
+
+query II
+SELECT a, b FROM ties ORDER BY a ASC, b ASC
+----
+1 10
+1 30
+2 10
+2 20
+
+query II
+SELECT a, b FROM ties ORDER BY a ASC, b DESC
+----
+1 30
+1 10
+2 20
+2 10

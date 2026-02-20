@@ -1,0 +1,82 @@
+# Statistical aggregate parity tests
+
+statement ok
+CREATE TABLE csv (id1 VARCHAR, id2 VARCHAR, id3 VARCHAR, id4 INTEGER, id5 INTEGER, id6 INTEGER, v1 INTEGER, v2 INTEGER, v3 REAL)
+
+statement ok
+INSERT INTO csv VALUES
+('id001','id001','id0000000001',1,10,100,1,2,1.5),
+('id001','id001','id0000000002',2,20,200,2,3,2.5),
+('id001','id002','id0000000003',3,30,300,3,4,3.5),
+('id001','id002','id0000000004',1,10,100,4,5,4.5),
+('id002','id001','id0000000005',2,20,200,5,6,5.5),
+('id002','id001','id0000000006',3,30,300,6,7,6.5),
+('id002','id002','id0000000007',1,10,100,7,8,7.5),
+('id002','id002','id0000000008',2,20,200,8,9,8.5),
+('id003','id001','id0000000009',3,30,300,9,10,9.5),
+('id003','id001','id0000000010',1,10,100,10,11,10.5),
+('id003','id002','id0000000011',2,20,200,1,2,11.5),
+('id003','id002','id0000000012',3,30,300,2,3,12.5),
+('id004','id001','id0000000013',1,10,100,3,4,1.5),
+('id004','id001','id0000000014',2,20,200,4,5,2.5),
+('id004','id002','id0000000015',3,30,300,5,6,3.5),
+('id004','id002','id0000000016',1,10,100,6,7,4.5),
+('id005','id001','id0000000017',2,20,200,7,8,5.5),
+('id005','id001','id0000000018',3,30,300,8,9,6.5),
+('id005','id002','id0000000019',1,10,100,9,10,7.5),
+('id005','id002','id0000000020',2,20,200,10,11,8.5)
+
+query TR
+SELECT id1, STDDEV(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.290994
+
+query TR
+SELECT id1, STDDEV_POP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.118034
+
+query TR
+SELECT id1, VARIANCE(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.666667
+
+query TR
+SELECT id1, VAR_POP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.25
+
+query R
+SELECT STDDEV(v1) FROM csv
+----
+2.946898
+
+query R
+SELECT VAR_POP(v1) FROM csv
+----
+8.25
+
+query TR
+SELECT id1, STDDEV_POP(v3) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.118034
+
+query TR
+SELECT id1, STDDEV_SAMP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.290994
+
+query TR
+SELECT id1, VAR_SAMP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1
+----
+id001 1.666667
+
+query R
+SELECT STDDEV(v1) FROM csv WHERE id3 = 'id0000000001'
+----
+NULL
+
+query R
+SELECT VARIANCE(v1) FROM csv WHERE id3 = 'id0000000001'
+----
+NULL

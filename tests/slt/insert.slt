@@ -1,0 +1,89 @@
+# INSERT INTO tests for Teide SQL
+
+# --- Setup: create an empty table ---
+
+statement ok
+CREATE TABLE t1 (id INTEGER, val REAL, name VARCHAR)
+
+# --- Basic INSERT with integer, float, string ---
+
+statement ok
+INSERT INTO t1 VALUES (1, 1.5, 'alice')
+
+statement ok
+INSERT INTO t1 VALUES (2, 2.5, 'bob')
+
+query IRT rowsort
+SELECT id, val, name FROM t1
+----
+1 1.5 alice
+2 2.5 bob
+
+# --- Multi-row INSERT ---
+
+statement ok
+INSERT INTO t1 VALUES (3, 3.5, 'carol'), (4, 4.5, 'dave')
+
+query I
+SELECT COUNT(*) FROM t1
+----
+4
+
+query IRT rowsort
+SELECT id, val, name FROM t1
+----
+1 1.5 alice
+2 2.5 bob
+3 3.5 carol
+4 4.5 dave
+
+# --- INSERT INTO ... SELECT ---
+
+statement ok
+CREATE TABLE t2 (id INTEGER, val REAL, name VARCHAR)
+
+statement ok
+INSERT INTO t2 SELECT * FROM t1 WHERE id <= 2
+
+query I
+SELECT COUNT(*) FROM t2
+----
+2
+
+query IRT rowsort
+SELECT id, val, name FROM t2
+----
+1 1.5 alice
+2 2.5 bob
+
+# --- INSERT into non-existent table ---
+
+statement error
+INSERT INTO nonexistent VALUES (1, 2.0, 'x')
+
+# --- INSERT then aggregate ---
+
+query R
+SELECT SUM(val) FROM t1
+----
+12.0
+
+query I
+SELECT MAX(id) FROM t1
+----
+4
+
+# --- Negative numbers ---
+
+statement ok
+CREATE TABLE t3 (x INTEGER)
+
+statement ok
+INSERT INTO t3 VALUES (-5), (10), (-3)
+
+query I rowsort
+SELECT x FROM t3
+----
+-3
+-5
+10

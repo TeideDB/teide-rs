@@ -1,0 +1,147 @@
+# DDL tests for Teide SQL
+
+# === CREATE TABLE (bare schema) ===
+
+statement ok
+CREATE TABLE t1 (id INTEGER, name VARCHAR, val REAL)
+
+# Insert data to verify schema works
+statement ok
+INSERT INTO t1 VALUES (1, 'hello', 3.14)
+
+query ITR
+SELECT id, name, val FROM t1
+----
+1 hello 3.14
+
+# === CREATE TABLE AS SELECT ===
+
+statement ok
+CREATE TABLE src (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO src VALUES (1, 'test')
+
+statement ok
+CREATE TABLE t2 AS SELECT id, name FROM src
+
+query IT
+SELECT id, name FROM t2
+----
+1 test
+
+# === CREATE TABLE with various types ===
+
+statement ok
+CREATE TABLE typed (b BOOLEAN, i32 INT, i64 BIGINT, f DOUBLE, s TEXT)
+
+statement ok
+INSERT INTO typed VALUES (true, 42, 100000, 3.14, 'hello')
+
+query I
+SELECT COUNT(*) FROM typed
+----
+1
+
+# === CREATE TABLE IF NOT EXISTS ===
+
+statement ok
+CREATE TABLE t3 (x INTEGER)
+
+statement ok
+CREATE TABLE IF NOT EXISTS t3 (x INTEGER, y INTEGER)
+
+# t3 should still have original schema
+statement ok
+INSERT INTO t3 VALUES (1)
+
+# === CREATE OR REPLACE TABLE ===
+
+statement ok
+CREATE TABLE t4 (x INTEGER)
+
+statement ok
+INSERT INTO t4 VALUES (1), (2)
+
+statement ok
+CREATE OR REPLACE TABLE t4 AS SELECT x * 10 AS x, x * 20 AS y FROM t4
+
+query II rowsort
+SELECT x, y FROM t4
+----
+10 20
+20 40
+
+# === DROP TABLE ===
+
+statement ok
+CREATE TABLE to_drop (x INTEGER)
+
+statement ok
+DROP TABLE to_drop
+
+statement error
+SELECT * FROM to_drop
+
+# === DROP TABLE IF EXISTS ===
+
+statement ok
+DROP TABLE IF EXISTS nonexistent_table
+
+# === DROP non-existent table (should error) ===
+
+statement error
+DROP TABLE this_does_not_exist
+
+# === INSERT variants ===
+
+# --- Multi-row INSERT ---
+
+statement ok
+CREATE TABLE multi (a INTEGER, b VARCHAR)
+
+statement ok
+INSERT INTO multi VALUES (1, 'x'), (2, 'y'), (3, 'z')
+
+query I
+SELECT COUNT(*) FROM multi
+----
+3
+
+# --- INSERT INTO ... SELECT ---
+
+statement ok
+CREATE TABLE copy_t (a INTEGER, b VARCHAR)
+
+statement ok
+INSERT INTO copy_t SELECT a, b FROM multi WHERE a <= 2
+
+query IT rowsort
+SELECT a, b FROM copy_t
+----
+1 x
+2 y
+
+# --- Multiple INSERTs ---
+
+statement ok
+CREATE TABLE accum (x INTEGER)
+
+statement ok
+INSERT INTO accum VALUES (1)
+
+statement ok
+INSERT INTO accum VALUES (2)
+
+statement ok
+INSERT INTO accum VALUES (3)
+
+query I
+SELECT SUM(x) FROM accum
+----
+6
+
+# --- INSERT into non-existent table ---
+
+statement error
+INSERT INTO no_such_table VALUES (1)
