@@ -28,6 +28,7 @@ pub mod ffi;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod sql;
+pub mod td;
 
 // Re-export everything from engine at crate root
 pub use engine::*;
