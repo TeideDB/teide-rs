@@ -503,6 +503,7 @@ fn print_help() {
     println!("Td REPL commands:");
     println!("  \\\\    quit");
     println!("  \\h    show this help");
+    println!("  \\t    toggle timer");
     println!();
     println!("Examples:");
     println!("  1 + 2");
@@ -526,6 +527,7 @@ fn main() {
     };
 
     let mut vm = Vm::new();
+    let mut show_timer = false;
 
     // Non-interactive: read from stdin pipe
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -538,8 +540,19 @@ fn main() {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    if trimmed == "\\t" || trimmed == "\\timer" {
+                        show_timer = !show_timer;
+                        continue;
+                    }
+                    let start = std::time::Instant::now();
                     match vm.eval(trimmed) {
-                        Ok(val) => println!("{}", format_value(&val)),
+                        Ok(val) => {
+                            println!("{}", format_value(&val));
+                            if show_timer {
+                                let elapsed = start.elapsed();
+                                eprintln!("  {elapsed:.3?}");
+                            }
+                        }
                         Err(e) => {
                             eprintln!("Error: {e}");
                             std::process::exit(1);
@@ -598,10 +611,28 @@ fn main() {
                     print_help();
                     continue;
                 }
+                if trimmed == "\\t" || trimmed == "\\timer" {
+                    show_timer = !show_timer;
+                    println!("timer {}", if show_timer { "on" } else { "off" });
+                    continue;
+                }
 
+                let start = std::time::Instant::now();
                 match vm.eval(trimmed) {
-                    Ok(val) => println!("{}", format_value(&val)),
-                    Err(e) => eprintln!("Error: {e}"),
+                    Ok(val) => {
+                        println!("{}", format_value(&val));
+                        if show_timer {
+                            let elapsed = start.elapsed();
+                            eprintln!("  {elapsed:.3?}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        if show_timer {
+                            let elapsed = start.elapsed();
+                            eprintln!("  {elapsed:.3?}");
+                        }
+                    }
                 }
             }
             Ok(Signal::CtrlD) => break,
