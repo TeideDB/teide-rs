@@ -731,3 +731,43 @@ fn td_vm_each_neg() {
     assert!(result.is_vec());
     assert_eq!(result.len(), Some(3));
 }
+
+// ---- Lambda / closure tests ----
+
+#[test]
+fn td_vm_lambda_call() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let _ctx = teide::Context::new().unwrap();
+    let mut vm = Vm::new();
+    let result = vm.eval("{x * x} 5").unwrap();
+    assert_eq!(result.as_i64(), Some(25));
+}
+
+#[test]
+fn td_vm_lambda_two_args() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let _ctx = teide::Context::new().unwrap();
+    let mut vm = Vm::new();
+    let result = vm.eval("{x + y}[3;4]").unwrap();
+    assert_eq!(result.as_i64(), Some(7));
+}
+
+#[test]
+fn td_vm_named_lambda() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let _ctx = teide::Context::new().unwrap();
+    let mut vm = Vm::new();
+    vm.eval("f: {x * x}").unwrap();
+    let result = vm.eval("f 5").unwrap();
+    assert_eq!(result.as_i64(), Some(25));
+}
+
+#[test]
+fn td_vm_lambda_with_each() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let _ctx = teide::Context::new().unwrap();
+    let mut vm = Vm::new();
+    let result = vm.eval("{x * x} each 1 2 3").unwrap();
+    assert!(result.is_vec());
+    assert_eq!(result.len(), Some(3));
+}

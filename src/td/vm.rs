@@ -1,9 +1,17 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use crate::td::chunk::{Chunk, Const, Op};
 use crate::td::compiler;
 use crate::td::value::Value;
 use crate::td::error::{TdError, TdResult};
 use crate::ffi;
+
+/// A call frame tracks the execution state of a single function/chunk.
+struct CallFrame {
+    chunk: Rc<Chunk>,
+    ip: usize,
+    stack_base: usize,
+}
 
 /// Read a big-endian u16 from bytecode and advance ip.
 fn read_u16(code: &[u8], ip: &mut usize) -> u16 {
@@ -31,47 +39,56 @@ impl Vm {
     fn execute(&mut self, chunk: &Chunk) -> TdResult<Value> {
         let mut stack: Vec<Value> = Vec::new();
         let mut ip: usize = 0;
+        let mut current_chunk = Rc::new(chunk.clone());
+        let mut stack_base: usize = 0;
+        let mut call_stack: Vec<CallFrame> = Vec::new();
 
-        while ip < chunk.code.len() {
-            let op = Op::from_u8(chunk.code[ip])
-                .ok_or_else(|| TdError::Runtime(format!("unknown opcode: {}", chunk.code[ip])))?;
+        loop {
+            if ip >= current_chunk.code.len() {
+                break;
+            }
+
+            let op = Op::from_u8(current_chunk.code[ip])
+                .ok_or_else(|| TdError::Runtime(format!("unknown opcode: {}", current_chunk.code[ip])))?;
             ip += 1;
 
             match op {
                 Op::Const => {
-                    let idx = read_u16(&chunk.code, &mut ip);
-                    let val = self.const_to_value(&chunk.constants[idx as usize])?;
+                    let idx = read_u16(&current_chunk.code, &mut ip);
+                    let val = self.const_to_value(&current_chunk.constants[idx as usize])?;
                     stack.push(val);
                 }
                 Op::Nil => stack.push(Value::nil()),
                 Op::Pop => { stack.pop(); }
                 Op::LoadLocal => {
-                    let slot = chunk.code[ip]; ip += 1;
-                    let val = stack.get(slot as usize)
+                    let slot = current_chunk.code[ip]; ip += 1;
+                    let abs_slot = stack_base + slot as usize;
+                    let val = stack.get(abs_slot)
                         .ok_or_else(|| TdError::Runtime(format!("invalid local slot: {slot}")))?
                         .clone();
                     stack.push(val);
                 }
                 Op::StoreLocal => {
-                    let slot = chunk.code[ip]; ip += 1;
+                    let slot = current_chunk.code[ip]; ip += 1;
+                    let abs_slot = stack_base + slot as usize;
                     let val = stack.last()
                         .ok_or_else(|| TdError::Runtime("empty stack".into()))?
                         .clone();
-                    if (slot as usize) < stack.len() {
-                        stack[slot as usize] = val;
+                    if abs_slot < stack.len() {
+                        stack[abs_slot] = val;
                     }
                 }
                 Op::LoadGlobal => {
-                    let idx = read_u16(&chunk.code, &mut ip);
-                    let name = self.const_to_string(&chunk.constants[idx as usize]);
+                    let idx = read_u16(&current_chunk.code, &mut ip);
+                    let name = self.const_to_string(&current_chunk.constants[idx as usize]);
                     let val = self.globals.get(&name)
                         .ok_or_else(|| TdError::Runtime(format!("undefined: {name}")))?
                         .clone();
                     stack.push(val);
                 }
                 Op::StoreGlobal => {
-                    let idx = read_u16(&chunk.code, &mut ip);
-                    let name = self.const_to_string(&chunk.constants[idx as usize]);
+                    let idx = read_u16(&current_chunk.code, &mut ip);
+                    let name = self.const_to_string(&current_chunk.constants[idx as usize]);
                     let val = stack.last()
                         .ok_or_else(|| TdError::Runtime("empty stack".into()))?
                         .clone();
@@ -122,10 +139,26 @@ impl Vm {
                     }
                 }
                 Op::MakeVec => {
-                    let count = chunk.code[ip] as usize; ip += 1;
+                    let count = current_chunk.code[ip] as usize; ip += 1;
                     make_vec(&mut stack, count)?;
                 }
-                Op::Return => break,
+                Op::Return => {
+                    // If there are call frames, restore the caller's state
+                    if let Some(frame) = call_stack.pop() {
+                        let return_val = stack.pop().unwrap_or(Value::nil());
+                        // Truncate the stack to the caller's stack base
+                        stack.truncate(stack_base);
+                        // Push the return value for the caller
+                        stack.push(return_val);
+                        // Restore caller state
+                        current_chunk = frame.chunk;
+                        ip = frame.ip;
+                        stack_base = frame.stack_base;
+                    } else {
+                        // Top-level return: exit the execute loop
+                        break;
+                    }
+                }
 
                 // ---- Built-in verbs ----
                 Op::Sum => {
@@ -211,17 +244,40 @@ impl Vm {
                         .ok_or_else(|| TdError::Runtime("stack underflow".into()))?;
                     let src = stack.pop()
                         .ok_or_else(|| TdError::Runtime("stack underflow".into()))?;
-                    stack.push(verb_index(&src, &idx_val)?);
+
+                    // If the source is a Lambda, treat Index as a single-arg Call
+                    if let Value::Lambda(ref lambda_chunk, ref _upvalues) = src {
+                        let lambda_chunk = lambda_chunk.clone();
+                        // Save caller state
+                        call_stack.push(CallFrame {
+                            chunk: current_chunk.clone(),
+                            ip,
+                            stack_base,
+                        });
+                        // Set up the new frame: args become locals
+                        let new_base = stack.len();
+                        stack.push(idx_val); // single arg as local x
+                        // Pad remaining locals with nil
+                        let num_locals = lambda_chunk.num_locals as usize;
+                        while stack.len() - new_base < num_locals {
+                            stack.push(Value::nil());
+                        }
+                        current_chunk = lambda_chunk;
+                        ip = 0;
+                        stack_base = new_base;
+                    } else {
+                        stack.push(verb_index(&src, &idx_val)?);
+                    }
                 }
 
                 // ---- Jump / Control ----
                 Op::Jump => {
-                    let offset = read_u16(&chunk.code, &mut ip) as i16;
+                    let offset = read_u16(&current_chunk.code, &mut ip) as i16;
                     let target = (ip as isize + offset as isize - 3) as usize;
                     ip = target;
                 }
                 Op::JumpIfFalse => {
-                    let offset = read_u16(&chunk.code, &mut ip) as i16;
+                    let offset = read_u16(&current_chunk.code, &mut ip) as i16;
                     let cond = stack.pop()
                         .ok_or_else(|| TdError::Runtime("stack underflow".into()))?;
                     let is_false = if let Some(b) = cond.as_bool() {
@@ -239,27 +295,81 @@ impl Vm {
 
                 // ---- Adverbs ----
                 Op::Over => {
-                    let op_byte = chunk.code[ip]; ip += 1;
+                    let op_byte = current_chunk.code[ip]; ip += 1;
                     let vec_val = stack.pop()
                         .ok_or_else(|| TdError::Runtime("over: stack underflow".into()))?;
                     stack.push(adverb_over(&vec_val, op_byte)?);
                 }
                 Op::Scan => {
-                    let op_byte = chunk.code[ip]; ip += 1;
+                    let op_byte = current_chunk.code[ip]; ip += 1;
                     let vec_val = stack.pop()
                         .ok_or_else(|| TdError::Runtime("scan: stack underflow".into()))?;
                     stack.push(adverb_scan(&vec_val, op_byte)?);
                 }
                 Op::Each => {
-                    let op_byte = chunk.code[ip]; ip += 1;
-                    let vec_val = stack.pop()
-                        .ok_or_else(|| TdError::Runtime("each: stack underflow".into()))?;
-                    stack.push(adverb_each(&vec_val, op_byte)?);
+                    let op_byte = current_chunk.code[ip]; ip += 1;
+                    if op_byte == Op::Call as u8 {
+                        // Lambda each: stack has [... lambda, vector]
+                        let vec_val = stack.pop()
+                            .ok_or_else(|| TdError::Runtime("each: stack underflow".into()))?;
+                        let func = stack.pop()
+                            .ok_or_else(|| TdError::Runtime("each: stack underflow (no function)".into()))?;
+                        if let Value::Lambda(ref lambda_chunk, ref _upvalues) = func {
+                            let lambda_chunk = lambda_chunk.clone();
+                            let result = self.call_lambda_each(&lambda_chunk, &vec_val, &mut stack, &mut call_stack, &current_chunk, ip, stack_base)?;
+                            stack.push(result);
+                        } else {
+                            return Err(TdError::Runtime("each: expected lambda function".into()));
+                        }
+                    } else {
+                        let vec_val = stack.pop()
+                            .ok_or_else(|| TdError::Runtime("each: stack underflow".into()))?;
+                        stack.push(adverb_each(&vec_val, op_byte)?);
+                    }
+                }
+
+                // ---- Function calls ----
+                Op::Call => {
+                    let argc = current_chunk.code[ip] as usize; ip += 1;
+                    // Pop args (they were pushed after the function)
+                    let mut args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        args.push(stack.pop()
+                            .ok_or_else(|| TdError::Runtime("call: stack underflow".into()))?);
+                    }
+                    args.reverse(); // args were popped in reverse order
+                    // Pop the function
+                    let func = stack.pop()
+                        .ok_or_else(|| TdError::Runtime("call: stack underflow (no function)".into()))?;
+
+                    if let Value::Lambda(ref lambda_chunk, ref _upvalues) = func {
+                        let lambda_chunk = lambda_chunk.clone();
+                        // Save caller state
+                        call_stack.push(CallFrame {
+                            chunk: current_chunk.clone(),
+                            ip,
+                            stack_base,
+                        });
+                        // Set up the new frame: push args as locals
+                        let new_base = stack.len();
+                        for arg in args {
+                            stack.push(arg);
+                        }
+                        // Pad remaining local slots with nil
+                        let num_locals = lambda_chunk.num_locals as usize;
+                        while stack.len() - new_base < num_locals {
+                            stack.push(Value::nil());
+                        }
+                        current_chunk = lambda_chunk;
+                        ip = 0;
+                        stack_base = new_base;
+                    } else {
+                        return Err(TdError::Runtime(format!("call: not a function")));
+                    }
                 }
 
                 // Stub out remaining unimplemented ops
                 Op::MakeDict | Op::MakeTable
-                | Op::Call
                 | Op::QuerySelect | Op::QueryUpdate | Op::QueryDelete => {
                     return Err(TdError::Runtime(format!("unimplemented op: {:?}", op)));
                 }
@@ -267,6 +377,197 @@ impl Vm {
         }
 
         Ok(stack.pop().unwrap_or(Value::nil()))
+    }
+
+    /// Execute a lambda chunk with the given arguments.
+    /// This is a standalone execution that doesn't share state with the caller's stack.
+    fn call_lambda(&mut self, chunk: &Rc<Chunk>, args: &[Value]) -> TdResult<Value> {
+        // Build a mini chunk wrapper that sets up locals and runs
+        let mut local_stack: Vec<Value> = Vec::new();
+        for arg in args {
+            local_stack.push(arg.clone());
+        }
+        // Pad remaining locals with nil
+        let num_locals = chunk.num_locals as usize;
+        while local_stack.len() < num_locals {
+            local_stack.push(Value::nil());
+        }
+
+        let mut ip: usize = 0;
+        let stack_base: usize = 0;
+        let current_chunk = chunk.clone();
+        let mut call_stack: Vec<CallFrame> = Vec::new();
+        let mut cur_chunk = current_chunk;
+        let mut cur_base = stack_base;
+
+        loop {
+            if ip >= cur_chunk.code.len() {
+                break;
+            }
+
+            let op = Op::from_u8(cur_chunk.code[ip])
+                .ok_or_else(|| TdError::Runtime(format!("unknown opcode: {}", cur_chunk.code[ip])))?;
+            ip += 1;
+
+            match op {
+                Op::Const => {
+                    let idx = read_u16(&cur_chunk.code, &mut ip);
+                    let val = self.const_to_value(&cur_chunk.constants[idx as usize])?;
+                    local_stack.push(val);
+                }
+                Op::Nil => local_stack.push(Value::nil()),
+                Op::Pop => { local_stack.pop(); }
+                Op::LoadLocal => {
+                    let slot = cur_chunk.code[ip]; ip += 1;
+                    let abs_slot = cur_base + slot as usize;
+                    let val = local_stack.get(abs_slot)
+                        .ok_or_else(|| TdError::Runtime(format!("invalid local slot: {slot}")))?
+                        .clone();
+                    local_stack.push(val);
+                }
+                Op::StoreLocal => {
+                    let slot = cur_chunk.code[ip]; ip += 1;
+                    let abs_slot = cur_base + slot as usize;
+                    let val = local_stack.last()
+                        .ok_or_else(|| TdError::Runtime("empty stack".into()))?
+                        .clone();
+                    if abs_slot < local_stack.len() {
+                        local_stack[abs_slot] = val;
+                    }
+                }
+                Op::LoadGlobal => {
+                    let idx = read_u16(&cur_chunk.code, &mut ip);
+                    let name = self.const_to_string(&cur_chunk.constants[idx as usize]);
+                    let val = self.globals.get(&name)
+                        .ok_or_else(|| TdError::Runtime(format!("undefined: {name}")))?
+                        .clone();
+                    local_stack.push(val);
+                }
+                Op::StoreGlobal => {
+                    let idx = read_u16(&cur_chunk.code, &mut ip);
+                    let name = self.const_to_string(&cur_chunk.constants[idx as usize]);
+                    let val = local_stack.last()
+                        .ok_or_else(|| TdError::Runtime("empty stack".into()))?
+                        .clone();
+                    self.globals.insert(name, val);
+                }
+                Op::Add => binary_arith(&mut local_stack, "add")?,
+                Op::Sub => binary_arith(&mut local_stack, "sub")?,
+                Op::Mul => binary_arith(&mut local_stack, "mul")?,
+                Op::Div => binary_arith(&mut local_stack, "div")?,
+                Op::Mod => binary_arith(&mut local_stack, "mod")?,
+                Op::Eq => binary_arith(&mut local_stack, "eq")?,
+                Op::Ne => binary_arith(&mut local_stack, "ne")?,
+                Op::Lt => binary_arith(&mut local_stack, "lt")?,
+                Op::Le => binary_arith(&mut local_stack, "le")?,
+                Op::Gt => binary_arith(&mut local_stack, "gt")?,
+                Op::Ge => binary_arith(&mut local_stack, "ge")?,
+                Op::Neg => {
+                    let val = local_stack.pop()
+                        .ok_or_else(|| TdError::Runtime("stack underflow".into()))?;
+                    if val.is_atom() {
+                        if let Some(v) = val.as_i64() {
+                            local_stack.push(Value::i64(-v));
+                        } else if let Some(v) = val.as_f64() {
+                            local_stack.push(Value::f64(-v));
+                        } else {
+                            return Err(TdError::Runtime("neg: unsupported type".into()));
+                        }
+                    } else if val.is_vec() {
+                        let result = unary_vec_op(&val, "neg")?;
+                        local_stack.push(result);
+                    } else {
+                        return Err(TdError::Runtime("neg: unsupported type".into()));
+                    }
+                }
+                Op::Not => {
+                    let val = local_stack.pop()
+                        .ok_or_else(|| TdError::Runtime("stack underflow".into()))?;
+                    if val.is_atom() {
+                        if let Some(v) = val.as_bool() {
+                            local_stack.push(Value::bool(!v));
+                        } else if let Some(v) = val.as_i64() {
+                            local_stack.push(Value::bool(v == 0));
+                        } else {
+                            return Err(TdError::Runtime("not: unsupported type".into()));
+                        }
+                    } else {
+                        return Err(TdError::Runtime("not: unsupported type for atom".into()));
+                    }
+                }
+                Op::MakeVec => {
+                    let count = cur_chunk.code[ip] as usize; ip += 1;
+                    make_vec(&mut local_stack, count)?;
+                }
+                Op::Return => {
+                    if let Some(frame) = call_stack.pop() {
+                        let return_val = local_stack.pop().unwrap_or(Value::nil());
+                        local_stack.truncate(cur_base);
+                        local_stack.push(return_val);
+                        cur_chunk = frame.chunk;
+                        ip = frame.ip;
+                        cur_base = frame.stack_base;
+                    } else {
+                        break;
+                    }
+                }
+                _ => {
+                    return Err(TdError::Runtime(format!("unsupported op in lambda: {:?}", op)));
+                }
+            }
+        }
+
+        Ok(local_stack.pop().unwrap_or(Value::nil()))
+    }
+
+    /// Apply a lambda to each element of a vector using `call_lambda`.
+    fn call_lambda_each(
+        &mut self,
+        lambda_chunk: &Rc<Chunk>,
+        vec_val: &Value,
+        _stack: &mut Vec<Value>,
+        _call_stack: &mut Vec<CallFrame>,
+        _current_chunk: &Rc<Chunk>,
+        _ip: usize,
+        _stack_base: usize,
+    ) -> TdResult<Value> {
+        if vec_val.is_atom() {
+            // Apply to single atom
+            return self.call_lambda(lambda_chunk, &[vec_val.clone()]);
+        }
+        if !vec_val.is_vec() {
+            return Err(TdError::Runtime("each: expected vector".into()));
+        }
+
+        let raw = vec_val.as_raw().ok_or(TdError::Runtime("each: nil operand".into()))?;
+        let len = vec_val.len().unwrap_or(0) as usize;
+        if len == 0 {
+            return Ok(Value::i64_vec(&[]));
+        }
+
+        let base_type = unsafe { ffi::td_type(raw as *const ffi::td_t) }.unsigned_abs();
+
+        let mut results = Vec::with_capacity(len);
+
+        if base_type == ffi::TD_I64 as u8 {
+            let data = get_i64_data(raw, true, len);
+            for &elem in &data {
+                let elem_val = Value::i64(elem);
+                let result = self.call_lambda(lambda_chunk, &[elem_val])?;
+                results.push(result);
+            }
+        } else if base_type == ffi::TD_F64 as u8 {
+            let data = get_f64_data(raw, true, len, base_type);
+            for &elem in &data {
+                let elem_val = Value::f64(elem);
+                let result = self.call_lambda(lambda_chunk, &[elem_val])?;
+                results.push(result);
+            }
+        } else {
+            return Err(TdError::Runtime("each: unsupported vector type".into()));
+        }
+
+        collect_results_to_vec(results)
     }
 
     /// Convert a compile-time constant to a runtime Value.
@@ -287,9 +588,8 @@ impl Vm {
                 Ok(Value::nil())
             }
             Const::Nil => Ok(Value::nil()),
-            Const::Chunk(_) => {
-                // Lambda bodies: handled in later tasks (Task 10).
-                Ok(Value::nil())
+            Const::Chunk(ref c) => {
+                Ok(Value::Lambda(Rc::new(c.clone()), vec![]))
             }
         }
     }

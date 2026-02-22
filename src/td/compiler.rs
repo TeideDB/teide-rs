@@ -100,14 +100,29 @@ impl Compiler {
                 self.chunk.emit(opcode);
             }
             Expr::Adverb(adverb, verb_expr, arg) => {
-                // Compile the argument (vector) first
-                self.compile_expr(arg)?;
-                // Extract the operator opcode from the verb expression
-                let op_byte = self.verb_expr_to_op_byte(verb_expr)?;
-                match adverb {
-                    Adverb::Over => self.chunk.emit_u8(Op::Over, op_byte),
-                    Adverb::Scan => self.chunk.emit_u8(Op::Scan, op_byte),
-                    Adverb::Each => self.chunk.emit_u8(Op::Each, op_byte),
+                // Check if the verb expression is a lambda or ident (function value)
+                let is_func_verb = matches!(verb_expr.as_ref(), Expr::Lambda { .. } | Expr::Ident(_));
+                if is_func_verb {
+                    // For lambda/ident adverbs: push the function, then the arg
+                    self.compile_expr(verb_expr)?;
+                    self.compile_expr(arg)?;
+                    // Use Op::Call as the sentinel op_byte to indicate lambda adverb
+                    let sentinel = Op::Call as u8;
+                    match adverb {
+                        Adverb::Over => self.chunk.emit_u8(Op::Over, sentinel),
+                        Adverb::Scan => self.chunk.emit_u8(Op::Scan, sentinel),
+                        Adverb::Each => self.chunk.emit_u8(Op::Each, sentinel),
+                    }
+                } else {
+                    // Compile the argument (vector) first
+                    self.compile_expr(arg)?;
+                    // Extract the operator opcode from the verb expression
+                    let op_byte = self.verb_expr_to_op_byte(verb_expr)?;
+                    match adverb {
+                        Adverb::Over => self.chunk.emit_u8(Op::Over, op_byte),
+                        Adverb::Scan => self.chunk.emit_u8(Op::Scan, op_byte),
+                        Adverb::Each => self.chunk.emit_u8(Op::Each, op_byte),
+                    }
                 }
             }
             Expr::Lambda { params, body } => {

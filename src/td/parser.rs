@@ -114,16 +114,40 @@ impl Parser {
             return Ok(Expr::Index(Box::new(lhs), vec![where_expr]));
         }
 
-        // Check for adverb after the LHS (which could be an operator-like expression)
-        // e.g., `+ over 1 2 3`
-        // This is handled in parse_atom for operator tokens.
+        // Check for adverb after a lambda or ident: `{x * x} each 1 2 3`
+        if let Token::Adverb(ref adverb_name) = self.peek().clone() {
+            if matches!(lhs, Expr::Lambda { .. } | Expr::Ident(_)) {
+                let adverb = Self::parse_adverb_name(adverb_name)?;
+                self.advance(); // consume adverb
+                let arg = self.parse_expr()?;
+                return Ok(Expr::Adverb(
+                    adverb,
+                    Box::new(lhs),
+                    Box::new(arg),
+                ));
+            }
+        }
+
+        // Check for juxtaposition call: `{x * x} 5` or `f 5`
+        // If lhs is a Lambda or Ident and the next token can start an expression,
+        // treat this as a function call.
+        if matches!(lhs, Expr::Lambda { .. } | Expr::Ident(_)) {
+            if !self.at_expr_end() && self.peek_binop().is_none()
+                && !matches!(self.peek(), Token::Bang | Token::Adverb(_))
+                && !matches!(self.peek(), Token::Verb(ref v) if v == "where")
+            {
+                let arg = self.parse_expr()?;
+                return Ok(Expr::Call(Box::new(lhs), vec![arg]));
+            }
+        }
 
         Ok(lhs)
     }
 
-    /// Parse postfix operations (indexing with `[...]`).
+    /// Parse postfix operations (indexing with `[...]` or call with `[...]` for lambdas).
     fn parse_postfix(&mut self, mut expr: Expr) -> TdResult<Expr> {
         while matches!(self.peek(), Token::LBrack) {
+            let is_lambda = matches!(expr, Expr::Lambda { .. });
             self.advance(); // consume '['
             let mut args = Vec::new();
             if !matches!(self.peek(), Token::RBrack) {
@@ -134,7 +158,11 @@ impl Parser {
                 }
             }
             self.expect(&Token::RBrack)?;
-            expr = Expr::Index(Box::new(expr), args);
+            if is_lambda {
+                expr = Expr::Call(Box::new(expr), args);
+            } else {
+                expr = Expr::Index(Box::new(expr), args);
+            }
         }
         Ok(expr)
     }
