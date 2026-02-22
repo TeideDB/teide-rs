@@ -604,17 +604,20 @@ fn main() {
                 }
 
                 // Backslash commands
-                if trimmed == "\\\\" || trimmed == "\\quit" {
-                    break;
-                }
-                if trimmed == "\\h" || trimmed == "\\help" {
-                    print_help();
-                    continue;
-                }
-                if trimmed == "\\t" || trimmed == "\\timer" {
-                    show_timer = !show_timer;
-                    println!("timer {}", if show_timer { "on" } else { "off" });
-                    continue;
+                if trimmed.starts_with('\\') {
+                    match trimmed.split_whitespace().next().unwrap_or("") {
+                        "\\\\" | "\\quit" | "\\q" => break,
+                        "\\h" | "\\help" => { print_help(); continue; }
+                        "\\t" | "\\timer" => {
+                            show_timer = !show_timer;
+                            println!("timer {}", if show_timer { "on" } else { "off" });
+                            continue;
+                        }
+                        cmd => {
+                            eprintln!("unknown command: {cmd}");
+                            continue;
+                        }
+                    }
                 }
 
                 let start = std::time::Instant::now();
