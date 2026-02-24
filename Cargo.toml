@@ -64,11 +64,6 @@ path = "src/cli/main.rs"
 required-features = ["cli"]
 
 [[bin]]
-name = "td"
-path = "src/td/repl.rs"
-required-features = ["cli"]
-
-[[bin]]
 name = "teide-server"
 path = "src/server/main.rs"
 required-features = ["server"]

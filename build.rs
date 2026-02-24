@@ -6,17 +6,24 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let vendor = manifest_dir.join("vendor/teide");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
-    // Vendor the C core if not already present
-    if !vendor.exists() {
-        let status = Command::new("git")
-            .args(["clone", "--depth=1", "https://github.com/TeideDB/teide.git"])
-            .arg(&vendor)
-            .status()
-            .expect("failed to run git clone");
-        assert!(status.success(), "git clone teide failed");
-    }
+    // Prefer pre-vendored copy (local dev), otherwise clone into OUT_DIR (crates.io)
+    let local_vendor = manifest_dir.join("vendor/teide");
+    let vendor = if local_vendor.exists() {
+        local_vendor
+    } else {
+        let out_vendor = out_dir.join("vendor/teide");
+        if !out_vendor.exists() {
+            let status = Command::new("git")
+                .args(["clone", "--depth=1", "https://github.com/TeideDB/teide.git"])
+                .arg(&out_vendor)
+                .status()
+                .expect("failed to run git clone");
+            assert!(status.success(), "git clone teide failed");
+        }
+        out_vendor
+    };
 
     let src_dir = vendor.join("src");
     let include_dir = vendor.join("include");
