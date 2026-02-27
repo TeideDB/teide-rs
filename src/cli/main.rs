@@ -450,15 +450,17 @@ const TAIL_ROWS: usize = 20;
 fn type_name(typ: i8) -> &'static str {
     match typ {
         1 => "bool",
+        3 => "char",
         4 => "i16",
         5 => "i32",
         6 => "i64",
         7 => "f64",
+        8 => "u8",
         9 => "date",
         10 => "time",
         11 => "timestamp",
+        12 => "guid",
         20 => "sym",
-        15 => "enum",
         _ => "?",
     }
 }
