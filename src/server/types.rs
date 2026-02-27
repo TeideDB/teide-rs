@@ -53,14 +53,21 @@ pub fn format_cell(table: &crate::Table, col: usize, row: usize) -> Option<Strin
                 "f".to_string()
             })
         }
-        ffi::TD_I16
-        | ffi::TD_I32
-        | ffi::TD_I64
-        | ffi::TD_DATE
-        | ffi::TD_TIME
-        | ffi::TD_TIMESTAMP => {
+        ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
             let v = table.get_i64(col, row)?;
             Some(v.to_string())
+        }
+        ffi::TD_DATE => {
+            let v = table.get_i64(col, row)?;
+            Some(crate::Table::format_date(v as i32))
+        }
+        ffi::TD_TIME => {
+            let v = table.get_i64(col, row)?;
+            Some(crate::Table::format_time(v as i32))
+        }
+        ffi::TD_TIMESTAMP => {
+            let v = table.get_i64(col, row)?;
+            Some(crate::Table::format_timestamp(v))
         }
         ffi::TD_F64 => {
             let v = table.get_f64(col, row)?;

@@ -982,6 +982,41 @@ impl Table {
         format!("{y:04}-{m:02}-{d:02}")
     }
 
+    /// Format milliseconds since midnight as "HH:MM:SS.mmm" (kdb+ time).
+    pub fn format_time(ms: i32) -> String {
+        let ms = ms as u32;
+        let h = ms / 3_600_000;
+        let m = (ms % 3_600_000) / 60_000;
+        let s = (ms % 60_000) / 1_000;
+        let frac = ms % 1_000;
+        if frac == 0 {
+            format!("{h:02}:{m:02}:{s:02}")
+        } else {
+            format!("{h:02}:{m:02}:{s:02}.{frac:03}")
+        }
+    }
+
+    /// Format microseconds since epoch as "YYYY-MM-DD HH:MM:SS.ffffff".
+    pub fn format_timestamp(us: i64) -> String {
+        let (days, time_us) = if us >= 0 {
+            ((us / 86_400_000_000) as i32, (us % 86_400_000_000) as u64)
+        } else {
+            let d = (us - 86_399_999_999) / 86_400_000_000;
+            let t = us - d * 86_400_000_000;
+            (d as i32, t as u64)
+        };
+        let date = Self::format_date(days);
+        let h = time_us / 3_600_000_000;
+        let m = (time_us % 3_600_000_000) / 60_000_000;
+        let s = (time_us % 60_000_000) / 1_000_000;
+        let frac = time_us % 1_000_000;
+        if frac == 0 {
+            format!("{date}T{h:02}:{m:02}:{s:02}")
+        } else {
+            format!("{date}T{h:02}:{m:02}:{s:02}.{frac:06}")
+        }
+    }
+
     unsafe fn read_str_from_vec(vec: *mut ffi::td_t, t: i8, row: usize) -> Option<String> {
         let sym_id = match t {
             ffi::TD_SYM => {

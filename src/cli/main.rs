@@ -737,6 +737,14 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
             Some(d) => teide::Table::format_date(d as i32),
             None => "NULL".to_string(),
         },
+        10 => match table.get_i64(col, row) {
+            Some(t) => teide::Table::format_time(t as i32),
+            None => "NULL".to_string(),
+        },
+        11 => match table.get_i64(col, row) {
+            Some(ts) => teide::Table::format_timestamp(ts),
+            None => "NULL".to_string(),
+        },
         4..=6 => match table.get_i64(col, row) {
             Some(v) => format!("{v}"),
             None => "NULL".to_string(),
@@ -776,6 +784,14 @@ fn format_json_value(table: &teide::Table, col: usize, row: usize) -> String {
     match typ {
         9 => match table.get_i64(col, row) {
             Some(d) => format!("\"{}\"", teide::Table::format_date(d as i32)),
+            None => "null".to_string(),
+        },
+        10 => match table.get_i64(col, row) {
+            Some(t) => format!("\"{}\"", teide::Table::format_time(t as i32)),
+            None => "null".to_string(),
+        },
+        11 => match table.get_i64(col, row) {
+            Some(ts) => format!("\"{}\"", teide::Table::format_timestamp(ts)),
             None => "null".to_string(),
         },
         4..=6 => match table.get_i64(col, row) {
