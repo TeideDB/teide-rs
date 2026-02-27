@@ -167,6 +167,9 @@ fn sql_type_to_td(dt: &DataType) -> Result<i8, SqlError> {
         | DataType::Char(_)
         | DataType::CharVarying(_)
         | DataType::String(_) => Ok(ffi::TD_SYM),
+        DataType::Date => Ok(ffi::TD_DATE),
+        DataType::Time(_, _) => Ok(ffi::TD_TIME),
+        DataType::Timestamp(_, _) => Ok(ffi::TD_TIMESTAMP),
         _ => Err(SqlError::Plan(format!(
             "CREATE TABLE: unsupported column type {dt}"
         ))),
@@ -409,6 +412,32 @@ fn append_value_to_vec(
                 .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
             let sym_id = crate::sym_intern(&s)?;
             let next = unsafe { ffi::td_vec_append(vec, &sym_id as *const i64 as *const c_void) };
+            check_vec_append(next)
+        }
+
+        ffi::TD_DATE | ffi::TD_TIME => {
+            let val = eval_i64_literal(expr)
+                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+            let v32 = val as i32;
+            let next =
+                unsafe { ffi::td_vec_append(vec, &v32 as *const i32 as *const c_void) };
+            check_vec_append(next)
+        }
+
+        ffi::TD_TIMESTAMP => {
+            let val = eval_i64_literal(expr)
+                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+            let next =
+                unsafe { ffi::td_vec_append(vec, &val as *const i64 as *const c_void) };
+            check_vec_append(next)
+        }
+
+        ffi::TD_I16 => {
+            let val = eval_i64_literal(expr)
+                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+            let v16 = val as i16;
+            let next =
+                unsafe { ffi::td_vec_append(vec, &v16 as *const i16 as *const c_void) };
             check_vec_append(next)
         }
 

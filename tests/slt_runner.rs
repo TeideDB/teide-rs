@@ -109,6 +109,18 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
             }
             None => "NULL".to_string(),
         },
+        9 => match table.get_i64(col, row) {
+            Some(v) => teide::Table::format_date(v as i32),
+            None => "NULL".to_string(),
+        },
+        10 => match table.get_i64(col, row) {
+            Some(v) => teide::Table::format_time(v as i32),
+            None => "NULL".to_string(),
+        },
+        11 => match table.get_i64(col, row) {
+            Some(v) => teide::Table::format_timestamp(v),
+            None => "NULL".to_string(),
+        },
         15 | 20 => match table.get_str(col, row) {
             Some(s) => s.to_string(),
             None => "NULL".to_string(),
