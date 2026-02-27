@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Table Functions - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Table Functions</h1>
+    <p class="lead">Load external data sources directly in SQL queries.</p>
+
+    <h2>read_csv()</h2>
+    <p>Load a CSV file as a table:</p>
+    <pre><code class="language-sql">-- Direct query from CSV
+SELECT * FROM read_csv('data.csv');
+
+-- Create a persistent table
+CREATE TABLE t AS SELECT * FROM read_csv('data.csv');</code></pre>
+
+    <div class="note">
+      <p><strong>Note:</strong> CSV files are automatically type-inferred. Teide samples the file to determine column types.</p>
+    </div>
+
+    <p>The Rust API provides additional options:</p>
+    <pre><code>Context::read_csv_opts(path, delimiter, header, col_types)</code></pre>
+    <ul>
+      <li><code>delimiter</code>: Column separator character (default: <code>,</code>)</li>
+      <li><code>header</code>: Whether the first row is a header (default: <code>true</code>)</li>
+      <li><code>col_types</code>: Optional explicit type specification per column</li>
+    </ul>
+
+    <h2>read_splayed()</h2>
+    <p>Open a splayed (column-per-file) table with zero-copy memory mapping:</p>
+    <pre><code class="language-sql">SELECT * FROM read_splayed('/path/to/table');</code></pre>
+
+    <p>A splayed table directory contains:</p>
+    <ul>
+      <li>A <code>.d</code> metadata file</li>
+      <li>One file per column (binary columnar format)</li>
+      <li>An optional shared symbol file</li>
+    </ul>
+
+    <h2>read_parted()</h2>
+    <p>Open a date-partitioned table:</p>
+    <pre><code class="language-sql">SELECT * FROM read_parted('/path/to/db', 'table_name');</code></pre>
+
+    <p>Partitioned tables store data in date-based directories:</p>
+    <pre><code>db_root/
+  sym              -- shared symbol table
+  2024-01-15/
+    trades.d       -- metadata
+    price          -- column file
+    qty            -- column file
+  2024-01-16/
+    trades.d
+    price
+    qty</code></pre>
+
+    <div class="note">
+      <p><strong>Note:</strong> Results from <code>read_parted()</code> are cached internally to avoid re-reading on subsequent calls.</p>
+    </div>
+
+    <nav class="page-nav">
+      <a href="functions.html" class="prev">Scalar Functions</a>
+      <a href="../cli/" class="next">CLI / REPL</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

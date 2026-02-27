@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started - Teide Documentation</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<div class="sidebar-overlay"></div>
+<button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+<nav class="sidebar">
+  <a href="../" class="sidebar-logo">
+    <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+    <span>Teide</span>
+    <span class="docs-badge">Docs</span>
+  </a>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Overview</div>
+    <a href="../" class="sidebar-link">Home</a>
+    <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">SQL Reference</div>
+    <a href="../sql/" class="sidebar-link">Overview</a>
+    <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+    <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+    <a href="../sql/dml.html" class="sidebar-link">DML</a>
+    <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+    <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+    <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+    <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+    <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+    <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+    <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+    <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+    <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+    <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Tools</div>
+    <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+    <a href="../server/" class="sidebar-link">PgWire Server</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Developer</div>
+    <a href="../api/" class="sidebar-link">Rust API</a>
+    <a href="../architecture/" class="sidebar-link">Architecture</a>
+  </div>
+</nav>
+
+<main class="main">
+  <div class="content">
+
+    <div class="section-label">Getting Started</div>
+    <h1>Installation &amp; Quick Start</h1>
+    <p class="lead">Get Teide up and running in minutes. Build from source with Cargo and start querying data.</p>
+
+    <h2>Prerequisites</h2>
+    <ul>
+      <li><strong>Rust 1.70+</strong> (with cargo)</li>
+      <li>A <strong>C17-compatible C compiler</strong> (gcc, clang)</li>
+      <li><strong>Git</strong> (for fetching the C core during build)</li>
+    </ul>
+
+    <h2>Build from Source</h2>
+    <pre><code>git clone https://github.com/TeideDB/teide-rs.git
+cd teide-rs
+cargo build --release --all-features</code></pre>
+
+    <div class="note">
+      <p><strong>Note:</strong> The build process automatically fetches and compiles the Teide C17 core. No external libraries required.</p>
+    </div>
+
+    <h2>Feature Flags</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Enables</th>
+          <th>Dependencies</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>(default)</code></td>
+          <td>Core library + SQL engine</td>
+          <td><code>sqlparser</code></td>
+        </tr>
+        <tr>
+          <td><code>cli</code></td>
+          <td>Interactive REPL binary</td>
+          <td><code>reedline</code>, <code>clap</code>, <code>nu-ansi-term</code></td>
+        </tr>
+        <tr>
+          <td><code>server</code></td>
+          <td>PgWire server binary</td>
+          <td><code>tokio</code>, <code>pgwire</code>, <code>async-trait</code>, <code>futures</code>, <code>clap</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Build only what you need:</p>
+    <pre><code>cargo build --release --features cli      # REPL only
+cargo build --release --features server   # Server only
+cargo build --release --all-features      # Everything</code></pre>
+
+    <h2>Your First REPL Session</h2>
+    <pre><code># Start the interactive REPL
+cargo run --release --features cli
+
+# Or with a CSV file preloaded as table 't'
+cargo run --release --features cli -- data.csv</code></pre>
+
+    <pre><code class="language-sql">teide> CREATE TABLE t (id INTEGER, name VARCHAR, score REAL);
+teide> INSERT INTO t VALUES (1, 'alice', 95.0), (2, 'bob', 87.5), (3, 'carol', 92.0);
+teide> SELECT name, score FROM t ORDER BY score DESC;</code></pre>
+
+    <h2>Your First Server Session</h2>
+    <pre><code># Start the PgWire server
+cargo run --release --features server -- --port 5433
+
+# Connect with psql from another terminal
+psql -h 127.0.0.1 -p 5433</code></pre>
+
+    <pre><code># Preload CSV files at startup
+cargo run --release --features server -- \
+  --load trades=data/trades.csv \
+  --load users=data/users.csv</code></pre>
+
+    <h2>Using as a Library</h2>
+    <pre><code>use teide::{Context, Session, ExecResult};
+
+fn main() -> teide::Result&lt;()&gt; {
+    let mut session = Session::new()?;
+    session.execute("CREATE TABLE t AS SELECT * FROM read_csv('data.csv')")?;
+
+    match session.execute("SELECT * FROM t LIMIT 5")? {
+        ExecResult::Query(result) =&gt; {
+            println!("{} rows, {} cols", result.table.nrows(), result.columns.len());
+        }
+        ExecResult::Ddl(msg) =&gt; println!("{msg}"),
+    }
+    Ok(())
+}</code></pre>
+
+    <nav class="page-nav">
+      <a href="../" class="prev"><span class="nav-label">Previous</span><span class="nav-title">Home</span></a>
+      <a href="../sql/" class="next"><span class="nav-label">Next</span><span class="nav-title">SQL Overview</span></a>
+    </nav>
+
+  </div>
+</main>
+
+<script src="../app.js"></script>
+</body>
+</html>

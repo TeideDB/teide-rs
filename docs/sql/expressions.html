@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Expressions - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Expressions</h1>
+    <p class="lead">Arithmetic operations, CASE expressions, CAST, and boolean logic in SQL.</p>
+
+    <h2>Arithmetic</h2>
+    <pre><code class="language-sql">SELECT id, val * 2.0 AS doubled FROM t;
+SELECT id, val + 10.0 AS shifted FROM t;
+SELECT a, a % b AS remainder FROM modtest;</code></pre>
+    <p>Note: Integer-float arithmetic automatically promotes to float:</p>
+    <pre><code class="language-sql">SELECT i, i + r FROM types ORDER BY i;
+-- (1, 2.5), (2, 4.5), (3, 6.5)
+
+SELECT i, i * 1.5 FROM types ORDER BY i;
+-- (1, 1.5), (2, 3.0), (3, 4.5)</code></pre>
+
+    <h2>String Concatenation</h2>
+    <pre><code class="language-sql">SELECT s || '!' FROM strs;
+SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM users;</code></pre>
+
+    <h2>CASE Expressions</h2>
+    <p>Searched CASE:</p>
+    <pre><code class="language-sql">SELECT i, CASE
+  WHEN i = 1 THEN 'one'
+  WHEN i = 2 THEN 'two'
+  ELSE 'other'
+END FROM t ORDER BY i;
+-- (1, 'one'), (2, 'two'), (3, 'other')</code></pre>
+    <p>Simple CASE:</p>
+    <pre><code class="language-sql">SELECT i, CASE i
+  WHEN 1 THEN 'one'
+  WHEN 2 THEN 'two'
+  ELSE 'other'
+END FROM t ORDER BY i;</code></pre>
+
+    <h2>CAST</h2>
+    <pre><code class="language-sql">SELECT CAST(i AS REAL) FROM types WHERE i = 1;   -- 1.0
+SELECT i::REAL FROM types WHERE i = 1;            -- 1.0</code></pre>
+
+    <h2>COALESCE and NULLIF</h2>
+    <pre><code class="language-sql">SELECT COALESCE(val, 0) FROM t;
+SELECT NULLIF(val, 50.0) FROM t;</code></pre>
+
+    <nav class="page-nav">
+      <a href="filtering.html" class="prev">Filtering</a>
+      <a href="aggregation.html" class="next">Aggregation</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

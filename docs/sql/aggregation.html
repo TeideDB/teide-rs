@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aggregation - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Aggregation</h1>
+    <p class="lead">Group rows and compute aggregate values with GROUP BY, HAVING, and aggregate functions.</p>
+
+    <h2>Aggregate Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SUM(expr)</td><td>Sum of values</td></tr>
+        <tr><td>AVG(expr)</td><td>Average of values</td></tr>
+        <tr><td>MIN(expr)</td><td>Minimum value</td></tr>
+        <tr><td>MAX(expr)</td><td>Maximum value</td></tr>
+        <tr><td>COUNT(*)</td><td>Count all rows</td></tr>
+        <tr><td>COUNT(expr)</td><td>Count non-null values</td></tr>
+        <tr><td>COUNT(DISTINCT expr)</td><td>Count distinct values</td></tr>
+        <tr><td>STDDEV(expr)</td><td>Sample standard deviation</td></tr>
+        <tr><td>STDDEV_POP(expr)</td><td>Population standard deviation</td></tr>
+        <tr><td>VARIANCE(expr)</td><td>Sample variance</td></tr>
+        <tr><td>VAR_POP(expr)</td><td>Population variance</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Global Aggregation (No GROUP BY)</h2>
+    <pre><code class="language-sql">SELECT SUM(val) FROM agg;           -- 210.0
+SELECT AVG(val) FROM agg;           -- 35.0
+SELECT MIN(x) FROM agg;             -- 100
+SELECT MAX(x) FROM agg;             -- 600
+SELECT COUNT(*) FROM agg;           -- 6</code></pre>
+
+    <h2>GROUP BY</h2>
+    <pre><code class="language-sql">-- Single key
+SELECT grp, SUM(val) FROM agg GROUP BY grp;
+-- grp=1: 60.0, grp=2: 150.0
+
+-- Multiple keys
+SELECT cat, grp, SUM(val) FROM agg GROUP BY cat, grp;</code></pre>
+
+    <h2>Multiple Aggregates</h2>
+    <pre><code class="language-sql">SELECT grp, SUM(val), AVG(val), COUNT(*)
+FROM agg GROUP BY grp;
+-- grp=1: 60.0, 20.0, 3
+-- grp=2: 150.0, 50.0, 3</code></pre>
+
+    <h2>HAVING</h2>
+    <pre><code class="language-sql">SELECT grp, SUM(val) FROM agg
+GROUP BY grp HAVING SUM(val) > 100.0;
+-- Only grp=2: 150.0</code></pre>
+
+    <h2>Aggregate Expressions</h2>
+    <pre><code class="language-sql">SELECT SUM(val * 2.0) FROM agg;     -- 420.0
+SELECT AVG(val + 10.0) FROM agg;    -- 45.0</code></pre>
+
+    <h2>ORDER BY Aggregate</h2>
+    <pre><code class="language-sql">SELECT grp, SUM(val) AS total
+FROM agg GROUP BY grp ORDER BY total DESC;
+-- grp=2: 150.0, grp=1: 60.0</code></pre>
+
+    <h2>FILTER Clause</h2>
+    <pre><code class="language-sql">SELECT SUM(v1) FILTER (WHERE id1 = 'id001') FROM csv;        -- 10.0
+SELECT COUNT(v1) FILTER (WHERE id1 = 'id001') FROM csv;      -- 4.0
+SELECT id2, SUM(v1) FILTER (WHERE id4 = 1)
+FROM csv GROUP BY id2 ORDER BY id2;
+
+-- Multiple aggregates with different filters
+SELECT SUM(v1) * 1.0, SUM(v1) FILTER (WHERE id1 = 'id001') FROM csv;
+-- 110.0, 10.0</code></pre>
+
+    <h2>Statistical Functions</h2>
+    <pre><code class="language-sql">SELECT id1, STDDEV(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1;
+-- id001, 1.290994
+
+SELECT STDDEV_POP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1;
+-- 1.118034
+
+SELECT VARIANCE(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1;
+-- 1.666667
+
+SELECT VAR_POP(v1) FROM csv GROUP BY id1 ORDER BY id1 LIMIT 1;
+-- 1.25</code></pre>
+
+    <nav class="page-nav">
+      <a href="expressions.html" class="prev">Expressions</a>
+      <a href="joins.html" class="next">Joins</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

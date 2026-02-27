@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Joins - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Joins</h1>
+    <p class="lead">Combine rows from multiple tables using INNER, LEFT, FULL OUTER, and CROSS joins.</p>
+
+    <h2>INNER JOIN</h2>
+    <pre><code class="language-sql">SELECT left_t.id, lval, rval
+FROM left_t INNER JOIN right_t ON left_t.id = right_t.id;
+-- Returns only matching rows
+-- (2, 200, 20), (3, 300, 30)</code></pre>
+
+    <h2>LEFT JOIN</h2>
+    <pre><code class="language-sql">SELECT left_t.id, lval, rval
+FROM left_t LEFT JOIN right_t ON left_t.id = right_t.id;
+-- Returns all left rows, NULLs for non-matching right
+-- 4 rows total</code></pre>
+
+    <h2>CROSS JOIN</h2>
+    <pre><code class="language-sql">SELECT COUNT(*) FROM left_t CROSS JOIN right_t;
+-- 4 * 3 = 12 rows</code></pre>
+
+    <h2>Join with WHERE</h2>
+    <pre><code class="language-sql">SELECT left_t.id, lval, rval
+FROM left_t INNER JOIN right_t ON left_t.id = right_t.id
+WHERE left_t.id > 2;
+-- (3, 300, 30)</code></pre>
+
+    <h2>Join with Aggregation</h2>
+    <pre><code class="language-sql">SELECT left_t.id, SUM(rval)
+FROM left_t INNER JOIN right_t ON left_t.id = right_t.id
+GROUP BY left_t.id;
+-- (2, 20), (3, 30)</code></pre>
+
+    <h2>Multi-Table Joins</h2>
+    <pre><code class="language-sql">SELECT left_t.id, lval, rval, t3val
+FROM left_t
+INNER JOIN right_t ON left_t.id = right_t.id
+INNER JOIN t3 ON left_t.id = t3.id;
+-- (2, 200, 20, 2000), (3, 300, 30, 3000)</code></pre>
+
+    <h2>Join with String Columns</h2>
+    <pre><code class="language-sql">SELECT str_l.id, name, city
+FROM str_l INNER JOIN str_r ON str_l.id = str_r.id;
+-- (1, 'alice', 'london'), (2, 'bob', 'paris')</code></pre>
+
+    <nav class="page-nav">
+      <a href="aggregation.html" class="prev">Aggregation</a>
+      <a href="window-functions.html" class="next">Window Functions</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

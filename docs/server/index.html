@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PgWire Server - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">TOOLS</div>
+    <h1>PgWire Server</h1>
+    <p class="lead">Connect to Teide using any PostgreSQL-compatible client via the wire protocol server.</p>
+
+    <h2>Starting the Server</h2>
+    <pre><code>cargo run --release --features server
+
+# Or use the built binary
+teide-server</code></pre>
+    <p>Default: listens on <code>127.0.0.1:5433</code>.</p>
+
+    <h2>Server Arguments</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Argument</th>
+          <th>Default</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>--host HOST</code></td>
+          <td>127.0.0.1</td>
+          <td>Listen address</td>
+        </tr>
+        <tr>
+          <td><code>--port PORT</code></td>
+          <td>5433</td>
+          <td>Listen port</td>
+        </tr>
+        <tr>
+          <td><code>--load NAME=PATH</code></td>
+          <td></td>
+          <td>Load CSV as named table (repeatable)</td>
+        </tr>
+        <tr>
+          <td><code>--init PATH</code></td>
+          <td></td>
+          <td>Execute SQL init script at startup</td>
+        </tr>
+        <tr>
+          <td><code>--verbose</code></td>
+          <td>false</td>
+          <td>Enable verbose logging</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Loading Data at Startup</h2>
+    <pre><code>teide-server \
+  --load trades=data/trades.csv \
+  --load users=data/users.csv \
+  --init setup.sql</code></pre>
+
+    <h2>Connecting with psql</h2>
+    <pre><code>psql -h 127.0.0.1 -p 5433</code></pre>
+    <p>Then run SQL queries as normal:</p>
+    <pre><code class="language-sql">SELECT * FROM trades ORDER BY price DESC LIMIT 10;</code></pre>
+
+    <h2>Connecting with DBeaver</h2>
+    <ol>
+      <li>Create a new PostgreSQL connection</li>
+      <li>Host: <code>127.0.0.1</code>, Port: <code>5433</code></li>
+      <li>No username/password required</li>
+      <li>Test connection and browse tables</li>
+    </ol>
+
+    <h2>JDBC Connection</h2>
+    <pre><code>jdbc:postgresql://127.0.0.1:5433/</code></pre>
+
+    <h2>Architecture</h2>
+    <ul>
+      <li>Each connection is handled as a separate async task (tokio)</li>
+      <li>Supports multiple simultaneous clients</li>
+      <li>Graceful shutdown on Ctrl+C</li>
+    </ul>
+
+    <nav class="page-nav">
+      <a href="../cli/" class="prev">CLI / REPL</a>
+      <a href="../api/" class="next">Rust API</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

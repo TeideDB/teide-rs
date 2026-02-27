@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">DEVELOPER</div>
+    <h1>Architecture</h1>
+    <p class="lead">How Teide is structured: the C17 core, SQL pipeline, execution model, and memory system.</p>
+
+    <h2>Overview</h2>
+    <p>Teide is a layered system:</p>
+    <ul>
+      <li>A zero-dependency C17 columnar engine at the core</li>
+      <li>Rust FFI bindings providing safe RAII wrappers</li>
+      <li>A SQL frontend (parser, planner, executor)</li>
+      <li>REPL and PgWire server as frontend binaries</li>
+    </ul>
+
+    <h2>Project Structure</h2>
+    <pre><code>teide-rs/
+  src/
+    lib.rs            -- Library root
+    ffi.rs            -- Raw C FFI bindings
+    engine.rs         -- Safe RAII wrappers (Context, Table, Graph, Column)
+    sql/
+      mod.rs          -- Session, ExecResult
+      planner.rs      -- Query planning (127KB)
+      expr.rs         -- Expression planning (59KB)
+    cli/              -- REPL binary
+    server/           -- PgWire server binary
+  build.rs            -- C core vendoring &amp; compilation</code></pre>
+
+    <h2>SQL Pipeline</h2>
+    <pre><code>SQL text
+  |
+  v
++---------+     +----------+     +----------+     +---------+
+|  Parse  | --> |   Plan   | --> | Optimize | --> | Execute |
+|(sqlparser)    |(planner.rs)    |(C engine) |     |(C engine)|
++---------+     +----------+     +----------+     +---------+</code></pre>
+
+    <ol>
+      <li><strong>Parse</strong>: SQL text is parsed using the <code>sqlparser</code> crate with DuckDB dialect</li>
+      <li><strong>Plan</strong>: The Rust planner walks the AST and builds a Teide operation graph (DAG)</li>
+      <li><strong>Optimize</strong>: The C engine fuses element-wise operations and optimizes the DAG</li>
+      <li><strong>Execute</strong>: The C engine processes data in parallel morsels</li>
+    </ol>
+
+    <h2>C17 Core</h2>
+    <p>The core engine is written in C17 with zero external dependencies:</p>
+    <ul>
+      <li>Self-contained buddy allocator with slab caching</li>
+      <li>Thread pool with morsel-based task distribution</li>
+      <li>Columnar data structures with type-tagged 32-byte block headers</li>
+      <li>Copy-on-write semantics for safe concurrent reads</li>
+    </ul>
+
+    <h2>Operation Graph</h2>
+    <p>Computations are expressed as a directed acyclic graph (DAG) of operations:</p>
+    <ul>
+      <li><strong>Source ops</strong>: Scan columns, constants</li>
+      <li><strong>Element-wise ops</strong>: Arithmetic, comparison, string ops (fuseable into single passes)</li>
+      <li><strong>Reductions</strong>: SUM, AVG, MIN, MAX, COUNT (pipeline breakers)</li>
+      <li><strong>Structural ops</strong>: Filter, sort, group, join, window (pipeline breakers)</li>
+    </ul>
+    <p>The optimizer fuses adjacent element-wise operations to minimize memory traffic and maximize cache utilization.</p>
+
+    <h2>Morsel-Based Execution</h2>
+    <p>Data is processed in morsels of 1024 elements:</p>
+    <ul>
+      <li>Below 65,536 rows: single-threaded execution</li>
+      <li>Above 65,536 rows: automatic parallelization across worker threads</li>
+      <li>8 morsels dispatched concurrently per thread</li>
+      <li>Work-stealing between threads for load balancing</li>
+    </ul>
+    <p>This approach provides excellent cache locality (morsels fit in L1/L2 cache) while scaling to many cores.</p>
+
+    <h2>Memory Model</h2>
+    <ul>
+      <li><strong>Buddy allocator</strong>: Orders 5-30 (32 bytes to 1 GB blocks)</li>
+      <li><strong>Slab cache</strong>: 64 size classes for fast small allocations</li>
+      <li><strong>Thread-local heaps</strong>: Each worker thread has its own heap (reduces contention)</li>
+      <li><strong>Reference counting</strong>: Atomic ref counts enable safe sharing and copy-on-write</li>
+    </ul>
+    <p>The <code>.mem</code> REPL command shows detailed allocation statistics including arena usage, direct allocations, slab hit rates, and peak memory.</p>
+
+    <h2>Storage Formats</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Format</th>
+          <th>Access</th>
+          <th>Use Case</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CSV</td>
+          <td>Full copy</td>
+          <td>Import/export, ad-hoc analysis</td>
+        </tr>
+        <tr>
+          <td>Splayed</td>
+          <td>Zero-copy mmap</td>
+          <td>Single tables, fast column access</td>
+        </tr>
+        <tr>
+          <td>Partitioned</td>
+          <td>Zero-copy mmap</td>
+          <td>Time-series data with date partitions</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Build Process</h2>
+    <p>The build script (<code>build.rs</code>) handles C core integration:</p>
+    <ol>
+      <li>Checks for local <code>vendor/teide/</code> directory</li>
+      <li>Falls back to <code>git clone --depth=1</code> for crates.io installs</li>
+      <li>Compiles all C source with C17 standard, O3 optimization</li>
+      <li>Links with libm and pthread on Linux/macOS</li>
+      <li>Embeds git commit hash for version display</li>
+    </ol>
+
+    <nav class="page-nav">
+      <a href="../api/" class="prev">Rust API</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

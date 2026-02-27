@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teide Documentation</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<div class="sidebar-overlay"></div>
+<button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+<nav class="sidebar">
+  <a href="./" class="sidebar-logo">
+    <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+    <span>Teide</span>
+    <span class="docs-badge">Docs</span>
+  </a>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Overview</div>
+    <a href="./" class="sidebar-link">Home</a>
+    <a href="./getting-started/" class="sidebar-link">Getting Started</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">SQL Reference</div>
+    <a href="./sql/" class="sidebar-link">Overview</a>
+    <a href="./sql/data-types.html" class="sidebar-link">Data Types</a>
+    <a href="./sql/ddl.html" class="sidebar-link">DDL</a>
+    <a href="./sql/dml.html" class="sidebar-link">DML</a>
+    <a href="./sql/queries.html" class="sidebar-link">Queries</a>
+    <a href="./sql/filtering.html" class="sidebar-link">Filtering</a>
+    <a href="./sql/expressions.html" class="sidebar-link">Expressions</a>
+    <a href="./sql/aggregation.html" class="sidebar-link">Aggregation</a>
+    <a href="./sql/joins.html" class="sidebar-link">Joins</a>
+    <a href="./sql/window-functions.html" class="sidebar-link">Window Functions</a>
+    <a href="./sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+    <a href="./sql/set-operations.html" class="sidebar-link">Set Operations</a>
+    <a href="./sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+    <a href="./sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    <a href="./sql/table-functions.html" class="sidebar-link">Table Functions</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Tools</div>
+    <a href="./cli/" class="sidebar-link">CLI / REPL</a>
+    <a href="./server/" class="sidebar-link">PgWire Server</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-section-label">Developer</div>
+    <a href="./api/" class="sidebar-link">Rust API</a>
+    <a href="./architecture/" class="sidebar-link">Architecture</a>
+  </div>
+</nav>
+
+<main class="main">
+  <div class="content">
+
+    <div class="hero">
+      <div class="section-label">Teide Documentation</div>
+      <h1>Fast columnar SQL engine</h1>
+      <p class="lead">Teide is a high-performance columnar computation engine with a zero-dependency C17 core, SQL interface, interactive REPL, and PostgreSQL wire protocol server.</p>
+      <div class="hero-actions">
+        <a href="./getting-started/" class="btn btn-primary">Get Started</a>
+        <a href="https://github.com/TeideDB/teide-rs" class="btn btn-outline">GitHub</a>
+      </div>
+    </div>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-num">01</div>
+        <h3>SQL Engine</h3>
+        <p>Full SQL query support with aggregations, joins, window functions, CTEs, and set operations.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">02</div>
+        <h3>Interactive REPL</h3>
+        <p>Syntax highlighting, tab completion, and multiple output formats (table, CSV, JSON).</p>
+      </div>
+      <div class="card">
+        <div class="card-num">03</div>
+        <h3>PgWire Server</h3>
+        <p>Connect with psql, DBeaver, or any PostgreSQL-compatible client.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">04</div>
+        <h3>Rust API</h3>
+        <p>Embed Teide in your application with Context, Table, Graph, and Column types.</p>
+      </div>
+    </div>
+
+    <h2>Quick Example</h2>
+    <pre><code class="language-sql">-- Load CSV and query instantly
+CREATE TABLE trades AS SELECT * FROM read_csv('trades.csv');
+
+SELECT symbol, SUM(qty) AS total_qty, AVG(price) AS avg_price
+FROM trades
+GROUP BY symbol
+ORDER BY total_qty DESC
+LIMIT 5;</code></pre>
+
+    <nav class="page-nav">
+      <a href="./getting-started/" class="next"><span class="nav-label">Next</span><span class="nav-title">Getting Started</span></a>
+    </nav>
+
+  </div>
+</main>
+
+<script defer src="./app.js"></script>
+</body>
+</html>

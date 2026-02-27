@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set Operations - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Set Operations</h1>
+    <p class="lead">Combine result sets from multiple queries with UNION, INTERSECT, and EXCEPT.</p>
+
+    <h2>UNION ALL</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+UNION ALL
+SELECT id, val FROM s2;
+-- Keeps all rows including duplicates: 6 rows</code></pre>
+
+    <h2>UNION</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+UNION
+SELECT id, val FROM s2;
+-- Removes duplicates: 4 rows (1,a), (2,b), (3,c), (4,d)</code></pre>
+
+    <h2>INTERSECT</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+INTERSECT
+SELECT id, val FROM s2;
+-- Only matching rows: (2,b), (3,c)</code></pre>
+
+    <h2>EXCEPT</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+EXCEPT
+SELECT id, val FROM s2;
+-- In s1 but not s2: (1,a)
+
+SELECT id, val FROM s2
+EXCEPT
+SELECT id, val FROM s1;
+-- In s2 but not s1: (4,d)</code></pre>
+
+    <h2>With ORDER BY and LIMIT</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+UNION ALL
+SELECT id, val FROM s2
+ORDER BY id
+LIMIT 3;
+-- (1,a), (2,b), (2,b)</code></pre>
+
+    <h2>Chained Set Operations</h2>
+    <pre><code class="language-sql">SELECT id, val FROM s1
+UNION ALL SELECT id, val FROM s2
+UNION ALL SELECT id, val FROM s3;
+-- All rows from all three tables</code></pre>
+
+    <nav class="page-nav">
+      <a href="sorting.html" class="prev">Sorting &amp; Limits</a>
+      <a href="subqueries.html" class="next">Subqueries &amp; CTEs</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

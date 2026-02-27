@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Window Functions - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Window Functions</h1>
+    <p class="lead">Compute values across related rows without collapsing the result set, using OVER with PARTITION BY and ORDER BY.</p>
+
+    <h2>Syntax</h2>
+    <pre><code class="language-sql">function_name(args) OVER (
+  PARTITION BY col1, col2
+  ORDER BY col3 ASC|DESC
+  frame_clause
+)</code></pre>
+
+    <h2>Ranking Functions</h2>
+
+    <h3>ROW_NUMBER</h3>
+    <pre><code class="language-sql">SELECT grp, val, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY val) AS rn
+FROM w ORDER BY grp, val;
+-- a, 10, 1 | a, 20, 2 | a, 30, 3 | b, 40, 1 | b, 50, 2 | b, 60, 3</code></pre>
+
+    <h3>RANK</h3>
+    <pre><code class="language-sql">SELECT grp, val, RANK() OVER (PARTITION BY grp ORDER BY val) AS rnk
+FROM wr ORDER BY grp, val;
+-- a, 10, 1 | a, 10, 1 | a, 20, 3  (gaps at ties)</code></pre>
+
+    <h3>DENSE_RANK</h3>
+    <pre><code class="language-sql">SELECT grp, val, DENSE_RANK() OVER (PARTITION BY grp ORDER BY val) AS drnk
+FROM wr ORDER BY grp, val;
+-- a, 10, 1 | a, 10, 1 | a, 20, 2  (no gaps)</code></pre>
+
+    <h3>NTILE</h3>
+    <pre><code class="language-sql">SELECT grp, val, NTILE(2) OVER (PARTITION BY grp ORDER BY val) AS tile
+FROM w ORDER BY grp, val;
+-- a, 10, 1 | a, 20, 1 | a, 30, 2 | b, 40, 1 | b, 50, 1 | b, 60, 2</code></pre>
+
+    <h2>Aggregate Window Functions</h2>
+    <pre><code class="language-sql">-- Running SUM
+SELECT grp, val, SUM(val) OVER (PARTITION BY grp ORDER BY val) AS running_sum
+FROM w ORDER BY grp, val;
+-- a,10,10 | a,20,30 | a,30,60 | b,40,40 | b,50,90 | b,60,150
+
+-- Partition AVG (no ORDER BY = full partition)
+SELECT grp, val, AVG(val) OVER (PARTITION BY grp) AS avg_val
+FROM w ORDER BY grp, val;
+-- a: 20.0 for all | b: 50.0 for all
+
+-- MIN / MAX over partition
+SELECT grp, val, MIN(val) OVER (PARTITION BY grp) AS min_val
+FROM w ORDER BY grp, val;
+
+-- COUNT over partition
+SELECT grp, val, COUNT(val) OVER (PARTITION BY grp) AS cnt
+FROM w ORDER BY grp, val;
+-- All 3 for both groups</code></pre>
+
+    <h2>Value Functions</h2>
+
+    <h3>LAG / LEAD</h3>
+    <pre><code class="language-sql">SELECT grp, val, LAG(val, 1) OVER (PARTITION BY grp ORDER BY val) AS prev_val
+FROM w ORDER BY grp, val;
+-- a,10,0 | a,20,10 | a,30,20 | b,40,0 | b,50,40 | b,60,50
+
+SELECT grp, val, LEAD(val, 1) OVER (PARTITION BY grp ORDER BY val) AS next_val
+FROM w ORDER BY grp, val;</code></pre>
+
+    <h3>FIRST_VALUE / LAST_VALUE</h3>
+    <pre><code class="language-sql">SELECT grp, val, FIRST_VALUE(val) OVER (PARTITION BY grp ORDER BY val) AS fv
+FROM w ORDER BY grp, val;
+-- a: 10 for all | b: 40 for all
+
+SELECT grp, val, LAST_VALUE(val) OVER (
+  PARTITION BY grp ORDER BY val
+  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+) AS lv FROM w ORDER BY grp, val;
+-- a: 30 for all | b: 60 for all</code></pre>
+
+    <h2>Multiple Window Functions</h2>
+    <pre><code class="language-sql">SELECT grp, val,
+  ROW_NUMBER() OVER (PARTITION BY grp ORDER BY val) AS rn,
+  RANK() OVER (PARTITION BY grp ORDER BY val) AS rnk
+FROM wr ORDER BY grp, val;</code></pre>
+
+    <h2>Multi-Key Partition</h2>
+    <pre><code class="language-sql">SELECT g1, g2, v, ROW_NUMBER() OVER (PARTITION BY g1, g2 ORDER BY v) AS rn
+FROM wm ORDER BY g1, g2, v;</code></pre>
+
+    <nav class="page-nav">
+      <a href="joins.html" class="prev">Joins</a>
+      <a href="sorting.html" class="next">Sorting &amp; Limits</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

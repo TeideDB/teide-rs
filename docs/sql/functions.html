@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scalar Functions - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Scalar Functions</h1>
+    <p class="lead">Math and string functions available in expressions.</p>
+
+    <h2>Math Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th><th>Example</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ABS(x)</td><td>Absolute value</td><td>ABS(-1.0) &rarr; 1.0</td></tr>
+        <tr><td>CEIL(x)</td><td>Round up</td><td>CEIL(1.2) &rarr; 2.0</td></tr>
+        <tr><td>FLOOR(x)</td><td>Round down</td><td>FLOOR(2.7) &rarr; 2.0</td></tr>
+        <tr><td>SQRT(x)</td><td>Square root</td><td>SQRT(9.0) &rarr; 3.0</td></tr>
+        <tr><td>ROUND(x)</td><td>Round to nearest integer</td><td>ROUND(2.7) &rarr; 3.0</td></tr>
+        <tr><td>LN(x)</td><td>Natural logarithm</td><td>LN(1.0) &rarr; 0.0</td></tr>
+        <tr><td>EXP(x)</td><td>Exponential</td><td>EXP(0.0) &rarr; 1.0</td></tr>
+        <tr><td>LEAST(a,b,...)</td><td>Minimum of arguments</td><td>LEAST(3, 1, 2) &rarr; 1</td></tr>
+        <tr><td>GREATEST(a,b,...)</td><td>Maximum of arguments</td><td>GREATEST(3, 1, 2) &rarr; 3</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code class="language-sql">SELECT ABS(x) FROM nums;
+SELECT SQRT(x) FROM nums WHERE x > 0.0;
+SELECT ROUND(LN(v), 6) FROM consts WHERE v = 1.0;   -- 0.0
+SELECT ROUND(EXP(v), 6) FROM consts WHERE v = 0.0;  -- 1.0</code></pre>
+
+    <h2>String Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th><th>Example</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>UPPER(s)</td><td>To uppercase</td><td>UPPER('abc') &rarr; 'ABC'</td></tr>
+        <tr><td>LOWER(s)</td><td>To lowercase</td><td>LOWER('ABC') &rarr; 'abc'</td></tr>
+        <tr><td>LENGTH(s)</td><td>String length</td><td>LENGTH('hello') &rarr; 5</td></tr>
+        <tr><td>TRIM(s)</td><td>Remove whitespace</td><td>TRIM('  hi  ') &rarr; 'hi'</td></tr>
+        <tr><td>SUBSTR(s,start,len)</td><td>Substring</td><td>SUBSTR('Hello World',1,5) &rarr; 'Hello'</td></tr>
+        <tr><td>REPLACE(s,from,to)</td><td>Replace substring</td><td>REPLACE('Hello World','World','Teide') &rarr; 'Hello Teide'</td></tr>
+        <tr><td>CONCAT(a,b,...)</td><td>Concatenate</td><td>CONCAT('abc','!') &rarr; 'abc!'</td></tr>
+      </tbody>
+    </table>
+
+    <p>Aliases: LEN, CHAR_LENGTH, CHARACTER_LENGTH (for LENGTH); BTRIM (for TRIM); SUBSTRING (for SUBSTR).</p>
+
+    <pre><code class="language-sql">SELECT UPPER(s) FROM strs WHERE s = 'abc';           -- ABC
+SELECT LOWER(s) FROM strs WHERE s = 'UPPER lower';   -- upper lower
+SELECT LENGTH(s) FROM strs WHERE s = 'Hello World';  -- 11
+SELECT TRIM(s) FROM strs WHERE s = '  spaces  ';     -- spaces
+SELECT SUBSTR(s, 7, 5) FROM strs WHERE s = 'Hello World'; -- World
+SELECT REPLACE(s, 'World', 'Teide') FROM strs WHERE s = 'Hello World'; -- Hello Teide
+SELECT s || '!' FROM strs WHERE s = 'abc';           -- abc!</code></pre>
+
+    <h2>Date/Time Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CURRENT_DATE</td><td>Current date</td></tr>
+        <tr><td>CURRENT_TIMESTAMP / NOW()</td><td>Current timestamp</td></tr>
+        <tr><td>EXTRACT(field FROM expr)</td><td>Extract date part</td></tr>
+        <tr><td>DATE_TRUNC(unit, expr)</td><td>Truncate timestamp</td></tr>
+        <tr><td>DATE_DIFF(unit, start, end)</td><td>Difference between timestamps</td></tr>
+      </tbody>
+    </table>
+
+    <p>EXTRACT fields: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH</p>
+    <p>DATE_TRUNC units: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND</p>
+
+    <nav class="page-nav">
+      <a href="subqueries.html" class="prev">Subqueries &amp; CTEs</a>
+      <a href="table-functions.html" class="next">Table Functions</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>
