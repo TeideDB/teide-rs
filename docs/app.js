@@ -40,7 +40,7 @@
       var i = 0;
       function protect(re, cls) {
         text = text.replace(re, function (m) {
-          var id = '\x00' + i + '\x00';
+          var id = '\x01\x02\x03' + String.fromCharCode(0xE000 + i) + '\x03\x02\x01';
           tokens.push({ id: id, html: '<span class="' + cls + '">' + esc(m) + '</span>' });
           i++;
           return id;
