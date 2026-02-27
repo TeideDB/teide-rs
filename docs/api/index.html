@@ -11,7 +11,7 @@
   <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
   <nav class="sidebar">
     <a href="../" class="sidebar-logo">
-      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <img src="../assets/teide-logo.svg" alt="Teide">
       <span>Teide</span>
       <span class="docs-badge">Docs</span>
     </a>
@@ -19,6 +19,7 @@
       <div class="sidebar-section-label">Overview</div>
       <a href="../" class="sidebar-link">Home</a>
       <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    <a href="../tutorial/" class="sidebar-link">Tutorial</a>
     </div>
     <div class="sidebar-section">
       <div class="sidebar-section-label">SQL Reference</div>
@@ -56,7 +57,7 @@
     <p class="lead">Embed Teide in your Rust application using the Context, Session, Table, Graph, and Column types.</p>
 
     <h2>Quick Start</h2>
-    <pre><code>use teide::sql::{Session, ExecResult};
+    <pre><code class="language-rust">use teide::sql::{Session, ExecResult};
 
 fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     let mut session = Session::new()?;
@@ -74,7 +75,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
 
     <h2>Context</h2>
     <p>The engine runtime. Manages heap, symbol table, and thread pool.</p>
-    <pre><code>use teide::Context;
+    <pre><code class="language-rust">use teide::Context;
 
 let ctx = Context::new()?;
 let table = ctx.read_csv("data.csv")?;
@@ -88,7 +89,7 @@ let table = ctx.read_parted("/path/to/db", "trades")?;</code></pre>
 
     <h2>Table</h2>
     <p>A columnar table with ref-counted storage.</p>
-    <pre><code>let table = ctx.read_csv("data.csv")?;
+    <pre><code class="language-rust">let table = ctx.read_csv("data.csv")?;
 
 // Metadata
 println!("{} rows, {} cols", table.nrows(), table.ncols());
@@ -107,7 +108,7 @@ table.write_csv("output.csv")?;</code></pre>
 
     <h2>Graph</h2>
     <p>A lazy operation DAG bound to a table. Operations build a computation graph that is optimized and executed on demand.</p>
-    <pre><code>let ctx = Context::new()?;
+    <pre><code class="language-rust">let ctx = Context::new()?;
 let table = ctx.read_csv("data.csv")?;
 let mut g = ctx.graph(&amp;table)?;
 
@@ -120,7 +121,7 @@ let filtered = g.filter(tbl, pred)?;
 let result = g.execute(filtered)?;</code></pre>
 
     <p>Aggregation:</p>
-    <pre><code>let id1 = g.scan("id1")?;
+    <pre><code class="language-rust">let id1 = g.scan("id1")?;
 let v1 = g.scan("v1")?;
 let grouped = g.group_by(
     &amp;[id1],
@@ -143,7 +144,7 @@ let result = g.execute(grouped)?;</code></pre>
 
     <h2>Session (SQL API)</h2>
     <p>A stateful SQL session that maintains a table registry.</p>
-    <pre><code>use teide::sql::{Session, ExecResult};
+    <pre><code class="language-rust">use teide::sql::{Session, ExecResult};
 
 let mut session = Session::new()?;
 
@@ -171,7 +172,7 @@ for name in session.table_names() {
 }</code></pre>
 
     <h2>Error Handling</h2>
-    <pre><code>use teide::Error;
+    <pre><code class="language-rust">use teide::Error;
 
 match result {
     Err(Error::Oom) =&gt; eprintln!("Out of memory"),

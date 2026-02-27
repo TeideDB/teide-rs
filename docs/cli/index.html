@@ -11,7 +11,7 @@
   <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
   <nav class="sidebar">
     <a href="../" class="sidebar-logo">
-      <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+      <img src="../assets/teide-logo.svg" alt="Teide">
       <span>Teide</span>
       <span class="docs-badge">Docs</span>
     </a>
@@ -19,6 +19,7 @@
       <div class="sidebar-section-label">Overview</div>
       <a href="../" class="sidebar-link">Home</a>
       <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    <a href="../tutorial/" class="sidebar-link">Tutorial</a>
     </div>
     <div class="sidebar-section">
       <div class="sidebar-section-label">SQL Reference</div>
@@ -58,25 +59,25 @@
     <h2>Launch Modes</h2>
 
     <h3>Interactive REPL</h3>
-    <pre><code># Start empty REPL
+    <pre><code class="language-bash"># Start empty REPL
 cargo run --release --features cli
 
 # Or use the built binary
 teide</code></pre>
 
     <h3>CSV Quick-Load</h3>
-    <pre><code># Load CSV as table 't' and enter REPL
+    <pre><code class="language-bash"># Load CSV as table 't' and enter REPL
 teide data.csv</code></pre>
 
     <h3>Execute SQL File</h3>
-    <pre><code>teide -f query.sql
+    <pre><code class="language-bash">teide -f query.sql
 teide -f query.sql --timer    # Show execution times</code></pre>
 
     <h3>Single Query</h3>
-    <pre><code>teide "SELECT 1 + 1"</code></pre>
+    <pre><code class="language-bash">teide "SELECT 1 + 1"</code></pre>
 
     <h3>Init Script</h3>
-    <pre><code># Run setup.sql before entering REPL
+    <pre><code class="language-bash"># Run setup.sql before entering REPL
 teide -i setup.sql
 teide data.csv -i setup.sql</code></pre>
 

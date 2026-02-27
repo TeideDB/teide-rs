@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tutorial - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">TUTORIAL</div>
+    <h1>Learn Teide in 10 Minutes</h1>
+    <p class="lead">A hands-on walkthrough that takes you from zero to writing real queries. You'll create tables, filter data, aggregate results, join tables, and use window functions.</p>
+
+    <div class="note">
+      <p><strong>Prerequisites:</strong> Make sure you've built Teide first. See <a href="../getting-started/">Getting Started</a> for installation instructions.</p>
+    </div>
+
+    <!-- ===== STEP 1 ===== -->
+    <h2>Step 1: Launch the REPL</h2>
+    <p>Start the interactive shell:</p>
+    <pre><code class="language-bash">cargo run --release --features cli</code></pre>
+    <p>You'll see the <code>teide&gt;</code> prompt. Every SQL statement must end with a semicolon. Let's dive in.</p>
+
+    <!-- ===== STEP 2 ===== -->
+    <h2>Step 2: Create Your First Table</h2>
+    <p>Let's build a small employees dataset directly in the REPL:</p>
+    <pre><code class="language-sql">CREATE TABLE employees (id INTEGER, name VARCHAR, dept VARCHAR, salary REAL);
+
+INSERT INTO employees VALUES
+  (1, 'Alice',  'engineering', 95000.0),
+  (2, 'Bob',    'engineering', 87000.0),
+  (3, 'Carol',  'marketing',   72000.0),
+  (4, 'Dave',   'marketing',   68000.0),
+  (5, 'Eve',    'engineering', 92000.0),
+  (6, 'Frank',  'sales',       78000.0),
+  (7, 'Grace',  'sales',       81000.0),
+  (8, 'Heidi',  'marketing',   74000.0);</code></pre>
+    <p>Check it worked:</p>
+    <pre><code class="language-sql">SELECT COUNT(*) FROM employees;</code></pre>
+    <div class="output">8</div>
+
+    <!-- ===== STEP 3 ===== -->
+    <h2>Step 3: Query the Data</h2>
+    <p>Select all rows:</p>
+    <pre><code class="language-sql">SELECT * FROM employees ORDER BY id;</code></pre>
+    <p>Pick specific columns:</p>
+    <pre><code class="language-sql">SELECT name, salary FROM employees ORDER BY salary DESC;</code></pre>
+    <div class="output">Alice    95000.0
+Eve      92000.0
+Bob      87000.0
+Grace    81000.0
+Frank    78000.0
+Heidi    74000.0
+Carol    72000.0
+Dave     68000.0</div>
+
+    <p>Use <strong>aliases</strong> to rename columns in the output:</p>
+    <pre><code class="language-sql">SELECT name, salary / 12.0 AS monthly FROM employees ORDER BY monthly DESC LIMIT 3;</code></pre>
+    <div class="output">Alice    7916.666667
+Eve      7666.666667
+Bob      7250.0</div>
+
+    <!-- ===== STEP 4 ===== -->
+    <h2>Step 4: Filter with WHERE</h2>
+    <p>Find engineers earning over 90k:</p>
+    <pre><code class="language-sql">SELECT name, salary FROM employees
+WHERE dept = 'engineering' AND salary > 90000.0
+ORDER BY salary DESC;</code></pre>
+    <div class="output">Alice    95000.0
+Eve      92000.0</div>
+
+    <p>Use <strong>BETWEEN</strong>, <strong>IN</strong>, and <strong>LIKE</strong>:</p>
+    <pre><code class="language-sql">-- Salary range
+SELECT name, salary FROM employees WHERE salary BETWEEN 75000.0 AND 90000.0 ORDER BY salary;
+
+-- Multiple departments
+SELECT name, dept FROM employees WHERE dept IN ('engineering', 'sales') ORDER BY name;
+
+-- Pattern matching
+SELECT name FROM employees WHERE name LIKE '%a%' ORDER BY name;</code></pre>
+
+    <!-- ===== STEP 5 ===== -->
+    <h2>Step 5: Aggregate with GROUP BY</h2>
+    <p>Get summary statistics per department:</p>
+    <pre><code class="language-sql">SELECT
+  dept,
+  COUNT(*)   AS headcount,
+  AVG(salary) AS avg_salary,
+  MIN(salary) AS min_salary,
+  MAX(salary) AS max_salary
+FROM employees
+GROUP BY dept
+ORDER BY avg_salary DESC;</code></pre>
+    <div class="output">engineering  3  91333.333333  87000.0  95000.0
+sales        2  79500.0       78000.0  81000.0
+marketing    3  71333.333333  68000.0  74000.0</div>
+
+    <p>Use <strong>HAVING</strong> to filter groups:</p>
+    <pre><code class="language-sql">SELECT dept, AVG(salary) AS avg_sal
+FROM employees
+GROUP BY dept
+HAVING AVG(salary) > 75000.0
+ORDER BY avg_sal DESC;</code></pre>
+    <div class="output">engineering  91333.333333
+sales        79500.0</div>
+
+    <!-- ===== STEP 6 ===== -->
+    <h2>Step 6: Join Tables</h2>
+    <p>Create a departments table and join it with employees:</p>
+    <pre><code class="language-sql">CREATE TABLE departments (name VARCHAR, floor INTEGER, budget REAL);
+
+INSERT INTO departments VALUES
+  ('engineering', 3, 500000.0),
+  ('marketing',   2, 200000.0),
+  ('sales',       1, 300000.0),
+  ('hr',          2, 150000.0);</code></pre>
+
+    <p><strong>INNER JOIN</strong> &mdash; only rows that match in both tables:</p>
+    <pre><code class="language-sql">SELECT e.name, e.dept, d.floor, d.budget
+FROM employees e
+INNER JOIN departments d ON e.dept = d.name
+ORDER BY e.name;</code></pre>
+    <div class="output">Alice    engineering  3  500000.0
+Bob      engineering  3  500000.0
+Carol    marketing    2  200000.0
+Dave     marketing    2  200000.0
+Eve      engineering  3  500000.0
+Frank    sales        1  300000.0
+Grace    sales        1  300000.0
+Heidi    marketing    2  200000.0</div>
+
+    <p><strong>LEFT JOIN</strong> &mdash; keep all departments, even those with no employees:</p>
+    <pre><code class="language-sql">SELECT d.name AS dept, COUNT(e.id) AS headcount
+FROM departments d
+LEFT JOIN employees e ON d.name = e.dept
+GROUP BY d.name
+ORDER BY headcount DESC;</code></pre>
+    <div class="output">engineering  3
+marketing    3
+sales        2
+hr           0</div>
+
+    <!-- ===== STEP 7 ===== -->
+    <h2>Step 7: Window Functions</h2>
+    <p>Rank employees by salary within each department:</p>
+    <pre><code class="language-sql">SELECT
+  name, dept, salary,
+  ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rank
+FROM employees
+ORDER BY dept, rank;</code></pre>
+    <div class="output">Alice    engineering  95000.0  1
+Eve      engineering  92000.0  2
+Bob      engineering  87000.0  3
+Heidi    marketing    74000.0  1
+Carol    marketing    72000.0  2
+Dave     marketing    68000.0  3
+Grace    sales        81000.0  1
+Frank    sales        78000.0  2</div>
+
+    <p>Compute a <strong>running total</strong> of salary per department:</p>
+    <pre><code class="language-sql">SELECT
+  name, dept, salary,
+  SUM(salary) OVER (PARTITION BY dept ORDER BY salary) AS running_total
+FROM employees
+ORDER BY dept, salary;</code></pre>
+    <div class="output">Bob      engineering   87000.0   87000.0
+Eve      engineering   92000.0  179000.0
+Alice    engineering   95000.0  274000.0
+Dave     marketing     68000.0   68000.0
+Carol    marketing     72000.0  140000.0
+Heidi    marketing     74000.0  214000.0
+Frank    sales         78000.0   78000.0
+Grace    sales         81000.0  159000.0</div>
+
+    <p>Compare each salary to the <strong>department average</strong>:</p>
+    <pre><code class="language-sql">SELECT
+  name, dept, salary,
+  AVG(salary) OVER (PARTITION BY dept) AS dept_avg
+FROM employees
+ORDER BY dept, name;</code></pre>
+
+    <!-- ===== STEP 8 ===== -->
+    <h2>Step 8: Subqueries &amp; CTEs</h2>
+    <p>Find employees in departments with above-average budgets:</p>
+    <pre><code class="language-sql">SELECT e.name, e.dept, d.budget
+FROM employees e
+INNER JOIN departments d ON e.dept = d.name
+WHERE d.budget > (SELECT AVG(budget) FROM departments)
+ORDER BY e.name;</code></pre>
+
+    <p>Use a <strong>CTE</strong> (WITH clause) for cleaner multi-step logic:</p>
+    <pre><code class="language-sql">WITH dept_stats AS (
+  SELECT dept, COUNT(*) AS headcount, AVG(salary) AS avg_salary
+  FROM employees
+  GROUP BY dept
+)
+SELECT dept, headcount, avg_salary
+FROM dept_stats
+WHERE headcount > 2
+ORDER BY avg_salary DESC;</code></pre>
+
+    <!-- ===== STEP 9 ===== -->
+    <h2>Step 9: Load a CSV File</h2>
+    <p>Teide can load CSV files directly:</p>
+    <pre><code class="language-sql">CREATE TABLE trades AS SELECT * FROM read_csv('trades.csv');</code></pre>
+    <p>Or start the REPL with a CSV preloaded as table <code>t</code>:</p>
+    <pre><code class="language-bash">teide trades.csv</code></pre>
+    <p>Then query immediately:</p>
+    <pre><code class="language-sql">SELECT * FROM t ORDER BY price DESC LIMIT 10;</code></pre>
+
+    <!-- ===== STEP 10 ===== -->
+    <h2>Step 10: Useful REPL Commands</h2>
+    <p>While in the REPL, these dot commands help you explore:</p>
+    <table>
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>.tables</code></td><td>List all tables with row and column counts</td></tr>
+        <tr><td><code>.mode csv</code></td><td>Switch output to CSV format</td></tr>
+        <tr><td><code>.mode json</code></td><td>Switch output to JSON format</td></tr>
+        <tr><td><code>.mode table</code></td><td>Switch back to table format (default)</td></tr>
+        <tr><td><code>.timer on</code></td><td>Show query execution time</td></tr>
+        <tr><td><code>.mem</code></td><td>Show memory usage statistics</td></tr>
+        <tr><td><code>.quit</code></td><td>Exit the REPL</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>Tip:</strong> Press <strong>Tab</strong> for auto-completion of table names, column names, and SQL keywords.</p>
+    </div>
+
+    <!-- ===== NEXT STEPS ===== -->
+    <h2>Next Steps</h2>
+    <div class="card-grid">
+      <a href="../sql/" class="card" style="text-decoration:none">
+        <div class="card-num">EXPLORE</div>
+        <h3>SQL Reference</h3>
+        <p>Complete reference for all supported SQL statements, functions, and operators.</p>
+      </a>
+      <a href="../cli/" class="card" style="text-decoration:none">
+        <div class="card-num">TOOLS</div>
+        <h3>CLI / REPL</h3>
+        <p>All launch modes, dot commands, output formats, and keyboard shortcuts.</p>
+      </a>
+      <a href="../server/" class="card" style="text-decoration:none">
+        <div class="card-num">CONNECT</div>
+        <h3>PgWire Server</h3>
+        <p>Connect with psql, DBeaver, or any PostgreSQL client.</p>
+      </a>
+      <a href="../api/" class="card" style="text-decoration:none">
+        <div class="card-num">EMBED</div>
+        <h3>Rust API</h3>
+        <p>Use Teide as a library in your Rust application.</p>
+      </a>
+    </div>
+
+    <nav class="page-nav">
+      <a href="../getting-started/" class="prev">Getting Started</a>
+      <a href="../sql/" class="next">SQL Reference</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

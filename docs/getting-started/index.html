@@ -12,7 +12,7 @@
 <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
 <nav class="sidebar">
   <a href="../" class="sidebar-logo">
-    <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="#4b6777"/><path d="M8 10h16M8 16h12M8 22h8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>
+    <img src="../assets/teide-logo.svg" alt="Teide">
     <span>Teide</span>
     <span class="docs-badge">Docs</span>
   </a>
@@ -20,6 +20,7 @@
     <div class="sidebar-section-label">Overview</div>
     <a href="../" class="sidebar-link">Home</a>
     <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    <a href="../tutorial/" class="sidebar-link">Tutorial</a>
   </div>
   <div class="sidebar-section">
     <div class="sidebar-section-label">SQL Reference</div>
@@ -66,7 +67,7 @@
     </ul>
 
     <h2>Build from Source</h2>
-    <pre><code>git clone https://github.com/TeideDB/teide-rs.git
+    <pre><code class="language-bash">git clone https://github.com/TeideDB/teide-rs.git
 cd teide-rs
 cargo build --release --all-features</code></pre>
 
@@ -103,12 +104,12 @@ cargo build --release --all-features</code></pre>
     </table>
 
     <p>Build only what you need:</p>
-    <pre><code>cargo build --release --features cli      # REPL only
+    <pre><code class="language-bash">cargo build --release --features cli      # REPL only
 cargo build --release --features server   # Server only
 cargo build --release --all-features      # Everything</code></pre>
 
     <h2>Your First REPL Session</h2>
-    <pre><code># Start the interactive REPL
+    <pre><code class="language-bash"># Start the interactive REPL
 cargo run --release --features cli
 
 # Or with a CSV file preloaded as table 't'
@@ -119,19 +120,19 @@ teide> INSERT INTO t VALUES (1, 'alice', 95.0), (2, 'bob', 87.5), (3, 'carol', 9
 teide> SELECT name, score FROM t ORDER BY score DESC;</code></pre>
 
     <h2>Your First Server Session</h2>
-    <pre><code># Start the PgWire server
+    <pre><code class="language-bash"># Start the PgWire server
 cargo run --release --features server -- --port 5433
 
 # Connect with psql from another terminal
 psql -h 127.0.0.1 -p 5433</code></pre>
 
-    <pre><code># Preload CSV files at startup
+    <pre><code class="language-bash"># Preload CSV files at startup
 cargo run --release --features server -- \
   --load trades=data/trades.csv \
   --load users=data/users.csv</code></pre>
 
     <h2>Using as a Library</h2>
-    <pre><code>use teide::{Context, Session, ExecResult};
+    <pre><code class="language-rust">use teide::{Context, Session, ExecResult};
 
 fn main() -> teide::Result&lt;()&gt; {
     let mut session = Session::new()?;
@@ -148,7 +149,7 @@ fn main() -> teide::Result&lt;()&gt; {
 
     <nav class="page-nav">
       <a href="../" class="prev"><span class="nav-label">Previous</span><span class="nav-title">Home</span></a>
-      <a href="../sql/" class="next"><span class="nav-label">Next</span><span class="nav-title">SQL Overview</span></a>
+      <a href="../tutorial/" class="next"><span class="nav-label">Next</span><span class="nav-title">Tutorial</span></a>
     </nav>
 
   </div>

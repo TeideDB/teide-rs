@@ -73,7 +73,7 @@ img { max-width: 100%; display: block; }
   text-decoration: none;
   color: var(--text);
 }
-.sidebar-logo svg { width: 28px; height: 28px; flex-shrink: 0; }
+.sidebar-logo svg, .sidebar-logo img { width: 32px; height: 22px; flex-shrink: 0; }
 .sidebar-logo span {
   font-family: var(--font-heading);
   font-size: 1.2rem;
