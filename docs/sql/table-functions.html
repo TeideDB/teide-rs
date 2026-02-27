@@ -19,25 +19,25 @@
       <div class="sidebar-section-label">Overview</div>
       <a href="../" class="sidebar-link">Home</a>
       <a href="../getting-started/" class="sidebar-link">Getting Started</a>
-    <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
     </div>
     <div class="sidebar-section">
       <div class="sidebar-section-label">SQL Reference</div>
-      <a href="../sql/" class="sidebar-link">Overview</a>
-      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
-      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
-      <a href="../sql/dml.html" class="sidebar-link">DML</a>
-      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
-      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
-      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
-      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
-      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
-      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
-      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
-      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
-      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
-      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
-      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
     </div>
     <div class="sidebar-section">
       <div class="sidebar-section-label">Tools</div>
@@ -47,6 +47,7 @@
     <div class="sidebar-section">
       <div class="sidebar-section-label">Developer</div>
       <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
       <a href="../architecture/" class="sidebar-link">Architecture</a>
     </div>
   </nav>
@@ -54,58 +55,102 @@
   <main class="content">
     <div class="section-label">SQL REFERENCE</div>
     <h1>Table Functions</h1>
-    <p class="lead">Load external data sources directly in SQL queries.</p>
+    <p class="lead">Load CSV files, splayed tables, and partitioned tables directly in SQL queries.</p>
 
     <h2>read_csv()</h2>
-    <p>Load a CSV file as a table:</p>
-    <pre><code class="language-sql">-- Direct query from CSV
-SELECT * FROM read_csv('data.csv');
+    <p>Load a CSV file into memory by path:</p>
+    <pre><code class="language-sql">-- Query a CSV file directly
+SELECT * FROM read_csv('trades.csv');
 
--- Create a persistent table
-CREATE TABLE t AS SELECT * FROM read_csv('data.csv');</code></pre>
+-- Create a persistent in-memory table from CSV
+CREATE TABLE trades AS SELECT * FROM read_csv('/data/trades.csv');
+
+-- Query the loaded table
+SELECT symbol, SUM(qty) AS total
+FROM trades
+GROUP BY symbol
+ORDER BY total DESC;</code></pre>
 
     <div class="note">
-      <p><strong>Note:</strong> CSV files are automatically type-inferred. Teide samples the file to determine column types.</p>
+      <p><strong>Auto type inference:</strong> Teide samples the CSV to determine column types automatically. Supported inferred types: INTEGER, BIGINT, REAL, BOOLEAN, VARCHAR, DATE, TIMESTAMP.</p>
     </div>
 
-    <p>The Rust API provides additional options:</p>
-    <pre><code>Context::read_csv_opts(path, delimiter, header, col_types)</code></pre>
-    <ul>
-      <li><code>delimiter</code>: Column separator character (default: <code>,</code>)</li>
-      <li><code>header</code>: Whether the first row is a header (default: <code>true</code>)</li>
-      <li><code>col_types</code>: Optional explicit type specification per column</li>
-    </ul>
+    <p>The Rust API provides finer control with <code>read_csv_opts</code>:</p>
+    <pre><code class="language-rust">let ctx = Context::new()?;
+
+// Tab-separated, with header row, auto-infer types
+let table = ctx.read_csv_opts("data.tsv", '\t', true, None)?;
+
+// Pipe-separated, no header, explicit column types
+let types = &amp;[teide::types::SYM, teide::types::I64, teide::types::F64];
+let table = ctx.read_csv_opts("data.psv", '|', false, Some(types))?;</code></pre>
 
     <h2>read_splayed()</h2>
-    <p>Open a splayed (column-per-file) table with zero-copy memory mapping:</p>
-    <pre><code class="language-sql">SELECT * FROM read_splayed('/path/to/table');</code></pre>
+    <p>Open a splayed table from disk using zero-copy memory mapping. A splayed table stores each column as a separate binary file, enabling fast columnar access without loading the entire dataset into memory.</p>
 
-    <p>A splayed table directory contains:</p>
-    <ul>
-      <li>A <code>.d</code> metadata file</li>
-      <li>One file per column (binary columnar format)</li>
-      <li>An optional shared symbol file</li>
-    </ul>
+    <pre><code class="language-sql">-- Open a splayed table directory
+SELECT * FROM read_splayed('/data/tables/trades');
 
-    <h2>read_parted()</h2>
-    <p>Open a date-partitioned table:</p>
-    <pre><code class="language-sql">SELECT * FROM read_parted('/path/to/db', 'table_name');</code></pre>
+-- With an explicit symbol file
+SELECT * FROM read_splayed('/data/tables/trades', '/data/tables/sym');
 
-    <p>Partitioned tables store data in date-based directories:</p>
-    <pre><code>db_root/
-  sym              -- shared symbol table
-  2024-01-15/
-    trades.d       -- metadata
-    price          -- column file
-    qty            -- column file
-  2024-01-16/
-    trades.d
-    price
-    qty</code></pre>
+-- Create an in-memory table from a splayed source
+CREATE TABLE trades AS SELECT * FROM read_splayed('/data/tables/trades');</code></pre>
+
+    <h4>On-disk layout</h4>
+    <pre><code>/data/tables/trades/
+  .d           -- schema: column name symbol IDs
+  price        -- column file (binary f64 vector)
+  qty          -- column file (binary i64 vector)
+  symbol       -- column file (binary sym vector)
+  ts           -- column file (binary timestamp vector)</code></pre>
+
+    <p>The <code>.d</code> file contains the column names as symbol IDs. Column files are raw binary vectors with a 32-byte block header followed by the data. String columns use <strong>symbol encoding</strong> &mdash; integer IDs that reference the global symbol table.</p>
 
     <div class="note">
-      <p><strong>Note:</strong> Results from <code>read_parted()</code> are cached internally to avoid re-reading on subsequent calls.</p>
+      <p><strong>Zero-copy:</strong> Column files are memory-mapped (mmap), so the OS pages data in on demand. This means you can query tables larger than available RAM.</p>
     </div>
+
+    <p>See <a href="../storage/">Storage &amp; Symbols</a> for the full on-disk format specification.</p>
+
+    <h2>read_parted()</h2>
+    <p>Open a date-partitioned table. Partitioned tables split data across directories named by date (or integer key), with a shared symbol table at the database root.</p>
+
+    <pre><code class="language-sql">-- Open a partitioned table
+SELECT * FROM read_parted('/data/marketdb', 'trades');
+
+-- The virtual partition column 'date' is queryable
+SELECT date, symbol, SUM(qty) AS total
+FROM read_parted('/data/marketdb', 'trades')
+GROUP BY date, symbol
+ORDER BY date, total DESC;</code></pre>
+
+    <h4>On-disk layout</h4>
+    <pre><code>/data/marketdb/
+  sym                          -- shared symbol table
+  2024.01.15/
+    trades/
+      .d                       -- schema
+      price                    -- column file
+      qty                      -- column file
+      symbol                   -- column file
+  2024.01.16/
+    trades/
+      .d
+      price
+      qty
+      symbol
+  2024.01.17/
+    trades/
+      ...</code></pre>
+
+    <p>Teide automatically discovers all partition directories, loads the shared symbol table from <code>db_root/sym</code>, and builds a virtual partition-key column (the date). Partition directories must be named as <code>YYYY.MM.DD</code> dates or integer keys.</p>
+
+    <div class="note">
+      <p><strong>Caching:</strong> Partitioned tables are cached after the first open. Subsequent calls to <code>read_parted()</code> with the same path return instantly.</p>
+    </div>
+
+    <p>See <a href="../storage/">Storage &amp; Symbols</a> for details on the partition discovery algorithm, MAPCOMMON virtual columns, and the sym file format.</p>
 
     <nav class="page-nav">
       <a href="functions.html" class="prev">Scalar Functions</a>

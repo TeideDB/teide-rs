@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Storage &amp; Symbols - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">DEVELOPER</div>
+    <h1>Storage &amp; Symbols</h1>
+    <p class="lead">Teide's on-disk formats: how splayed tables, partitioned tables, and the symbol system work. Essential reading if you're coming from kdb+/q or working with persistent columnar data.</p>
+
+    <!-- ===== SYMBOLS ===== -->
+    <h2>What Are Symbols?</h2>
+    <p>Symbols are <strong>interned strings</strong>. Instead of storing the full text of every string value, Teide maintains a global lookup table that maps each unique string to a small integer ID. Column data then stores these compact IDs instead of the raw text.</p>
+
+    <p>This is the same concept as kdb+'s <code>symbol</code> type or a database "dictionary encoding".</p>
+
+    <h3>Why symbols?</h3>
+    <table>
+      <thead><tr><th>Benefit</th><th>Explanation</th></tr></thead>
+      <tbody>
+        <tr><td>Memory efficiency</td><td>A million rows with 50 unique strings store 50 strings + 1M small integers, not 1M full strings</td></tr>
+        <tr><td>Fast comparison</td><td>Comparing two symbols is a single integer comparison, not a byte-by-byte string compare</td></tr>
+        <tr><td>Fast GROUP BY / JOIN</td><td>Hash tables on integer keys are much faster than on variable-length strings</td></tr>
+        <tr><td>Cache friendly</td><td>Fixed-width integer columns pack tightly in CPU cache lines</td></tr>
+      </tbody>
+    </table>
+
+    <h3>How it works</h3>
+    <p>When Teide encounters the string <code>'AAPL'</code> for the first time, it assigns it an ID (say, <code>0</code>). The next unique string <code>'GOOG'</code> gets <code>1</code>, and so on. If <code>'AAPL'</code> appears again, it reuses ID <code>0</code>.</p>
+
+    <pre><code>Global symbol table:
+  0 → "AAPL"
+  1 → "GOOG"
+  2 → "MSFT"
+
+Column data (symbol encoded):
+  [0, 1, 0, 2, 0, 1, 2, 0]
+   ↓  ↓  ↓  ↓  ↓  ↓  ↓  ↓
+  AAPL GOOG AAPL MSFT AAPL GOOG MSFT AAPL</code></pre>
+
+    <p>In SQL, symbols behave exactly like <code>VARCHAR</code> &mdash; you query them with string literals and they display as text. The encoding is transparent:</p>
+    <pre><code class="language-sql">-- Symbols look and act like strings in SQL
+SELECT * FROM trades WHERE symbol = 'AAPL';
+SELECT DISTINCT symbol FROM trades ORDER BY symbol;</code></pre>
+
+    <h3>Adaptive width encoding</h3>
+    <p>Symbol IDs in column files use the smallest integer width that can represent all IDs in the symbol table:</p>
+    <table>
+      <thead><tr><th>Width</th><th>Max symbols</th><th>Bytes per value</th></tr></thead>
+      <tbody>
+        <tr><td>W8</td><td>256</td><td>1</td></tr>
+        <tr><td>W16</td><td>65,536</td><td>2</td></tr>
+        <tr><td>W32</td><td>~4 billion</td><td>4</td></tr>
+        <tr><td>W64</td><td>unlimited</td><td>8</td></tr>
+      </tbody>
+    </table>
+    <p>Most real-world datasets have far fewer than 256 unique strings per column, so symbols typically use just 1 byte per value.</p>
+
+    <!-- ===== SYM FILE ===== -->
+    <h2>The sym File</h2>
+    <p>The symbol table can be persisted to a binary file. This is required for splayed and partitioned tables so that symbol IDs in column files can be resolved back to strings.</p>
+
+    <h4>Binary format</h4>
+    <pre><code>Bytes 0-3:    magic  (0x4D595354 = "TSYM" little-endian)
+Bytes 4-7:    count  (uint32, number of symbols)
+
+For each symbol i = 0..count-1:
+  [4 bytes]   length of string i (uint32)
+  [N bytes]   UTF-8 string data</code></pre>
+
+    <p>Symbol IDs correspond directly to their position in the file: the first string is ID 0, the second is ID 1, etc.</p>
+
+    <h3>Rust API</h3>
+    <pre><code class="language-rust">// Intern a string (returns stable i64 ID)
+let id = teide::sym_intern("AAPL")?;
+
+// Intern the same string again — returns the same ID
+let id2 = teide::sym_intern("AAPL")?;
+assert_eq!(id, id2);</code></pre>
+
+    <!-- ===== SPLAYED ===== -->
+    <h2>Splayed Tables</h2>
+    <p>A splayed table stores each column as a separate binary file within a directory. This is the fundamental on-disk format in Teide, borrowed from kdb+.</p>
+
+    <h3>Directory layout</h3>
+    <pre><code>/data/tables/trades/
+  .d           -- schema file (vector of column name symbol IDs)
+  ts           -- column: timestamp vector
+  symbol       -- column: symbol vector
+  price        -- column: f64 vector
+  qty          -- column: i64 vector</code></pre>
+
+    <h3>Schema file (.d)</h3>
+    <p>The <code>.d</code> file is a binary vector of <code>i64</code> symbol IDs, one per column. Each ID maps to a column name in the symbol table. The order defines the column order of the table.</p>
+
+    <h3>Column file format</h3>
+    <p>Each column file is a raw binary vector with a 32-byte block header:</p>
+    <pre><code>Bytes 0-15:   nullmap (inline bitmap for null tracking)
+Byte  16:     mmod    (memory mode: 0=heap, 1=mmap)
+Byte  17:     order   (block size class)
+Byte  18:     type    (type tag: 6=i64, 7=f64, 20=sym, ...)
+Byte  19:     attrs   (flags: has-nulls, external nullmap, ...)
+Bytes 20-23:  rc      (reference count, 0 on disk)
+Bytes 24-31:  len     (number of elements, uint64)
+Bytes 32+:    data    (len * element_size bytes)
+[optional]:   external nullmap ((len+7)/8 bytes, if flagged)</code></pre>
+
+    <h3>Loading in SQL</h3>
+    <pre><code class="language-sql">-- Load a splayed table (auto-discovers column names from .d)
+SELECT * FROM read_splayed('/data/tables/trades');
+
+-- With an explicit symbol file path
+SELECT * FROM read_splayed('/data/tables/trades', '/data/sym');
+
+-- Persist as an in-memory table
+CREATE TABLE trades AS SELECT * FROM read_splayed('/data/tables/trades');</code></pre>
+
+    <h3>Loading in Rust</h3>
+    <pre><code class="language-rust">let ctx = Context::new()?;
+
+// Without shared symbol file
+let table = ctx.read_splayed("/data/tables/trades")?;
+
+// With shared symbol file
+let table = ctx.read_splayed("/data/tables/trades", Some("/data/sym"))?;
+
+println!("{} rows, {} cols", table.nrows(), table.ncols());</code></pre>
+
+    <div class="note">
+      <p><strong>Zero-copy:</strong> Column files are memory-mapped. The OS pages data in on demand, so you can query datasets larger than available RAM without loading everything upfront.</p>
+    </div>
+
+    <!-- ===== PARTITIONED ===== -->
+    <h2>Partitioned Tables</h2>
+    <p>A partitioned table splits data across multiple directories, each representing a time period (typically a date). This is the standard layout for time-series data in kdb+ systems.</p>
+
+    <h3>Directory layout</h3>
+    <pre><code>/data/marketdb/
+  sym                          -- shared symbol table (required)
+  2024.01.15/
+    trades/
+      .d                       -- schema
+      symbol                   -- column: sym
+      price                    -- column: f64
+      qty                      -- column: i64
+  2024.01.16/
+    trades/
+      .d
+      symbol
+      price
+      qty
+  2024.01.17/
+    trades/
+      .d
+      symbol
+      price
+      qty</code></pre>
+
+    <div class="note">
+      <p><strong>Partition naming:</strong> Directory names must be dates in <code>YYYY.MM.DD</code> format (e.g., <code>2024.01.15</code>) or integer keys. Teide auto-discovers all valid partition directories and loads them in sorted order.</p>
+    </div>
+
+    <h3>How partitions are discovered</h3>
+    <ol>
+      <li>Scan <code>db_root</code> for subdirectories whose names consist of digits and dots</li>
+      <li>Validate date format: 10 characters, dots at positions 4 and 7, valid month (01-12) and day (01-31)</li>
+      <li>Sort directories lexicographically for deterministic ordering</li>
+      <li>Load each <code>db_root/&lt;partition&gt;/&lt;table_name&gt;</code> as a splayed table</li>
+      <li>Load the shared symbol table from <code>db_root/sym</code></li>
+      <li>Concatenate all partition segments into a single logical table</li>
+    </ol>
+
+    <h3>The virtual partition column (MAPCOMMON)</h3>
+    <p>When you open a partitioned table, Teide automatically creates a virtual column containing the partition key (the date). This column doesn't exist on disk &mdash; it's synthesized at query time.</p>
+
+    <pre><code class="language-sql">-- The partition date is available as a queryable column
+SELECT date, COUNT(*) AS trades
+FROM read_parted('/data/marketdb', 'trades')
+GROUP BY date
+ORDER BY date;</code></pre>
+    <div class="output">2024.01.15  12847
+2024.01.16  15203
+2024.01.17  11592</div>
+
+    <p>The virtual column's type depends on the partition directory names:</p>
+    <table>
+      <thead><tr><th>Directory names</th><th>Virtual column type</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td><code>YYYY.MM.DD</code> dates</td><td>DATE</td><td><code>2024.01.15</code>, <code>2024.01.16</code></td></tr>
+        <tr><td>Integer keys</td><td>BIGINT</td><td><code>1</code>, <code>2</code>, <code>3</code></td></tr>
+        <tr><td>Other strings</td><td>VARCHAR (symbol)</td><td><code>us</code>, <code>eu</code>, <code>asia</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Parted column types</h3>
+    <p>Internally, each column in a partitioned table is stored as a <strong>parted vector</strong> &mdash; a list of per-partition segments. When you access row N, Teide resolves which partition contains that row and reads from the correct segment.</p>
+    <p>This is transparent to SQL queries. You read and filter parted columns exactly like regular columns.</p>
+
+    <h3>Loading in SQL</h3>
+    <pre><code class="language-sql">-- Open a partitioned table
+CREATE TABLE trades AS
+SELECT * FROM read_parted('/data/marketdb', 'trades');
+
+-- Query across all partitions
+SELECT symbol, SUM(qty) AS total_qty, AVG(price) AS avg_price
+FROM trades
+WHERE date BETWEEN '2024-01-15' AND '2024-01-16'
+GROUP BY symbol
+ORDER BY total_qty DESC
+LIMIT 10;</code></pre>
+
+    <h3>Loading in Rust</h3>
+    <pre><code class="language-rust">let ctx = Context::new()?;
+
+// Open partitioned table (auto-loads sym, discovers partitions)
+let trades = ctx.read_parted("/data/marketdb", "trades")?;
+
+// Second call returns cached result instantly
+let trades2 = ctx.read_parted("/data/marketdb", "trades")?;
+
+println!("{} rows, {} cols", trades.nrows(), trades.ncols());</code></pre>
+
+    <!-- ===== COMPARISON ===== -->
+    <h2>Storage Format Comparison</h2>
+    <table>
+      <thead>
+        <tr><th>Format</th><th>Access</th><th>Best for</th><th>SQL function</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CSV</td>
+          <td>Full copy into memory</td>
+          <td>Import/export, ad-hoc analysis, small datasets</td>
+          <td><code>read_csv(path)</code></td>
+        </tr>
+        <tr>
+          <td>Splayed</td>
+          <td>Zero-copy mmap</td>
+          <td>Single tables, fast column scans, large datasets</td>
+          <td><code>read_splayed(dir [, sym])</code></td>
+        </tr>
+        <tr>
+          <td>Partitioned</td>
+          <td>Zero-copy mmap</td>
+          <td>Time-series data, date-sharded tables, multi-day queries</td>
+          <td><code>read_parted(root, name)</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ===== KDB+ CONTEXT ===== -->
+    <h2>For kdb+/q Users</h2>
+    <p>Teide's storage format is inspired by and compatible with the kdb+ on-disk layout:</p>
+    <table>
+      <thead><tr><th>kdb+ concept</th><th>Teide equivalent</th></tr></thead>
+      <tbody>
+        <tr><td><code>`sym</code> type</td><td><code>VARCHAR</code> / <code>SYM</code> (symbol-encoded internally)</td></tr>
+        <tr><td>Splayed table (<code>`:/path/table/</code>)</td><td><code>read_splayed('/path/table')</code></td></tr>
+        <tr><td>Partitioned DB (<code>`:/path/db/</code>)</td><td><code>read_parted('/path/db', 'table')</code></td></tr>
+        <tr><td><code>.d</code> schema file</td><td>Same &mdash; binary vector of symbol IDs</td></tr>
+        <tr><td><code>sym</code> file in HDB root</td><td>Same &mdash; loaded from <code>db_root/sym</code></td></tr>
+        <tr><td>Date partitions (<code>2024.01.15/</code>)</td><td>Same directory naming convention</td></tr>
+        <tr><td>Virtual <code>date</code> column</td><td>MAPCOMMON virtual column (auto-created)</td></tr>
+      </tbody>
+    </table>
+    <p>The key difference: in Teide, you query these tables with standard SQL instead of q expressions.</p>
+
+    <nav class="page-nav">
+      <a href="../api/" class="prev">Rust API</a>
+      <a href="../architecture/" class="next">Architecture</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>
