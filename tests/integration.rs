@@ -779,15 +779,11 @@ fn csv_date_time_auto_infer() {
     assert_eq!(table.col_type(2), types::TIMESTAMP);
     assert_eq!(table.col_type(3), types::I64);
 
-    // DATE: 1970-01-01 → 0 days since epoch
-    assert_eq!(table.get_i64(0, 2).unwrap(), 0);
-    // DATE: 2024-01-15 → 19737 days since epoch
-    // (53 years * 365 + 13 leap days + 14 days = 19372 + 365 = 19737)
+    // DATE: 1970-01-01 → -10957 days since 2000-01-01
+    assert_eq!(table.get_i64(0, 2).unwrap(), -10957);
+    // DATE: 2024-01-15 → 8780 days since 2000-01-01
     let d0 = table.get_i64(0, 0).unwrap();
-    assert!(
-        d0 > 19700 && d0 < 19800,
-        "2024-01-15 should be ~19737 days, got {d0}"
-    );
+    assert_eq!(d0, 8780, "2024-01-15 should be 8780 days since 2000, got {d0}");
 
     // TIME: 00:00:00 → 0 milliseconds
     assert_eq!(table.get_i64(1, 2).unwrap(), 0);
@@ -796,8 +792,8 @@ fn csv_date_time_auto_infer() {
     // TIME: 14:15:30.500000 → 14*3600000 + 15*60000 + 30*1000 + 500 = 51330500 ms
     assert_eq!(table.get_i64(1, 1).unwrap(), 51_330_500);
 
-    // TIMESTAMP: 1970-01-01T00:00:00 → 0 µs since epoch
-    assert_eq!(table.get_i64(2, 2).unwrap(), 0);
+    // TIMESTAMP: 1970-01-01T00:00:00 → -946684800000000 µs since 2000-01-01
+    assert_eq!(table.get_i64(2, 2).unwrap(), -946_684_800_000_000);
     // TIMESTAMP: 2024-01-15T09:30:00 → d0 * 86400000000 + 34200000000 µs
     let ts0 = table.get_i64(2, 0).unwrap();
     let expected_ts = d0 * 86_400_000_000 + 34_200_000_000;
@@ -824,10 +820,10 @@ fn csv_explicit_date_types() {
     assert_eq!(table.col_type(2), types::TIMESTAMP);
     assert_eq!(table.col_type(3), types::I64);
 
-    // Epoch date/time should be zero
-    assert_eq!(table.get_i64(0, 2).unwrap(), 0);
+    // 1970-01-01 = -10957 days since 2000-01-01; TIME 00:00:00 = 0 ms; TIMESTAMP = -946684800000000 µs
+    assert_eq!(table.get_i64(0, 2).unwrap(), -10957);
     assert_eq!(table.get_i64(1, 2).unwrap(), 0);
-    assert_eq!(table.get_i64(2, 2).unwrap(), 0);
+    assert_eq!(table.get_i64(2, 2).unwrap(), -946_684_800_000_000);
 }
 
 #[test]

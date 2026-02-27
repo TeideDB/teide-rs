@@ -450,12 +450,12 @@ const TAIL_ROWS: usize = 20;
 fn type_name(typ: i8) -> &'static str {
     match typ {
         1 => "bool",
+        2 => "u8",
         3 => "char",
         4 => "i16",
         5 => "i32",
         6 => "i64",
         7 => "f64",
-        8 => "u8",
         9 => "date",
         10 => "time",
         11 => "timestamp",
@@ -773,7 +773,7 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
             }
             None => "NULL".to_string(),
         },
-        15 | 20 => match table.get_str(col, row) {
+        20 => match table.get_str(col, row) {
             Some(s) => s.to_string(),
             None => "NULL".to_string(),
         },
@@ -814,7 +814,7 @@ fn format_json_value(table: &teide::Table, col: usize, row: usize) -> String {
             }
             None => "null".to_string(),
         },
-        15 | 20 => match table.get_str(col, row) {
+        20 => match table.get_str(col, row) {
             Some(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
             None => "null".to_string(),
         },

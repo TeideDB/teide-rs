@@ -886,6 +886,10 @@ impl Table {
                 let p = data as *const i16;
                 Some(unsafe { *p.add(row) } as i64)
             }
+            ffi::TD_U8 | ffi::TD_CHAR => {
+                let p = data as *const u8;
+                Some(unsafe { *p.add(row) } as i64)
+            }
             ffi::TD_SYM => {
                 let attrs = unsafe { ffi::td_attrs(vec) };
                 Some(unsafe { ffi::read_sym(data as *const u8, row, t, attrs) })
@@ -1000,7 +1004,7 @@ impl Table {
         }
     }
 
-    /// Format microseconds since epoch as "YYYY-MM-DD HH:MM:SS.ffffff".
+    /// Format microseconds since 2000-01-01 as "YYYY-MM-DD HH:MM:SS.ffffff".
     pub fn format_timestamp(us: i64) -> String {
         let (days, time_us) = if us >= 0 {
             ((us / 86_400_000_000) as i32, (us % 86_400_000_000) as u64)

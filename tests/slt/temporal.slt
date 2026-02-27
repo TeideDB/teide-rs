@@ -1,0 +1,196 @@
+# Temporal type tests: DATE, TIME, TIMESTAMP, EXTRACT, DATE_TRUNC
+
+# --- Setup ---
+
+statement ok
+CREATE TABLE dates (d DATE, t TIME, ts TIMESTAMP)
+
+# Insert known values:
+# DATE: 0 = 2000-01-01, 1 = 2000-01-02, 9132 = 2025-01-01
+# TIME: milliseconds since midnight — 0 = 00:00:00, 43200000 = 12:00:00, 3661001 = 01:01:01.001
+# TIMESTAMP: microseconds since 2000-01-01 — 0 = 2000-01-01T00:00:00
+#   86400000000 = 2000-01-02T00:00:00 (1 day)
+#   789048060000000 = 2025-01-01T12:01:00 (9132 days + 12h + 1min)
+
+statement ok
+INSERT INTO dates VALUES (0, 0, 0), (1, 43200000, 86400000000), (9132, 3661001, 789048060000000)
+
+# === Basic SELECT with temporal formatting ===
+
+# DATE epoch: 0 = 2000-01-01
+query T
+SELECT d FROM dates WHERE d = 0
+----
+2000-01-01
+
+# DATE: 1 = 2000-01-02
+query T
+SELECT d FROM dates WHERE d = 1
+----
+2000-01-02
+
+# DATE: 9132 = 2025-01-01
+query T
+SELECT d FROM dates WHERE d = 9132
+----
+2025-01-01
+
+# TIME: 0 = 00:00:00
+query T
+SELECT t FROM dates WHERE t = 0
+----
+00:00:00
+
+# TIME: 43200000 ms = 12:00:00
+query T
+SELECT t FROM dates WHERE t = 43200000
+----
+12:00:00
+
+# TIME: 3661001 ms = 01:01:01.001
+query T
+SELECT t FROM dates WHERE t = 3661001
+----
+01:01:01.001
+
+# TIMESTAMP: 0 = 2000-01-01T00:00:00
+query T
+SELECT ts FROM dates WHERE ts = 0
+----
+2000-01-01T00:00:00
+
+# TIMESTAMP: 86400000000 µs = 1 day = 2000-01-02T00:00:00
+query T
+SELECT ts FROM dates WHERE ts = 86400000000
+----
+2000-01-02T00:00:00
+
+# TIMESTAMP: 789048060000000 µs = 2025-01-01T12:01:00
+query T
+SELECT ts FROM dates WHERE ts = 789048060000000
+----
+2025-01-01T12:01:00
+
+# === EXTRACT from TIMESTAMP ===
+
+query I
+SELECT EXTRACT(YEAR FROM ts) FROM dates WHERE ts = 0
+----
+2000
+
+query I
+SELECT EXTRACT(MONTH FROM ts) FROM dates WHERE ts = 0
+----
+1
+
+query I
+SELECT EXTRACT(DAY FROM ts) FROM dates WHERE ts = 0
+----
+1
+
+query I
+SELECT EXTRACT(HOUR FROM ts) FROM dates WHERE ts = 86400000000
+----
+0
+
+query I
+SELECT EXTRACT(MINUTE FROM ts) FROM dates WHERE ts = 789048060000000
+----
+1
+
+query I
+SELECT EXTRACT(SECOND FROM ts) FROM dates WHERE ts = 0
+----
+0
+
+# EXTRACT YEAR from a 2025 timestamp
+query I
+SELECT EXTRACT(YEAR FROM ts) FROM dates WHERE ts = 789048060000000
+----
+2025
+
+# === EXTRACT from DATE ===
+
+# EXTRACT YEAR from DATE 0 = 2000
+query I
+SELECT EXTRACT(YEAR FROM d) FROM dates WHERE d = 0
+----
+2000
+
+# EXTRACT MONTH from DATE 0 = January
+query I
+SELECT EXTRACT(MONTH FROM d) FROM dates WHERE d = 0
+----
+1
+
+# EXTRACT DAY from DATE 1 = 2nd
+query I
+SELECT EXTRACT(DAY FROM d) FROM dates WHERE d = 1
+----
+2
+
+# EXTRACT YEAR from DATE 9132 = 2025
+query I
+SELECT EXTRACT(YEAR FROM d) FROM dates WHERE d = 9132
+----
+2025
+
+# === EXTRACT from TIME ===
+
+# EXTRACT HOUR from TIME 43200000 = 12
+query I
+SELECT EXTRACT(HOUR FROM t) FROM dates WHERE t = 43200000
+----
+12
+
+# EXTRACT MINUTE from TIME 3661001 = 1
+query I
+SELECT EXTRACT(MINUTE FROM t) FROM dates WHERE t = 3661001
+----
+1
+
+# EXTRACT SECOND from TIME 3661001 = 1
+query I
+SELECT EXTRACT(SECOND FROM t) FROM dates WHERE t = 3661001
+----
+1
+
+# === DATE_TRUNC ===
+
+# DATE_TRUNC to year: 2025-01-01T12:01:00 → 2025-01-01T00:00:00
+query T
+SELECT date_trunc('year', ts) FROM dates WHERE ts = 789048060000000
+----
+2025-01-01T00:00:00
+
+# DATE_TRUNC to month: 2000-01-02T00:00:00 → 2000-01-01T00:00:00
+query T
+SELECT date_trunc('month', ts) FROM dates WHERE ts = 86400000000
+----
+2000-01-01T00:00:00
+
+# DATE_TRUNC to day: 2025-01-01T12:01:00 → 2025-01-01T00:00:00
+query T
+SELECT date_trunc('day', ts) FROM dates WHERE ts = 789048060000000
+----
+2025-01-01T00:00:00
+
+# DATE_TRUNC to hour: 2025-01-01T12:01:00 → 2025-01-01T12:00:00
+query T
+SELECT date_trunc('hour', ts) FROM dates WHERE ts = 789048060000000
+----
+2025-01-01T12:00:00
+
+# === DOW (day of week) ===
+
+# 2000-01-01 was Saturday = ISO 6
+query I
+SELECT EXTRACT(DOW FROM d) FROM dates WHERE d = 0
+----
+6
+
+# 2000-01-02 was Sunday = ISO 7
+query I
+SELECT EXTRACT(DOW FROM d) FROM dates WHERE d = 1
+----
+7

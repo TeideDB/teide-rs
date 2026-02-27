@@ -121,7 +121,7 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
             Some(v) => teide::Table::format_timestamp(v),
             None => "NULL".to_string(),
         },
-        15 | 20 => match table.get_str(col, row) {
+        20 => match table.get_str(col, row) {
             Some(s) => s.to_string(),
             None => "NULL".to_string(),
         },
@@ -218,4 +218,9 @@ fn slt_stats() {
 #[test]
 fn slt_regressions() {
     run_slt("tests/slt/regressions.slt");
+}
+
+#[test]
+fn slt_temporal() {
+    run_slt("tests/slt/temporal.slt");
 }
