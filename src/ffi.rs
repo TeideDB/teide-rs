@@ -123,7 +123,7 @@ pub const TD_SLAB_ORDERS: usize = 5;
 
 // ===== Buddy Allocator Constants =====
 
-pub const TD_ORDER_MIN: u32 = 5;
+pub const TD_ORDER_MIN: u32 = 6;
 pub const TD_ORDER_MAX: u32 = 30;
 
 // ===== Parallel Threshold =====

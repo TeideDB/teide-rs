@@ -882,6 +882,10 @@ impl Table {
                 let p = data as *const i32;
                 Some(unsafe { *p.add(row) } as i64)
             }
+            ffi::TD_I16 => {
+                let p = data as *const i16;
+                Some(unsafe { *p.add(row) } as i64)
+            }
             ffi::TD_SYM => {
                 let attrs = unsafe { ffi::td_attrs(vec) };
                 Some(unsafe { ffi::read_sym(data as *const u8, row, t, attrs) })
