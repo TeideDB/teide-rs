@@ -789,16 +789,16 @@ fn csv_date_time_auto_infer() {
         "2024-01-15 should be ~19737 days, got {d0}"
     );
 
-    // TIME: 00:00:00 → 0 microseconds
+    // TIME: 00:00:00 → 0 milliseconds
     assert_eq!(table.get_i64(1, 2).unwrap(), 0);
-    // TIME: 09:30:00 → 9*3600 + 30*60 = 34200 seconds = 34200000000 µs
-    assert_eq!(table.get_i64(1, 0).unwrap(), 34_200_000_000);
-    // TIME: 14:15:30.500000 → 51330.5 seconds = 51330500000 µs
-    assert_eq!(table.get_i64(1, 1).unwrap(), 51_330_500_000);
+    // TIME: 09:30:00 → 9*3600000 + 30*60000 = 34200000 ms
+    assert_eq!(table.get_i64(1, 0).unwrap(), 34_200_000);
+    // TIME: 14:15:30.500000 → 14*3600000 + 15*60000 + 30*1000 + 500 = 51330500 ms
+    assert_eq!(table.get_i64(1, 1).unwrap(), 51_330_500);
 
     // TIMESTAMP: 1970-01-01T00:00:00 → 0 µs since epoch
     assert_eq!(table.get_i64(2, 2).unwrap(), 0);
-    // TIMESTAMP: 2024-01-15T09:30:00 → d0 * 86400000000 + 34200000000
+    // TIMESTAMP: 2024-01-15T09:30:00 → d0 * 86400000000 + 34200000000 µs
     let ts0 = table.get_i64(2, 0).unwrap();
     let expected_ts = d0 * 86_400_000_000 + 34_200_000_000;
     assert_eq!(

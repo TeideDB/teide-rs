@@ -870,7 +870,7 @@ impl Table {
     unsafe fn read_i64_from_vec(vec: *mut ffi::td_t, t: i8, row: usize) -> Option<i64> {
         let data = unsafe { ffi::td_data(vec) };
         match t {
-            ffi::TD_I64 | ffi::TD_TIME | ffi::TD_TIMESTAMP => {
+            ffi::TD_I64 | ffi::TD_TIMESTAMP => {
                 let p = data as *const i64;
                 Some(unsafe { *p.add(row) })
             }
@@ -878,7 +878,7 @@ impl Table {
                 let p = data as *const u8;
                 Some(unsafe { *p.add(row) } as i64)
             }
-            ffi::TD_I32 | ffi::TD_DATE => {
+            ffi::TD_I32 | ffi::TD_DATE | ffi::TD_TIME => {
                 let p = data as *const i32;
                 Some(unsafe { *p.add(row) } as i64)
             }

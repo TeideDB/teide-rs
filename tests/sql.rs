@@ -1864,3 +1864,74 @@ fn parted_sql_create_table_select_star() {
         "expected 5 groups from registered flat table"
     );
 }
+
+/// Regression: CSV with TIME column followed by SYM column must not corrupt
+/// the trailing column. Before the fix, fast_time() wrote int64 (8 bytes)
+/// into a TD_TIME vector allocated at int32 (4 bytes), overflowing into the
+/// next column's memory.
+#[test]
+fn csv_time_column_no_overflow() {
+    let _lock = ENGINE_LOCK.lock().unwrap();
+
+    // 13 columns: mixed SYM, I64, TIME — reproduces the original bug
+    let path = "/tmp/csv_time_overflow_test.csv";
+    {
+        let mut f = std::fs::File::create(path).unwrap();
+        writeln!(f, "LimitName,Value,State,Action,Symbol,Category,Scope,Trader,Client,Broker,Deleted,Time,Author").unwrap();
+        for i in 0..200 {
+            writeln!(f, "orderSize,{},,,,,Trader,T{:04},C001,B001,N,13:48:31.187,admin", 1000 + i, i).unwrap();
+        }
+    }
+
+    let ctx = teide::Context::new().unwrap();
+    let table = ctx.read_csv(path).unwrap();
+    assert_eq!(table.nrows(), 200);
+    assert_eq!(table.ncols(), 13);
+
+    // Every column must have len == nrows
+    for c in 0..table.ncols() as usize {
+        let col = table.get_col_idx(c as i64).unwrap();
+        let col_len = unsafe { teide::ffi::td_len(col) };
+        assert_eq!(
+            col_len, 200,
+            "Column '{}' (idx {c}) has len {col_len}, expected 200",
+            table.col_name_str(c)
+        );
+    }
+
+    // TIME column (idx 11) should be TD_TIME with correct millisecond value
+    let time_col = table.get_col_idx(11).unwrap();
+    assert_eq!(unsafe { teide::ffi::td_type(time_col) }, 10); // TD_TIME
+    // 13:48:31.187 = 13*3600000 + 48*60000 + 31*1000 + 187 = 49711187 ms
+    let time_val = table.get_i64(11, 0).unwrap();
+    assert_eq!(time_val, 49_711_187, "TIME should be milliseconds since midnight");
+
+    // SYM column after TIME (idx 12) must not be corrupted
+    let author_col = table.get_col_idx(12).unwrap();
+    assert_eq!(unsafe { teide::ffi::td_type(author_col) }, 20); // TD_SYM
+
+    // Minimal: 3 columns with TIME in the middle
+    let path2 = "/tmp/csv_time_minimal_test.csv";
+    {
+        let mut f = std::fs::File::create(path2).unwrap();
+        writeln!(f, "a,t,z").unwrap();
+        for _ in 0..100 {
+            writeln!(f, "hello,09:30:00,world").unwrap();
+        }
+    }
+
+    let table2 = ctx.read_csv(path2).unwrap();
+    assert_eq!(table2.nrows(), 100);
+    for c in 0..table2.ncols() as usize {
+        let col = table2.get_col_idx(c as i64).unwrap();
+        assert_eq!(
+            unsafe { teide::ffi::td_len(col) }, 100,
+            "Column '{}' has wrong len", table2.col_name_str(c)
+        );
+    }
+    // 09:30:00 = 9*3600000 + 30*60000 = 34200000 ms
+    assert_eq!(table2.get_i64(1, 0).unwrap(), 34_200_000);
+
+    std::fs::remove_file(path).ok();
+    std::fs::remove_file(path2).ok();
+}
