@@ -1392,6 +1392,12 @@ fn resolve_table_factor(
             if let Some(func_args) = args {
                 let func_name = table_name.to_lowercase();
                 let table = resolve_table_function(ctx, &func_name, &func_args.args)?;
+                // Normalize column names to lowercase for case-insensitive SQL resolution.
+                // Without this, g.scan("limitname") can't find "LimitName" from CSV headers.
+                let col_names: Vec<String> = (0..table.ncols() as usize)
+                    .map(|i| table.col_name_str(i).to_lowercase())
+                    .collect();
+                let table = table.with_column_names(&col_names)?;
                 let schema = build_schema(&table);
                 return Ok((table, schema));
             }

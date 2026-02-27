@@ -1935,3 +1935,48 @@ fn csv_time_column_no_overflow() {
     std::fs::remove_file(path).ok();
     std::fs::remove_file(path2).ok();
 }
+
+/// Regression: GROUP BY on inline read_csv with narrowed SYM columns must
+/// not crash. The morsel iterator previously used td_elem_size(TD_SYM)=8
+/// for all SYM widths, causing OOB reads on W8/W16 columns.
+#[test]
+fn csv_group_by_with_narrow_sym() {
+    let _lock = ENGINE_LOCK.lock().unwrap();
+
+    // 13 columns with TIME + many narrowed SYM columns
+    let path = "/tmp/csv_groupby_narrow_test.csv";
+    {
+        let mut f = std::fs::File::create(path).unwrap();
+        writeln!(f, "LimitName,Value,State,Action,Symbol,Category,Scope,Trader,Client,Broker,Deleted,Time,Author").unwrap();
+        for i in 0..100 {
+            let limit = if i % 2 == 0 { "orderSize" } else { "maxQty" };
+            writeln!(f, "{limit},{},active,buy,AAPL,equity,global,T{:04},C001,B001,N,13:48:31.187,admin", 1000 + i, i).unwrap();
+        }
+    }
+
+    let mut session = Session::new().unwrap();
+
+    // avg + group by directly on read_csv (exercises morsel iteration over narrow SYM)
+    let r = session.execute(&format!(
+        "select avg(value) from read_csv('{path}') group by limitname"
+    )).unwrap();
+    match &r {
+        ExecResult::Query(q) => {
+            assert_eq!(q.table.nrows(), 2, "should have 2 groups");
+        }
+        _ => panic!("Expected query result"),
+    }
+
+    // Also test count + group by
+    let r2 = session.execute(&format!(
+        "select limitname, count(*) from read_csv('{path}') group by limitname"
+    )).unwrap();
+    match &r2 {
+        ExecResult::Query(q) => {
+            assert_eq!(q.table.nrows(), 2);
+        }
+        _ => panic!("Expected query result"),
+    }
+
+    std::fs::remove_file(path).ok();
+}
