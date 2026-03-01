@@ -1649,6 +1649,82 @@ impl Graph<'_> {
             (*self.raw).selection = sel;
         }
     }
+
+    // ---- Multi-table support ------------------------------------------------
+
+    /// Register an additional table with the graph. Returns a table ID
+    /// that can be used with `scan_table`.
+    pub fn add_table(&self, table: &Table) -> u16 {
+        unsafe { ffi::td_graph_add_table(self.raw, table.raw) }
+    }
+
+    /// Scan a column from a registered table (by table_id from `add_table`).
+    pub fn scan_table(&self, table_id: u16, col_name: &str) -> Result<Column> {
+        let c_name = CString::new(col_name).map_err(|_| Error::InvalidInput)?;
+        Self::check_op(unsafe { ffi::td_scan_table(self.raw, table_id, c_name.as_ptr()) })
+    }
+
+    // ---- Graph traversal ops ------------------------------------------------
+
+    /// 1-hop neighbor expansion via CSR.
+    /// Returns a table with `_src` and `_dst` I64 columns.
+    pub fn expand(&self, src_nodes: Column, rel: &Rel, direction: u8) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_expand(self.raw, src_nodes.raw, rel.ptr, direction)
+        })
+    }
+
+    /// Variable-length BFS traversal.
+    /// Returns a table with `_start`, `_end`, `_depth` columns.
+    pub fn var_expand(
+        &self,
+        start: Column,
+        rel: &Rel,
+        direction: u8,
+        min_depth: u8,
+        max_depth: u8,
+        track_path: bool,
+    ) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_var_expand(
+                self.raw,
+                start.raw,
+                rel.ptr,
+                direction,
+                min_depth,
+                max_depth,
+                track_path,
+            )
+        })
+    }
+
+    /// BFS shortest path from src to dst.
+    /// Returns a table with `_node`, `_depth` columns.
+    pub fn shortest_path(
+        &self,
+        src: Column,
+        dst: Column,
+        rel: &Rel,
+        max_depth: u8,
+    ) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_shortest_path(self.raw, src.raw, dst.raw, rel.ptr, max_depth)
+        })
+    }
+
+    /// Worst-case optimal join via Leapfrog Triejoin.
+    /// Returns a table with `_v0`, `_v1`, ..., `_vN` columns.
+    pub fn wco_join(&self, rels: &[&Rel], n_vars: u8) -> Result<Column> {
+        let mut ptrs: Vec<*mut ffi::td_rel_t> = rels.iter().map(|r| r.ptr).collect();
+        Self::check_op(unsafe {
+            ffi::td_wco_join(
+                self.raw,
+                ptrs.as_mut_ptr(),
+                rels.len() as u8,
+                n_vars,
+            )
+        })
+    }
 }
 
 impl Drop for Graph<'_> {
@@ -1662,11 +1738,111 @@ impl Drop for Graph<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Rel — RAII wrapper for a C-allocated td_rel_t (CSR relationship)
+// ---------------------------------------------------------------------------
+
+/// RAII wrapper for a C-allocated `td_rel_t`.
+/// Represents a CSR-encoded relationship (adjacency index) between tables.
+pub struct Rel {
+    ptr: *mut ffi::td_rel_t,
+}
+
+impl Rel {
+    /// Build a relationship from a foreign key column.
+    ///
+    /// `from_table` contains a column named `fk_col` whose I64 values
+    /// are row offsets into the target table.
+    pub fn build(from_table: &Table, fk_col: &str, n_target_nodes: i64, sort: bool) -> Result<Self> {
+        let c_col = CString::new(fk_col).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe {
+            ffi::td_rel_build(from_table.raw, c_col.as_ptr(), n_target_nodes, sort)
+        };
+        if ptr.is_null() {
+            return Err(Error::Oom);
+        }
+        Ok(Rel { ptr })
+    }
+
+    /// Build a relationship from an explicit edge table with src/dst I64 columns.
+    pub fn from_edges(
+        edge_table: &Table,
+        src_col: &str,
+        dst_col: &str,
+        n_src: i64,
+        n_dst: i64,
+        sort: bool,
+    ) -> Result<Self> {
+        let c_src = CString::new(src_col).map_err(|_| Error::InvalidInput)?;
+        let c_dst = CString::new(dst_col).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe {
+            ffi::td_rel_from_edges(
+                edge_table.raw,
+                c_src.as_ptr(),
+                c_dst.as_ptr(),
+                n_src,
+                n_dst,
+                sort,
+            )
+        };
+        if ptr.is_null() {
+            return Err(Error::Oom);
+        }
+        Ok(Rel { ptr })
+    }
+
+    /// Load a relationship from disk.
+    pub fn load(dir: &str) -> Result<Self> {
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe { ffi::td_rel_load(c_dir.as_ptr()) };
+        if ptr.is_null() {
+            return Err(Error::Io);
+        }
+        Ok(Rel { ptr })
+    }
+
+    /// Memory-map a relationship from disk.
+    pub fn mmap(dir: &str) -> Result<Self> {
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe { ffi::td_rel_mmap(c_dir.as_ptr()) };
+        if ptr.is_null() {
+            return Err(Error::Io);
+        }
+        Ok(Rel { ptr })
+    }
+
+    /// Save the relationship to disk.
+    pub fn save(&self, dir: &str) -> Result<()> {
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let err = unsafe { ffi::td_rel_save(self.ptr, c_dir.as_ptr()) };
+        if err != ffi::td_err_t::TD_OK {
+            return Err(Error::from_code(err));
+        }
+        Ok(())
+    }
+
+    /// Raw pointer for FFI interop.
+    pub fn as_raw(&self) -> *mut ffi::td_rel_t {
+        self.ptr
+    }
+}
+
+impl Drop for Rel {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                ffi::td_rel_free(self.ptr);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Re-exports for downstream crates
 // ---------------------------------------------------------------------------
 
 pub use ffi::td_graph_t;
 pub use ffi::td_op_t;
+pub use ffi::td_rel_t;
 pub use ffi::td_t;
 
 /// Low-level FFI access for downstream crates (e.g., teide-db).

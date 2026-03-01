@@ -131,6 +131,12 @@ pub const TD_ORDER_MAX: u32 = 30;
 pub const TD_PARALLEL_THRESHOLD: i64 = 64 * TD_MORSEL_ELEMS;
 pub const TD_DISPATCH_MORSELS: u32 = 8;
 
+// ===== Graph Direction Constants =====
+
+pub const TD_DIR_FWD: u8 = 0;
+pub const TD_DIR_REV: u8 = 1;
+pub const TD_DIR_BOTH: u8 = 2;
+
 // ===== Opcode Constants =====
 
 // Sources
@@ -221,6 +227,12 @@ pub const OP_STDDEV_POP: u16 = 73;
 pub const OP_VAR: u16 = 74;
 pub const OP_VAR_POP: u16 = 75;
 pub const OP_ILIKE: u16 = 76;
+
+// Graph ops
+pub const OP_EXPAND: u16 = 80;
+pub const OP_VAR_EXPAND: u16 = 81;
+pub const OP_SHORTEST_PATH: u16 = 82;
+pub const OP_WCO_JOIN: u16 = 83;
 
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
@@ -485,10 +497,19 @@ pub struct td_graph_t {
     pub node_count: u32,
     pub node_cap: u32,
     pub table: *mut td_t,
+    pub tables: *mut *mut td_t,
+    pub n_tables: u16,
     pub ext_nodes: *mut *mut td_op_ext_t,
     pub ext_count: u32,
     pub ext_cap: u32,
     pub selection: *mut td_t,
+}
+
+// ===== Graph Relationship (opaque) =====
+
+#[repr(C)]
+pub struct td_rel_t {
+    _opaque: [u8; 0],
 }
 
 // ===== Morsel Iterator =====
@@ -845,6 +866,61 @@ extern "C" {
     pub fn td_alias(g: *mut td_graph_t, input: *mut td_op_t, name: *const c_char) -> *mut td_op_t;
     pub fn td_materialize(g: *mut td_graph_t, input: *mut td_op_t) -> *mut td_op_t;
 
+    // --- Multi-table Graph API ---
+    pub fn td_graph_add_table(g: *mut td_graph_t, table: *mut td_t) -> u16;
+    pub fn td_scan_table(g: *mut td_graph_t, table_id: u16, col_name: *const c_char)
+        -> *mut td_op_t;
+
+    // --- Graph Traversal Ops ---
+    pub fn td_expand(
+        g: *mut td_graph_t,
+        src_nodes: *mut td_op_t,
+        rel: *mut td_rel_t,
+        direction: u8,
+    ) -> *mut td_op_t;
+    pub fn td_var_expand(
+        g: *mut td_graph_t,
+        start_nodes: *mut td_op_t,
+        rel: *mut td_rel_t,
+        direction: u8,
+        min_depth: u8,
+        max_depth: u8,
+        track_path: bool,
+    ) -> *mut td_op_t;
+    pub fn td_shortest_path(
+        g: *mut td_graph_t,
+        src: *mut td_op_t,
+        dst: *mut td_op_t,
+        rel: *mut td_rel_t,
+        max_depth: u8,
+    ) -> *mut td_op_t;
+    pub fn td_wco_join(
+        g: *mut td_graph_t,
+        rels: *mut *mut td_rel_t,
+        n_rels: u8,
+        n_vars: u8,
+    ) -> *mut td_op_t;
+
+    // --- CSR / Relationship API ---
+    pub fn td_rel_build(
+        from_table: *mut td_t,
+        fk_col: *const c_char,
+        n_target_nodes: i64,
+        sort_targets: bool,
+    ) -> *mut td_rel_t;
+    pub fn td_rel_from_edges(
+        edge_table: *mut td_t,
+        src_col: *const c_char,
+        dst_col: *const c_char,
+        n_src_nodes: i64,
+        n_dst_nodes: i64,
+        sort_targets: bool,
+    ) -> *mut td_rel_t;
+    pub fn td_rel_save(rel: *mut td_rel_t, dir: *const c_char) -> td_err_t;
+    pub fn td_rel_load(dir: *const c_char) -> *mut td_rel_t;
+    pub fn td_rel_mmap(dir: *const c_char) -> *mut td_rel_t;
+    pub fn td_rel_free(rel: *mut td_rel_t);
+
     // --- Optimizer API ---
     pub fn td_optimize(g: *mut td_graph_t, root: *mut td_op_t) -> *mut td_op_t;
     pub fn td_fuse_pass(g: *mut td_graph_t, root: *mut td_op_t);
@@ -890,5 +966,5 @@ const _: () = {
     assert!(std::mem::size_of::<td_t>() == 32);
     assert!(std::mem::size_of::<td_op_t>() == 32);
     assert!(std::mem::size_of::<td_op_ext_t>() == 104);
-    assert!(std::mem::size_of::<td_graph_t>() == 48);
+    assert!(std::mem::size_of::<td_graph_t>() == 64);
 };
