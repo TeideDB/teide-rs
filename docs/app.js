@@ -116,7 +116,7 @@
     'u8','u16','u32','u64','u128','usize','str','String','Vec','Box',
     'Option','Result','Arc','Mutex','Rc','HashMap','PathBuf','Path',
     'Context','Table','Graph','Column','Session','ExecResult','SqlResult',
-    'AggOp','WindowFunc','FrameType','FrameBound','MemStats','Error'
+    'AggOp','WindowFunc','FrameType','FrameBound','MemStats','Error','Rel'
   ];
   var RUST_MACROS = [
     'println','eprintln','print','format','vec','panic','assert','assert_eq',

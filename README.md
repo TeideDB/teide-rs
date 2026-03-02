@@ -7,6 +7,7 @@ Rust bindings for the [Teide](https://github.com/TeideDB/teide) columnar datafra
 - **SQL engine** — parse and execute SQL queries against Teide tables
 - **Interactive REPL** — syntax highlighting, tab completion, command history
 - **PgWire server** — connect with any PostgreSQL client (`psql`, DBeaver, etc.)
+- **Graph API** — CSR relationship indexes, 1-hop expand, variable-length BFS, shortest path, and Leapfrog Triejoin
 - **FFI bindings** — safe Rust wrappers around the C17 core
 
 ## Build

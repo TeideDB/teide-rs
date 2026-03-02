@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph API - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../graph/" class="sidebar-link">Graph API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">DEVELOPER</div>
+    <h1>Graph API</h1>
+    <p class="lead">Build CSR relationship indexes, traverse neighbors, find shortest paths, and run worst-case optimal joins via the Rust Graph API.</p>
+
+    <p>Teide's Graph API operates on the same lazy DAG as all other operations. You build a <code>Rel</code> (compressed sparse row index) from table columns, then call traversal operations on a <code>Graph</code>. Everything is optimized and executed together when you call <code>execute()</code>.</p>
+
+    <!-- ===== REL: BUILDING ===== -->
+    <h2>Rel &mdash; Building the Index</h2>
+    <p>A <code>Rel</code> is a CSR-encoded adjacency index between two sets of nodes. There are two ways to build one:</p>
+
+    <h3>From a foreign key column</h3>
+    <p>Use <code>Rel::build()</code> when one table has a column of I64 row offsets pointing into a target table:</p>
+    <pre><code class="language-rust">use teide::{Context, Rel};
+
+let ctx = Context::new()?;
+let edges = ctx.read_csv("edges.csv")?;   // columns: src, dst, weight
+
+// Build a CSR from the "dst" foreign key column.
+// n_target_nodes = number of rows in the target table.
+let rel = Rel::build(&amp;edges, "dst", 1000, true)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>from_table</code></td><td><code>&amp;Table</code></td><td>Table containing the foreign key column</td></tr>
+        <tr><td><code>fk_col</code></td><td><code>&amp;str</code></td><td>Name of the I64 column with target row offsets</td></tr>
+        <tr><td><code>n_target_nodes</code></td><td><code>i64</code></td><td>Number of rows in the target table (upper bound on IDs)</td></tr>
+        <tr><td><code>sort</code></td><td><code>bool</code></td><td>Sort target lists for deterministic traversal order</td></tr>
+      </tbody>
+    </table>
+
+    <h3>From an edge table</h3>
+    <p>Use <code>Rel::from_edges()</code> when you have explicit source/destination columns:</p>
+    <pre><code class="language-rust">let edges = ctx.read_csv("friendships.csv")?;  // columns: person_a, person_b
+
+let rel = Rel::from_edges(
+    &amp;edges,
+    "person_a",   // source column
+    "person_b",   // destination column
+    1000,         // number of source nodes
+    1000,         // number of destination nodes
+    true,         // sort targets
+)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>edge_table</code></td><td><code>&amp;Table</code></td><td>Table with source and destination columns</td></tr>
+        <tr><td><code>src_col</code></td><td><code>&amp;str</code></td><td>Name of the I64 source node column</td></tr>
+        <tr><td><code>dst_col</code></td><td><code>&amp;str</code></td><td>Name of the I64 destination node column</td></tr>
+        <tr><td><code>n_src</code></td><td><code>i64</code></td><td>Number of source nodes</td></tr>
+        <tr><td><code>n_dst</code></td><td><code>i64</code></td><td>Number of destination nodes</td></tr>
+        <tr><td><code>sort</code></td><td><code>bool</code></td><td>Sort target lists for deterministic traversal order</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== REL: PERSISTENCE ===== -->
+    <h2>Rel &mdash; Persistence</h2>
+    <p>Relationship indexes can be saved to disk and loaded back, avoiding the cost of rebuilding from raw data:</p>
+
+    <pre><code class="language-rust">// Save to disk
+rel.save("/data/indexes/friends")?;
+
+// Load from disk (full copy into memory)
+let rel = Rel::load("/data/indexes/friends")?;
+
+// Memory-map from disk (zero-copy, pages on demand)
+let rel = Rel::mmap("/data/indexes/friends")?;</code></pre>
+
+    <table>
+      <thead><tr><th>Method</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>save(dir)</code></td><td>Serialize the CSR to the given directory</td></tr>
+        <tr><td><code>load(dir)</code></td><td>Deserialize from disk into memory</td></tr>
+        <tr><td><code>mmap(dir)</code></td><td>Memory-map from disk (zero-copy, OS pages data on demand)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>Tip:</strong> Use <code>mmap</code> for large relationship indexes. The OS will page in only the portions accessed during traversal, keeping memory usage proportional to query scope rather than index size.</p>
+    </div>
+
+    <!-- ===== DIRECTION CONSTANTS ===== -->
+    <h2>Direction Constants</h2>
+    <p>Traversal operations accept a direction parameter controlling which edges are followed:</p>
+
+    <table>
+      <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>TD_DIR_FWD</code></td><td><code>0</code></td><td>Follow forward edges only (src &rarr; dst)</td></tr>
+        <tr><td><code>TD_DIR_REV</code></td><td><code>1</code></td><td>Follow reverse edges only (dst &rarr; src)</td></tr>
+        <tr><td><code>TD_DIR_BOTH</code></td><td><code>2</code></td><td>Follow edges in both directions</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code class="language-rust">use teide::ffi::{TD_DIR_FWD, TD_DIR_REV, TD_DIR_BOTH};</code></pre>
+
+    <!-- ===== MULTI-TABLE ===== -->
+    <h2>Multi-Table Support</h2>
+    <p>A <code>Graph</code> is created from one primary table, but you can register additional tables and scan their columns in the same computation:</p>
+
+    <pre><code class="language-rust">let ctx = Context::new()?;
+let people = ctx.read_csv("people.csv")?;
+let posts = ctx.read_csv("posts.csv")?;
+
+let mut g = ctx.graph(&amp;people)?;
+
+// Register the posts table; get back a table ID
+let posts_id = g.add_table(&amp;posts);
+
+// Scan columns from the secondary table
+let post_title = g.scan_table(posts_id, "title")?;
+let post_author = g.scan_table(posts_id, "author_id")?;</code></pre>
+
+    <table>
+      <thead><tr><th>Method</th><th>Returns</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>add_table(&amp;table)</code></td><td><code>u16</code></td><td>Register a table and return its ID for use with <code>scan_table</code></td></tr>
+        <tr><td><code>scan_table(id, col)</code></td><td><code>Column</code></td><td>Scan a named column from a registered table</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== GRAPH TRAVERSAL ===== -->
+    <h2>Graph Traversal</h2>
+
+    <h3>expand &mdash; 1-hop neighbor expansion</h3>
+    <p>Expand each source node to its immediate neighbors via the CSR index:</p>
+
+    <pre><code class="language-rust">let ctx = Context::new()?;
+let people = ctx.read_csv("people.csv")?;
+let edges = ctx.read_csv("follows.csv")?;
+
+let rel = Rel::from_edges(&amp;edges, "src", "dst", 1000, 1000, true)?;
+
+let mut g = ctx.graph(&amp;people)?;
+let src = g.scan("id")?;
+let neighbors = g.expand(src, &amp;rel, TD_DIR_FWD)?;
+let result = g.execute(neighbors)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>src_nodes</code></td><td><code>Column</code></td><td>I64 column of source node IDs</td></tr>
+        <tr><td><code>rel</code></td><td><code>&amp;Rel</code></td><td>CSR relationship index</td></tr>
+        <tr><td><code>direction</code></td><td><code>u8</code></td><td><code>TD_DIR_FWD</code>, <code>TD_DIR_REV</code>, or <code>TD_DIR_BOTH</code></td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Output columns:</strong></p>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>_src</code></td><td>I64</td><td>Source node ID</td></tr>
+        <tr><td><code>_dst</code></td><td>I64</td><td>Destination node ID (neighbor)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>var_expand &mdash; Variable-length BFS</h3>
+    <p>Breadth-first traversal from start nodes, expanding between <code>min_depth</code> and <code>max_depth</code> hops:</p>
+
+    <pre><code class="language-rust">let start = g.scan("id")?;
+let reached = g.var_expand(
+    start,
+    &amp;rel,
+    TD_DIR_FWD,
+    1,     // min_depth
+    3,     // max_depth
+    false, // track_path
+)?;
+let result = g.execute(reached)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>start</code></td><td><code>Column</code></td><td>I64 column of starting node IDs</td></tr>
+        <tr><td><code>rel</code></td><td><code>&amp;Rel</code></td><td>CSR relationship index</td></tr>
+        <tr><td><code>direction</code></td><td><code>u8</code></td><td>Edge direction</td></tr>
+        <tr><td><code>min_depth</code></td><td><code>u8</code></td><td>Minimum number of hops (inclusive)</td></tr>
+        <tr><td><code>max_depth</code></td><td><code>u8</code></td><td>Maximum number of hops (inclusive)</td></tr>
+        <tr><td><code>track_path</code></td><td><code>bool</code></td><td>Whether to record full traversal paths</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Output columns:</strong></p>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>_start</code></td><td>I64</td><td>Starting node ID</td></tr>
+        <tr><td><code>_end</code></td><td>I64</td><td>Reached node ID</td></tr>
+        <tr><td><code>_depth</code></td><td>I64</td><td>Number of hops from start to end</td></tr>
+      </tbody>
+    </table>
+
+    <h3>shortest_path &mdash; BFS shortest path</h3>
+    <p>Find the shortest path between source and destination nodes via BFS:</p>
+
+    <pre><code class="language-rust">let src = g.const_i64(0)?;   // start node
+let dst = g.const_i64(42)?;  // target node
+let path = g.shortest_path(src, dst, &amp;rel, 10)?;
+let result = g.execute(path)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>src</code></td><td><code>Column</code></td><td>Source node ID(s)</td></tr>
+        <tr><td><code>dst</code></td><td><code>Column</code></td><td>Destination node ID(s)</td></tr>
+        <tr><td><code>rel</code></td><td><code>&amp;Rel</code></td><td>CSR relationship index</td></tr>
+        <tr><td><code>max_depth</code></td><td><code>u8</code></td><td>Maximum search depth</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Output columns:</strong></p>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>_node</code></td><td>I64</td><td>Node ID along the path</td></tr>
+        <tr><td><code>_depth</code></td><td>I64</td><td>Hop distance from the source</td></tr>
+      </tbody>
+    </table>
+
+    <h3>wco_join &mdash; Worst-case optimal join</h3>
+    <p>Leapfrog Triejoin across multiple relationships. Finds all n-cliques or multi-way join results in worst-case optimal time:</p>
+
+    <pre><code class="language-rust">// Find triangles: nodes (a, b, c) where a->b, b->c, a->c
+let rel_ab = Rel::from_edges(&amp;edges, "src", "dst", n, n, true)?;
+let rel_bc = Rel::from_edges(&amp;edges, "src", "dst", n, n, true)?;
+let rel_ac = Rel::from_edges(&amp;edges, "src", "dst", n, n, true)?;
+
+let triangles = g.wco_join(&amp;[&amp;rel_ab, &amp;rel_bc, &amp;rel_ac], 3)?;
+let result = g.execute(triangles)?;</code></pre>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>rels</code></td><td><code>&amp;[&amp;Rel]</code></td><td>Slice of relationship indexes to join</td></tr>
+        <tr><td><code>n_vars</code></td><td><code>u8</code></td><td>Number of join variables (output columns)</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Output columns:</strong></p>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>_v0</code>, <code>_v1</code>, ..., <code>_vN</code></td><td>I64</td><td>Node IDs for each join variable</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== COMPLETE EXAMPLE ===== -->
+    <h2>Complete Example</h2>
+    <p>End-to-end social network scenario: load data, build a relationship index, find friends-of-friends, and read the results.</p>
+
+    <pre><code class="language-rust">use teide::{Context, Rel};
+use teide::ffi::TD_DIR_FWD;
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let ctx = Context::new()?;
+
+    // Load a people table and an edge table
+    let people = ctx.read_csv("people.csv")?;       // id, name, age
+    let follows = ctx.read_csv("follows.csv")?;      // src, dst
+
+    let n = people.nrows() as i64;
+
+    // Build a CSR relationship index from the edge table
+    let rel = Rel::from_edges(&amp;follows, "src", "dst", n, n, true)?;
+
+    // Optionally persist for reuse
+    rel.save("/tmp/follows_rel")?;
+
+    // Create a graph rooted on the people table
+    let mut g = ctx.graph(&amp;people)?;
+
+    // Variable-length BFS: find all nodes reachable in 1-3 hops
+    let start = g.scan("id")?;
+    let reached = g.var_expand(start, &amp;rel, TD_DIR_FWD, 1, 3, false)?;
+
+    // Execute the computation graph
+    let result = g.execute(reached)?;
+
+    // Read the output columns
+    let nrows = result.nrows();
+    println!("Reached {} (start, end, depth) tuples", nrows);
+    for i in 0..nrows.min(10) {
+        let start = result.get_i64(0, i as usize).unwrap();
+        let end   = result.get_i64(1, i as usize).unwrap();
+        let depth = result.get_i64(2, i as usize).unwrap();
+        println!("  {} -&gt; {} (depth {})", start, end, depth);
+    }
+
+    Ok(())
+}</code></pre>
+
+    <!-- ===== API REFERENCE SUMMARY ===== -->
+    <h2>API Reference Summary</h2>
+
+    <h3>Rel methods</h3>
+    <table>
+      <thead><tr><th>Method</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>Rel::build(table, fk_col, n_target, sort)</code></td><td>Build CSR from a foreign key column</td></tr>
+        <tr><td><code>Rel::from_edges(table, src, dst, n_src, n_dst, sort)</code></td><td>Build CSR from an edge table</td></tr>
+        <tr><td><code>Rel::load(dir)</code></td><td>Load CSR from disk</td></tr>
+        <tr><td><code>Rel::mmap(dir)</code></td><td>Memory-map CSR from disk</td></tr>
+        <tr><td><code>rel.save(dir)</code></td><td>Save CSR to disk</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Graph traversal methods</h3>
+    <table>
+      <thead><tr><th>Method</th><th>Output columns</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>g.expand(src, rel, dir)</code></td><td><code>_src</code>, <code>_dst</code></td><td>1-hop neighbor expansion</td></tr>
+        <tr><td><code>g.var_expand(start, rel, dir, min, max, path)</code></td><td><code>_start</code>, <code>_end</code>, <code>_depth</code></td><td>Variable-length BFS</td></tr>
+        <tr><td><code>g.shortest_path(src, dst, rel, max)</code></td><td><code>_node</code>, <code>_depth</code></td><td>BFS shortest path</td></tr>
+        <tr><td><code>g.wco_join(rels, n_vars)</code></td><td><code>_v0</code>, <code>_v1</code>, ...</td><td>Leapfrog Triejoin</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Multi-table methods</h3>
+    <table>
+      <thead><tr><th>Method</th><th>Returns</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>g.add_table(table)</code></td><td><code>u16</code></td><td>Register a secondary table</td></tr>
+        <tr><td><code>g.scan_table(id, col)</code></td><td><code>Column</code></td><td>Scan a column from a registered table</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="page-nav">
+      <a href="../api/" class="prev">Rust API</a>
+      <a href="../storage/" class="next">Storage &amp; Symbols</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>
