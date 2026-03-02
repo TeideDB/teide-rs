@@ -301,9 +301,142 @@ let result = g.execute(triangles)?;</code></pre>
       </tbody>
     </table>
 
+    <!-- ===== CONSTRAINED TRAVERSAL ===== -->
+    <h2>Constrained Traversal</h2>
+    <p>There is no single "constrained traversal" primitive. Instead, you compose constraints by combining the <code>Rel</code> (structural), direction, depth bounds, and <code>filter</code> (predicate). All constraints are part of the same lazy DAG and are optimized together at <code>execute()</code> time.</p>
+
+    <h3>Constraint types</h3>
+    <table>
+      <thead><tr><th>Constraint</th><th>Mechanism</th><th>Applied</th></tr></thead>
+      <tbody>
+        <tr><td>Which edges exist</td><td><code>Rel::build</code> / <code>Rel::from_edges</code></td><td>Before traversal (index construction)</td></tr>
+        <tr><td>Edge direction</td><td><code>direction</code> parameter</td><td>At traversal time</td></tr>
+        <tr><td>Hop depth</td><td><code>min_depth</code> / <code>max_depth</code></td><td>At traversal (<code>var_expand</code>, <code>shortest_path</code>)</td></tr>
+        <tr><td>Source node properties</td><td><code>filter(col, predicate)</code> before traversal</td><td>Pre-traversal</td></tr>
+        <tr><td>Result properties</td><td><code>filter(col, predicate)</code> after traversal</td><td>Post-traversal</td></tr>
+        <tr><td>Structural patterns</td><td><code>wco_join</code> (Leapfrog Triejoin)</td><td>Multi-way pattern matching</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Pre-traversal filtering</h3>
+    <p>Constrain <strong>which nodes start</strong> the traversal by filtering source IDs with a predicate before passing them to <code>expand</code> or <code>var_expand</code>:</p>
+
+    <pre><code class="language-rust">let g = ctx.graph(&amp;people)?;
+
+// Scan columns from the people table
+let id  = g.scan("id")?;
+let age = g.scan("age")?;
+
+// Constraint: only start from people older than 30
+let threshold = g.const_i64(30)?;
+let pred      = g.gt(age, threshold)?;
+let old_ids   = g.filter(id, pred)?;
+
+// Traverse 1 hop from only those constrained start nodes
+let neighbors = g.expand(old_ids, &amp;rel, TD_DIR_FWD)?;
+let result    = g.execute(neighbors)?;</code></pre>
+
+    <p>Multiple predicates can be composed with <code>and</code> / <code>or</code>:</p>
+
+    <pre><code class="language-rust">let age  = g.scan("age")?;
+let city = g.scan("city")?;
+
+// age > 30 AND city = "NYC"
+let age_pred  = g.gt(age, g.const_i64(30)?)?;
+let city_pred = g.eq(city, g.const_str("NYC")?)?;
+let combined  = g.and(age_pred, city_pred)?;
+let start_ids = g.filter(g.scan("id")?, combined)?;</code></pre>
+
+    <h3>Depth-constrained traversal</h3>
+    <p>Use <code>min_depth</code> and <code>max_depth</code> on <code>var_expand</code> to bound how far the BFS goes:</p>
+
+    <pre><code class="language-rust">// Exactly 2 hops (friends-of-friends, excluding direct friends)
+let fof = g.var_expand(start, &amp;rel, TD_DIR_FWD, 2, 2, false)?;
+
+// Reachable within 1&ndash;5 hops in either direction
+let reachable = g.var_expand(start, &amp;rel, TD_DIR_BOTH, 1, 5, false)?;
+
+// Shortest path with a maximum depth of 10
+let path = g.shortest_path(src, dst, &amp;rel, 10)?;</code></pre>
+
+    <h3>Post-traversal filtering</h3>
+    <p>Constrain <strong>traversal results</strong> by executing the traversal first, then building a new graph on the result table to apply property predicates on destination nodes:</p>
+
+    <pre><code class="language-rust">// Step 1: execute the traversal
+let g = ctx.graph(&amp;people)?;
+let start = g.scan("id")?;
+let reached = g.var_expand(start, &amp;rel, TD_DIR_FWD, 1, 3, false)?;
+let traversal_result = g.execute(reached)?;
+// traversal_result columns: _start, _end, _depth
+
+// Step 2: build a new graph on the result to filter by depth
+let g2 = ctx.graph(&amp;traversal_result)?;
+let depth = g2.scan("_depth")?;
+let pred  = g2.le(depth, g2.const_i64(2)?)?;
+
+// Project only the columns we need, filtered
+let start_col = g2.filter(g2.scan("_start")?, pred)?;
+let end_col   = g2.filter(g2.scan("_end")?, pred)?;
+let depth_col = g2.filter(depth, pred)?;
+let projected = g2.select(start_col, &amp;[start_col, end_col, depth_col])?;
+let filtered  = g2.execute(projected)?;</code></pre>
+
+    <h3>Enriching results with destination properties</h3>
+    <p>After traversal, use <code>add_table</code> and <code>scan_table</code> to look up properties of destination nodes. Since <code>_dst</code> / <code>_end</code> values are row offsets into the target table, you can use them to index into that table's columns:</p>
+
+    <pre><code class="language-rust">// After expand: result has _src, _dst (row offsets into people)
+let g = ctx.graph(&amp;people)?;
+let start = g.scan("id")?;
+let neighbors = g.expand(start, &amp;rel, TD_DIR_FWD)?;
+let result = g.execute(neighbors)?;
+
+// Build a new graph to enrich _dst with people properties
+let g2 = ctx.graph(&amp;result)?;
+let people_id = g2.add_table(&amp;people);
+let dst_name = g2.scan_table(people_id, "name")?;   // look up name
+let dst_age  = g2.scan_table(people_id, "age")?;     // look up age
+
+// Filter: only neighbors younger than 25
+let pred = g2.lt(dst_age, g2.const_i64(25)?)?;
+let dst  = g2.filter(g2.scan("_dst")?, pred)?;
+let enriched = g2.execute(dst)?;</code></pre>
+
+    <h3>Combining all constraints</h3>
+    <p>The full pattern: pre-filter source nodes, traverse with depth bounds, then post-filter results.</p>
+
+    <pre><code class="language-rust">use teide::{Context, Rel};
+use teide::ffi::TD_DIR_FWD;
+
+let ctx = Context::new()?;
+let people  = ctx.read_csv("people.csv")?;    // id, name, city, age
+let follows = ctx.read_csv("follows.csv")?;   // src, dst
+let n = people.nrows() as i64;
+
+// Structural constraint: build the CSR index
+let rel = Rel::from_edges(&amp;follows, "src", "dst", n, n, true)?;
+
+let g = ctx.graph(&amp;people)?;
+let id   = g.scan("id")?;
+let city = g.scan("city")?;
+
+// Pre-traversal constraint: start from NYC residents only
+let nyc_pred = g.eq(city, g.const_str("NYC")?)?;
+let nyc_ids  = g.filter(id, nyc_pred)?;
+
+// Depth + direction constraints: 1&ndash;3 hops, forward only
+let reached = g.var_expand(nyc_ids, &amp;rel, TD_DIR_FWD, 1, 3, false)?;
+
+// Execute the constrained traversal
+let result = g.execute(reached)?;
+// result columns: _start, _end, _depth</code></pre>
+
+    <div class="note">
+      <p><strong>Tip:</strong> Because the graph is a lazy DAG, pre-traversal filters are composed into the same execution plan as the traversal itself. The optimizer can push predicates down, fuse operators, and eliminate dead code &mdash; so building the constraint in multiple steps has no performance penalty compared to a monolithic operation.</p>
+    </div>
+
     <!-- ===== COMPLETE EXAMPLE ===== -->
     <h2>Complete Example</h2>
-    <p>End-to-end social network scenario: load data, build a relationship index, find friends-of-friends, and read the results.</p>
+    <p>End-to-end social network scenario: load data, build a relationship index, find friends-of-friends reachable from users in a specific city, and read the results.</p>
 
     <pre><code class="language-rust">use teide::{Context, Rel};
 use teide::ffi::TD_DIR_FWD;
@@ -312,8 +445,8 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     let ctx = Context::new()?;
 
     // Load a people table and an edge table
-    let people = ctx.read_csv("people.csv")?;       // id, name, age
-    let follows = ctx.read_csv("follows.csv")?;      // src, dst
+    let people  = ctx.read_csv("people.csv")?;    // id, name, city, age
+    let follows = ctx.read_csv("follows.csv")?;   // src, dst
 
     let n = people.nrows() as i64;
 
@@ -324,18 +457,23 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     rel.save("/tmp/follows_rel")?;
 
     // Create a graph rooted on the people table
-    let mut g = ctx.graph(&amp;people)?;
+    let g = ctx.graph(&amp;people)?;
 
-    // Variable-length BFS: find all nodes reachable in 1-3 hops
-    let start = g.scan("id")?;
-    let reached = g.var_expand(start, &amp;rel, TD_DIR_FWD, 1, 3, false)?;
+    // Pre-traversal constraint: only start from NYC residents
+    let id   = g.scan("id")?;
+    let city = g.scan("city")?;
+    let pred = g.eq(city, g.const_str("NYC")?)?;
+    let nyc_ids = g.filter(id, pred)?;
+
+    // Depth-constrained BFS: friends-of-friends (exactly 2 hops)
+    let fof = g.var_expand(nyc_ids, &amp;rel, TD_DIR_FWD, 2, 2, false)?;
 
     // Execute the computation graph
-    let result = g.execute(reached)?;
+    let result = g.execute(fof)?;
 
     // Read the output columns
     let nrows = result.nrows();
-    println!("Reached {} (start, end, depth) tuples", nrows);
+    println!("Found {} friend-of-friend pairs from NYC", nrows);
     for i in 0..nrows.min(10) {
         let start = result.get_i64(0, i as usize).unwrap();
         let end   = result.get_i64(1, i as usize).unwrap();
