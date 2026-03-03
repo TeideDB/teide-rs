@@ -1614,6 +1614,8 @@ impl<'a> Graph<'a> {
             return Err(Error::Oom);
         }
         let result = unsafe { ffi::td_execute(self.raw, optimized) };
+        // GC: reclaim fully-free pools on the main thread after execution.
+        unsafe { ffi::td_heap_gc() };
         let result = check_ptr(result)?;
         Ok(result)
     }

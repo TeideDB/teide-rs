@@ -243,7 +243,7 @@ impl SessionMeta {
 pub struct TeideHandler {
     bridge: SessionBridge,
     meta: SessionMeta,
-    describe_cache: Arc<Mutex<HashMap<String, WireResult>>>,
+    describe_cache: Arc<Mutex<HashMap<String, EngineResponse>>>,
 }
 
 impl TeideHandler {
@@ -329,7 +329,7 @@ impl TeideHandler {
                         FieldFormat::Text,
                     )];
                     let mut cache = self.describe_cache.lock().await;
-                    cache.insert(sql.to_string(), wr);
+                    cache.insert(sql.to_string(), EngineResponse::Query(wr));
                     return Ok(fields);
                 }
             }
@@ -386,11 +386,16 @@ impl TeideHandler {
 
                 // Cache the result for subsequent do_query
                 let mut cache = self.describe_cache.lock().await;
-                cache.insert(sql.to_string(), wire_result);
+                cache.insert(sql.to_string(), EngineResponse::Query(wire_result));
 
                 Ok(schema)
             }
-            EngineResponse::Ddl(_) => Ok(vec![]),
+            EngineResponse::Ddl(msg) => {
+                // Cache DDL result so do_query doesn't re-execute
+                let mut cache = self.describe_cache.lock().await;
+                cache.insert(sql.to_string(), EngineResponse::Ddl(msg));
+                Ok(vec![])
+            }
         }
     }
 }
@@ -473,14 +478,21 @@ impl ExtendedQueryHandler for TeideHandler {
         // Check describe cache first (Describe already ran the query)
         {
             let mut cache = self.describe_cache.lock().await;
-            if let Some(wire_result) = cache.remove(query) {
-                // all_text=true: map all types to VARCHAR for extended protocol
-                let qr = encode::encode_wire_result(&wire_result, true)?;
-                return Ok(Response::Query(qr));
+            if let Some(cached) = cache.remove(query) {
+                match cached {
+                    EngineResponse::Query(wire_result) => {
+                        // all_text=true: map all types to VARCHAR for extended protocol
+                        let qr = encode::encode_wire_result(&wire_result, true)?;
+                        return Ok(Response::Query(qr));
+                    }
+                    EngineResponse::Ddl(msg) => {
+                        return Ok(Response::Execution(Tag::new(&msg).with_rows(0)));
+                    }
+                }
             }
         }
 
-        // Not cached (e.g. DDL, catalog, or Describe was skipped) — execute now
+        // Not cached (e.g. catalog, or Describe was skipped) — execute now
         let mut responses = self.execute_sql(query).await?;
         Ok(responses.remove(0))
     }
@@ -520,7 +532,7 @@ impl ExtendedQueryHandler for TeideHandler {
 
         // Check if we already described (and cached) this statement
         let cache = self.describe_cache.lock().await;
-        if let Some(wire_result) = cache.get(sql.as_str()) {
+        if let Some(EngineResponse::Query(wire_result)) = cache.get(sql.as_str()) {
             let fields: Vec<FieldInfo> = wire_result
                 .columns
                 .iter()
