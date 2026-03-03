@@ -1109,7 +1109,7 @@ pub struct Graph<'a> {
     _pinned: Vec<Box<dyn std::any::Any>>,
 }
 
-impl Graph<'_> {
+impl<'a> Graph<'a> {
     /// Raw pointer access.
     pub fn as_raw(&self) -> *mut ffi::td_graph_t {
         self.raw
@@ -1668,7 +1668,10 @@ impl Graph<'_> {
 
     /// 1-hop neighbor expansion via CSR.
     /// Returns a table with `_src` and `_dst` I64 columns.
-    pub fn expand(&self, src_nodes: Column, rel: &Rel, direction: u8) -> Result<Column> {
+    ///
+    /// The `Rel` must outlive the `Graph` because the C engine stores a raw
+    /// pointer to it and dereferences it during `execute()`.
+    pub fn expand(&self, src_nodes: Column, rel: &'a Rel, direction: u8) -> Result<Column> {
         Self::check_op(unsafe {
             ffi::td_expand(self.raw, src_nodes.raw, rel.ptr, direction)
         })
@@ -1676,10 +1679,13 @@ impl Graph<'_> {
 
     /// Variable-length BFS traversal.
     /// Returns a table with `_start`, `_end`, `_depth` columns.
+    ///
+    /// The `Rel` must outlive the `Graph` because the C engine stores a raw
+    /// pointer to it and dereferences it during `execute()`.
     pub fn var_expand(
         &self,
         start: Column,
-        rel: &Rel,
+        rel: &'a Rel,
         direction: u8,
         min_depth: u8,
         max_depth: u8,
@@ -1700,11 +1706,14 @@ impl Graph<'_> {
 
     /// BFS shortest path from src to dst.
     /// Returns a table with `_node`, `_depth` columns.
+    ///
+    /// The `Rel` must outlive the `Graph` because the C engine stores a raw
+    /// pointer to it and dereferences it during `execute()`.
     pub fn shortest_path(
         &self,
         src: Column,
         dst: Column,
-        rel: &Rel,
+        rel: &'a Rel,
         max_depth: u8,
     ) -> Result<Column> {
         Self::check_op(unsafe {
@@ -1714,13 +1723,17 @@ impl Graph<'_> {
 
     /// Worst-case optimal join via Leapfrog Triejoin.
     /// Returns a table with `_v0`, `_v1`, ..., `_vN` columns.
-    pub fn wco_join(&self, rels: &[&Rel], n_vars: u8) -> Result<Column> {
+    ///
+    /// The `Rel`s must outlive the `Graph` because the C engine stores raw
+    /// pointers to them and dereferences them during `execute()`.
+    pub fn wco_join(&self, rels: &[&'a Rel], n_vars: u8) -> Result<Column> {
+        let n_rels: u8 = rels.len().try_into().map_err(|_| Error::InvalidInput)?;
         let mut ptrs: Vec<*mut ffi::td_rel_t> = rels.iter().map(|r| r.ptr).collect();
         Self::check_op(unsafe {
             ffi::td_wco_join(
                 self.raw,
                 ptrs.as_mut_ptr(),
-                rels.len() as u8,
+                n_rels,
                 n_vars,
             )
         })
@@ -1745,6 +1758,8 @@ impl Drop for Graph<'_> {
 /// Represents a CSR-encoded relationship (adjacency index) between tables.
 pub struct Rel {
     ptr: *mut ffi::td_rel_t,
+    // Prevent the C engine from being torn down while this Rel is alive.
+    _engine: Arc<EngineGuard>,
 }
 
 impl Rel {
@@ -1760,7 +1775,7 @@ impl Rel {
         if ptr.is_null() {
             return Err(Error::Oom);
         }
-        Ok(Rel { ptr })
+        Ok(Rel { ptr, _engine: from_table.engine.clone() })
     }
 
     /// Build a relationship from an explicit edge table with src/dst I64 columns.
@@ -1787,27 +1802,33 @@ impl Rel {
         if ptr.is_null() {
             return Err(Error::Oom);
         }
-        Ok(Rel { ptr })
+        Ok(Rel { ptr, _engine: edge_table.engine.clone() })
     }
 
     /// Load a relationship from disk.
+    ///
+    /// The C engine must already be initialized (i.e. at least one `Context` must exist).
     pub fn load(dir: &str) -> Result<Self> {
+        let engine = acquire_existing_engine_guard()?;
         let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
         let ptr = unsafe { ffi::td_rel_load(c_dir.as_ptr()) };
         if ptr.is_null() {
             return Err(Error::Io);
         }
-        Ok(Rel { ptr })
+        Ok(Rel { ptr, _engine: engine })
     }
 
     /// Memory-map a relationship from disk.
+    ///
+    /// The C engine must already be initialized (i.e. at least one `Context` must exist).
     pub fn mmap(dir: &str) -> Result<Self> {
+        let engine = acquire_existing_engine_guard()?;
         let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
         let ptr = unsafe { ffi::td_rel_mmap(c_dir.as_ptr()) };
         if ptr.is_null() {
             return Err(Error::Io);
         }
-        Ok(Rel { ptr })
+        Ok(Rel { ptr, _engine: engine })
     }
 
     /// Save the relationship to disk.

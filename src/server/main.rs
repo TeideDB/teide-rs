@@ -96,8 +96,12 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        let abs_str = abs_path.display();
-        let sql = format!("CREATE TABLE {name} AS SELECT * FROM read_csv('{abs_str}')");
+        if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') || name.is_empty() {
+            eprintln!("Error: table name must be non-empty alphanumeric/underscore, got: {name}");
+            std::process::exit(1);
+        }
+        let abs_str = abs_path.display().to_string().replace('\'', "''");
+        let sql = format!("CREATE TABLE \"{name}\" AS SELECT * FROM read_csv('{abs_str}')");
         if args.verbose {
             eprintln!("[init] {sql}");
         }
