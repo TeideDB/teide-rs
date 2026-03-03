@@ -97,7 +97,7 @@ async fn main() {
             }
         };
         let abs_str = abs_path.display();
-        let sql = format!("CREATE TABLE {name} AS SELECT * FROM '{abs_str}'");
+        let sql = format!("CREATE TABLE {name} AS SELECT * FROM read_csv('{abs_str}')");
         if args.verbose {
             eprintln!("[init] {sql}");
         }
