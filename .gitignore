@@ -2,3 +2,6 @@ target/
 vendor/
 .DS_Store
 *.swp
+
+# ralphex progress logs
+.ralphex/progress/
