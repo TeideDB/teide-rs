@@ -610,24 +610,33 @@ impl TeideHandlerFactory {
         }
     }
 
-    fn make_handler(&self) -> TeideHandler {
+    /// Create a per-connection handler that shares one engine session
+    /// across both simple and extended protocols.
+    pub fn make_connection_handler(&self) -> TeideConnectionHandler {
         let tables = SendableTables(self.base_tables.0.clone());
         let bridge = SessionBridge::spawn(tables);
-        TeideHandler {
+        let handler = Arc::new(TeideHandler {
             bridge,
             meta: self.meta.clone(),
             describe_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        });
+        TeideConnectionHandler { handler }
     }
 }
 
-impl PgWireServerHandlers for TeideHandlerFactory {
+/// Per-connection wrapper that ensures both simple and extended query
+/// protocols share the same engine session (and thus the same table state).
+pub struct TeideConnectionHandler {
+    handler: Arc<TeideHandler>,
+}
+
+impl PgWireServerHandlers for TeideConnectionHandler {
     fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
-        Arc::new(self.make_handler())
+        self.handler.clone()
     }
 
     fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
-        Arc::new(self.make_handler())
+        self.handler.clone()
     }
 
     fn startup_handler(&self) -> Arc<impl StartupHandler> {

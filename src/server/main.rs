@@ -165,10 +165,10 @@ async fn main() {
                         if args.verbose {
                             eprintln!("[conn] New connection from {peer}");
                         }
-                        let factory = factory.clone();
+                        let conn = factory.make_connection_handler();
                         tokio::spawn(async move {
                             if let Err(e) =
-                                pgwire::tokio::process_socket(socket, None, factory).await
+                                pgwire::tokio::process_socket(socket, None, conn).await
                             {
                                 eprintln!("[conn] Error handling {peer}: {e}");
                             }
