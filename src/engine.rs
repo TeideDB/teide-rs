@@ -1019,9 +1019,9 @@ impl Table {
         let s = (time_us % 60_000_000) / 1_000_000;
         let frac = time_us % 1_000_000;
         if frac == 0 {
-            format!("{date}T{h:02}:{m:02}:{s:02}")
+            format!("{date} {h:02}:{m:02}:{s:02}")
         } else {
-            format!("{date}T{h:02}:{m:02}:{s:02}.{frac:06}")
+            format!("{date} {h:02}:{m:02}:{s:02}.{frac:06}")
         }
     }
 

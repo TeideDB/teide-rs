@@ -937,11 +937,11 @@ fn format_time_known_values() {
 #[test]
 fn format_timestamp_known_values() {
     // 2000-01-01 00:00:00
-    assert_eq!(Table::format_timestamp(0), "2000-01-01T00:00:00");
+    assert_eq!(Table::format_timestamp(0), "2000-01-01 00:00:00");
     // 1970-01-01 00:00:00 = -946684800000000 µs
     assert_eq!(
         Table::format_timestamp(-946_684_800_000_000),
-        "1970-01-01T00:00:00"
+        "1970-01-01 00:00:00"
     );
 }
 
