@@ -900,6 +900,11 @@ extern "C" {
         n_rels: u8,
         n_vars: u8,
     ) -> *mut td_op_t;
+    pub fn td_union_all(
+        g: *mut td_graph_t,
+        left: *mut td_op_t,
+        right: *mut td_op_t,
+    ) -> *mut td_op_t;
 
     // --- CSR / Relationship API ---
     pub fn td_rel_build(

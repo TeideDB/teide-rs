@@ -1045,6 +1045,50 @@ impl Table {
             std::str::from_utf8(slice).ok().map(|s| s.to_owned())
         }
     }
+
+    /// Concatenate rows from `other` table (UNION ALL).
+    ///
+    /// Both tables must have the same column schema.
+    /// Builds a temporary DAG, executes immediately, and returns a new `Table`.
+    pub fn union_all(&self, other: &Table) -> Result<Table> {
+        let _engine = acquire_engine_guard()?;
+        unsafe {
+            // Create a free graph (no bound table — both inputs enter as const_table ops).
+            let g = ffi::td_graph_new(std::ptr::null_mut());
+            if g.is_null() {
+                return Err(Error::Oom);
+            }
+            let left_op = ffi::td_const_table(g, self.raw);
+            if left_op.is_null() {
+                ffi::td_graph_free(g);
+                return Err(Error::NullPointer);
+            }
+            let right_op = ffi::td_const_table(g, other.raw);
+            if right_op.is_null() {
+                ffi::td_graph_free(g);
+                return Err(Error::NullPointer);
+            }
+            let union_op = ffi::td_union_all(g, left_op, right_op);
+            if union_op.is_null() {
+                ffi::td_graph_free(g);
+                return Err(Error::NullPointer);
+            }
+            let optimized = ffi::td_optimize(g, union_op);
+            if optimized.is_null() {
+                ffi::td_graph_free(g);
+                return Err(Error::Oom);
+            }
+            let result = ffi::td_execute(g, optimized);
+            ffi::td_heap_gc();
+            ffi::td_graph_free(g);
+            let result = check_ptr(result)?;
+            Ok(Table {
+                raw: result,
+                engine: self.engine.clone(),
+                _not_send_sync: std::marker::PhantomData,
+            })
+        }
+    }
 }
 
 impl Drop for Table {
@@ -1739,6 +1783,16 @@ impl<'a> Graph<'a> {
                 n_vars,
             )
         })
+    }
+
+    /// Row-union (UNION ALL) of two table columns.
+    ///
+    /// Both inputs must produce tables with the same schema.
+    /// Does NOT deduplicate — equivalent to SQL `UNION ALL`.
+    ///
+    /// Returns a column handle for the union result.
+    pub fn union_all(&self, left: Column, right: Column) -> Result<Column> {
+        Self::check_op(unsafe { ffi::td_union_all(self.raw, left.raw, right.raw) })
     }
 }
 
