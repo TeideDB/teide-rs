@@ -16,7 +16,8 @@ fn main() {
         let out_vendor = out_dir.join("vendor/teide");
         if !out_vendor.exists() {
             let status = Command::new("git")
-                .args(["clone", "--depth=1", "https://github.com/TeideDB/teide.git"])
+                .args(["clone", "--depth=1", "--branch", "feature/union-all",
+                       "https://github.com/theaspirational/teide.git"])
                 .arg(&out_vendor)
                 .status()
                 .expect("failed to run git clone");
