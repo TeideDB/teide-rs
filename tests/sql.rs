@@ -2050,6 +2050,6 @@ fn test_delete_with_string_predicate() {
 fn test_delete_nonexistent_table() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let mut session = Session::new().unwrap();
-    let result = session.execute("DELETE FROM nonexistent WHERE x = 1");
-    assert!(result.is_err());
+    let err = session.execute("DELETE FROM nonexistent WHERE x = 1").err().unwrap();
+    assert!(err.to_string().contains("not found"));
 }

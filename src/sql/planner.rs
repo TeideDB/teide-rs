@@ -139,7 +139,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
         Statement::Delete(delete) => plan_delete(session, &delete),
 
         _ => Err(SqlError::Plan(
-            "Only SELECT, CREATE TABLE AS, DROP TABLE, and INSERT INTO are supported".into(),
+            "Only SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, and DELETE FROM are supported".into(),
         )),
     }
 }
@@ -364,6 +364,7 @@ fn build_empty_table(source: &Table, columns: &[String]) -> Result<Table, SqlErr
 
     for (i, name) in columns.iter().enumerate() {
         let typ = source.col_type(i);
+        let name_id = crate::sym_intern(name)?;
         let vec = unsafe { crate::raw::td_vec_new(typ, 0) };
         if vec.is_null() {
             return Err(SqlError::Engine(crate::Error::Oom));
@@ -372,7 +373,6 @@ fn build_empty_table(source: &Table, columns: &[String]) -> Result<Table, SqlErr
             return Err(engine_err_from_raw(vec));
         }
 
-        let name_id = crate::sym_intern(name)?;
         let res = builder.add_col(name_id, vec);
         unsafe { crate::ffi_release(vec) };
         res?;
