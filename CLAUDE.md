@@ -62,7 +62,7 @@ All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`sca
 
 ### SQL Layer
 
-Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them.
+Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, and DELETE.
 
 ### Server Thread Model
 

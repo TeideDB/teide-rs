@@ -117,7 +117,8 @@ impl Session {
         })
     }
 
-    /// Execute a SQL statement, which may be a SELECT, CREATE TABLE AS, or DROP TABLE.
+    /// Execute a SQL statement, which may be a SELECT, CREATE TABLE AS, DROP TABLE,
+    /// INSERT INTO, UPDATE, or DELETE.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
         planner::session_execute(self, sql)
     }
