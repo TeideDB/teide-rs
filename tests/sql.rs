@@ -2053,3 +2053,111 @@ fn test_delete_nonexistent_table() {
     let err = session.execute("DELETE FROM nonexistent WHERE x = 1").err().unwrap();
     assert!(err.to_string().contains("not found"));
 }
+
+// ---------------------------------------------------------------------------
+// UPDATE tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_update_single_column() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR, age INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 35)").unwrap();
+
+    let result = session.execute("UPDATE t SET age = 99 WHERE id = 2").unwrap();
+    match result {
+        ExecResult::Ddl(msg) => assert!(msg.contains("1"), "should update 1 row: {msg}"),
+        _ => panic!("expected Ddl result"),
+    }
+
+    let r = unwrap_query(session.execute("SELECT id, name, age FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 3);
+    assert_eq!(r.table.get_i64(2, 0), Some(30));  // alice unchanged
+    assert_eq!(r.table.get_i64(2, 1), Some(99));  // bob updated
+    assert_eq!(r.table.get_i64(2, 2), Some(35));  // carol unchanged
+}
+
+#[test]
+fn test_update_multiple_columns() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR, status VARCHAR)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice', 'active'), (2, 'bob', 'active')").unwrap();
+
+    session.execute("UPDATE t SET name = 'robert', status = 'inactive' WHERE id = 2").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, name, status FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.get_str(1, 0), Some("alice".to_string()));
+    assert_eq!(r.table.get_str(1, 1), Some("robert".to_string()));
+    assert_eq!(r.table.get_str(2, 1), Some("inactive".to_string()));
+}
+
+#[test]
+fn test_update_without_where() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (x INTEGER, y INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)").unwrap();
+
+    session.execute("UPDATE t SET y = 0").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT x, y FROM t ORDER BY x").unwrap());
+    assert_eq!(r.table.nrows(), 3);
+    assert_eq!(r.table.get_i64(1, 0), Some(0));
+    assert_eq!(r.table.get_i64(1, 1), Some(0));
+    assert_eq!(r.table.get_i64(1, 2), Some(0));
+}
+
+#[test]
+fn test_update_with_expression() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, value INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)").unwrap();
+
+    // SET value = value + 5 (expression referencing existing column)
+    session.execute("UPDATE t SET value = value + 5 WHERE id > 1").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, value FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.get_i64(1, 0), Some(10));  // id=1 unchanged
+    assert_eq!(r.table.get_i64(1, 1), Some(25));  // id=2: 20+5
+    assert_eq!(r.table.get_i64(1, 2), Some(35));  // id=3: 30+5
+}
+
+#[test]
+fn test_update_no_matching_rows() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (x INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+    let result = session.execute("UPDATE t SET x = 99 WHERE x > 100").unwrap();
+    match result {
+        ExecResult::Ddl(msg) => assert!(msg.contains("0"), "should update 0 rows: {msg}"),
+        _ => panic!("expected Ddl result"),
+    }
+
+    let r = unwrap_query(session.execute("SELECT x FROM t ORDER BY x").unwrap());
+    assert_eq!(r.table.get_i64(0, 0), Some(1));
+    assert_eq!(r.table.get_i64(0, 1), Some(2));
+    assert_eq!(r.table.get_i64(0, 2), Some(3));
+}
+
+#[test]
+fn test_update_nonexistent_table() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    let err = session.execute("UPDATE nonexistent SET x = 1").err().unwrap();
+    assert!(err.to_string().contains("not found"));
+}
+
+#[test]
+fn test_update_nonexistent_column() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (x INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1)").unwrap();
+    let err = session.execute("UPDATE t SET nonexistent = 1").err().unwrap();
+    assert!(err.to_string().contains("not found"));
+}

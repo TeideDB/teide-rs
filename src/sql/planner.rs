@@ -24,10 +24,10 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
-    BinaryOperator, ColumnDef, DataType, Delete, Distinct, Expr, FromTable, FunctionArg,
-    FunctionArgExpr, GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator, ObjectName,
-    ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator,
-    Value, Values,
+    AssignmentTarget, BinaryOperator, ColumnDef, DataType, Delete, Distinct, Expr, FromTable,
+    FunctionArg, FunctionArgExpr, GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator,
+    ObjectName, ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
+    UnaryOperator, Value, Values,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -138,8 +138,12 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
 
         Statement::Delete(delete) => plan_delete(session, &delete),
 
+        Statement::Update { table, assignments, selection, .. } => {
+            plan_update(session, &table, &assignments, &selection)
+        }
+
         _ => Err(SqlError::Plan(
-            "Only SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, and DELETE FROM are supported".into(),
+            "Only SELECT, CREATE TABLE, DROP TABLE, INSERT INTO, DELETE, and UPDATE are supported".into(),
         )),
     }
 }
@@ -380,6 +384,117 @@ fn build_empty_table(source: &Table, columns: &[String]) -> Result<Table, SqlErr
 
     let table = builder.finish()?;
     Ok(table)
+}
+
+fn plan_update(
+    session: &mut Session,
+    table: &TableWithJoins,
+    assignments: &[sqlparser::ast::Assignment],
+    selection: &Option<Expr>,
+) -> Result<ExecResult, SqlError> {
+    let table_name = match &table.relation {
+        TableFactor::Table { name, .. } => object_name_to_string(name).to_lowercase(),
+        _ => return Err(SqlError::Plan("UPDATE: expected table name".into())),
+    };
+
+    let stored = session
+        .tables
+        .get(&table_name)
+        .ok_or_else(|| SqlError::Plan(format!("Table '{table_name}' not found")))?;
+
+    let original_nrows = stored.table.nrows();
+    let columns = stored.columns.clone();
+
+    let schema: HashMap<String, usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect();
+
+    // Parse and validate SET assignments up front (only needs string keys + references to AST)
+    let mut set_cols: Vec<(String, &Expr)> = Vec::new();
+    for assignment in assignments {
+        let col_name = match &assignment.target {
+            AssignmentTarget::ColumnName(name) => object_name_to_string(name).to_lowercase(),
+            AssignmentTarget::Tuple(_) => {
+                return Err(SqlError::Plan("UPDATE: tuple assignments not supported".into()));
+            }
+        };
+        if !schema.contains_key(&col_name) {
+            return Err(SqlError::Plan(format!(
+                "UPDATE: column '{col_name}' not found in table '{table_name}'"
+            )));
+        }
+        set_cols.push((col_name, &assignment.value));
+    }
+    let set_map: HashMap<&str, &Expr> = set_cols.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+
+    // Count matching rows first (separate graph scope so borrow of stored is released)
+    let updated_count = match selection {
+        Some(where_expr) => {
+            let count = {
+                let stored = session.tables.get(&table_name).unwrap();
+                let mut g2 = session.ctx.graph(&stored.table)?;
+                let t2 = g2.const_table(&stored.table)?;
+                let pred2 = plan_expr(&mut g2, where_expr, &schema)?;
+                let filtered = g2.filter(t2, pred2)?;
+                let count_table = g2.execute(filtered)?;
+                count_table.nrows()
+            };
+            count
+        }
+        None => original_nrows,
+    };
+
+    // Build the update graph (scoped so `g` is dropped before we mutate session.tables)
+    let result = {
+        let stored = session.tables.get(&table_name).unwrap();
+        let mut g = session.ctx.graph(&stored.table)?;
+        let mut out_cols: Vec<Column> = Vec::with_capacity(columns.len());
+
+        // For UPDATE without WHERE, build a vector-true predicate by comparing
+        // the first column to itself (col == col → vector of true).
+        let always_true = if selection.is_none() {
+            let first_col = g.scan(&columns[0])?;
+            let first_col2 = g.scan(&columns[0])?;
+            Some(g.eq(first_col, first_col2)?)
+        } else {
+            None
+        };
+
+        for col_name in &columns {
+            let old_col = g.scan(col_name)?;
+            if let Some(new_expr) = set_map.get(col_name.as_str()) {
+                let new_col = plan_expr(&mut g, new_expr, &schema)?;
+                let pred = match selection {
+                    Some(where_expr) => plan_expr(&mut g, where_expr, &schema)?,
+                    None => always_true.unwrap(),
+                };
+                let conditional = g.if_then_else(pred, new_col, old_col)?;
+                out_cols.push(conditional);
+            } else {
+                out_cols.push(old_col);
+            }
+        }
+
+        let table_node = g.const_table(&stored.table)?;
+        let projected = g.select(table_node, &out_cols)?;
+        g.execute(projected)?
+    };
+
+    let result = result.with_column_names(&columns)?;
+
+    session.tables.insert(
+        table_name.clone(),
+        StoredTable {
+            table: result,
+            columns,
+        },
+    );
+
+    Ok(ExecResult::Ddl(format!(
+        "Updated {updated_count} rows in '{table_name}'"
+    )))
 }
 
 /// Build a Table from VALUES (...), (...) literal rows.
