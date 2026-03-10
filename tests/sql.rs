@@ -2226,6 +2226,28 @@ fn test_delete_with_compound_predicate() {
 }
 
 #[test]
+fn test_filter_group_by_order_by() {
+    // Regression: filter was ignored when chained before group_by on
+    // the sequential HT path, and stale selection caused sort to
+    // produce empty results.
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE sales (region VARCHAR, amount INTEGER)").unwrap();
+    session.execute("INSERT INTO sales VALUES \
+        ('east', 100), ('west', 200), ('east', 300), ('west', 50), ('east', 25)").unwrap();
+
+    // WHERE filters out amounts <= 50, then GROUP BY region, ORDER BY total
+    let r = unwrap_query(session.execute(
+        "SELECT region, SUM(amount) as total FROM sales WHERE amount > 50 GROUP BY region ORDER BY total"
+    ).unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    // west: only 200 passes (50 filtered out) → total 200
+    // east: 100 + 300 pass (25 filtered out) → total 400
+    assert_eq!(r.table.get_i64(1, 0), Some(200)); // west total (smaller, first after ORDER BY)
+    assert_eq!(r.table.get_i64(1, 1), Some(400)); // east total (larger, second)
+}
+
+#[test]
 fn test_update_overwrites_previous_value() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let mut session = Session::new().unwrap();
