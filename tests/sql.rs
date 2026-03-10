@@ -2161,3 +2161,82 @@ fn test_update_nonexistent_column() {
     let err = session.execute("UPDATE t SET nonexistent = 1").err().unwrap();
     assert!(err.to_string().contains("not found"));
 }
+
+#[test]
+fn test_delete_then_insert() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')").unwrap();
+
+    session.execute("DELETE FROM t WHERE id = 1").unwrap();
+    session.execute("INSERT INTO t VALUES (3, 'carol')").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, name FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    assert_eq!(r.table.get_i64(0, 0), Some(2));
+    assert_eq!(r.table.get_i64(0, 1), Some(3));
+}
+
+#[test]
+fn test_update_then_select_with_filter() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, score INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 50), (2, 60), (3, 70)").unwrap();
+
+    session.execute("UPDATE t SET score = score * 2 WHERE score >= 60").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, score FROM t WHERE score > 100 ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    assert_eq!(r.table.get_i64(0, 0), Some(2));
+    assert_eq!(r.table.get_i64(0, 1), Some(3));
+    assert_eq!(r.table.get_i64(1, 0), Some(120));
+    assert_eq!(r.table.get_i64(1, 1), Some(140));
+}
+
+#[test]
+fn test_update_then_delete() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, active BOOLEAN)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, true), (2, true), (3, true)").unwrap();
+
+    session.execute("UPDATE t SET active = false WHERE id = 2").unwrap();
+    session.execute("DELETE FROM t WHERE active = false").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    assert_eq!(r.table.get_i64(0, 0), Some(1));
+    assert_eq!(r.table.get_i64(0, 1), Some(3));
+}
+
+#[test]
+fn test_delete_with_compound_predicate() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR, age INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 35)").unwrap();
+
+    session.execute("DELETE FROM t WHERE age < 30 OR name = 'carol'").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, name FROM t").unwrap());
+    assert_eq!(r.table.nrows(), 1);
+    assert_eq!(r.table.get_str(1, 0), Some("alice".to_string()));
+}
+
+#[test]
+fn test_update_overwrites_previous_value() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, score INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 10), (2, 20)").unwrap();
+
+    session.execute("UPDATE t SET score = 99 WHERE id = 1").unwrap();
+    session.execute("UPDATE t SET score = score + 1 WHERE id = 1").unwrap();
+
+    let r = unwrap_query(session.execute("SELECT id, score FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    assert_eq!(r.table.get_i64(1, 0), Some(100));
+    assert_eq!(r.table.get_i64(1, 1), Some(20));
+}
