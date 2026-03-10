@@ -452,36 +452,35 @@ fn plan_update(
         let mut g = session.ctx.graph(&stored.table)?;
         let mut out_cols: Vec<Column> = Vec::with_capacity(columns.len());
 
+        // Evaluate the WHERE predicate once (Column is Copy, so we reuse it).
+        // For no-WHERE, build a boolean vector of all-true values because the
+        // C engine requires vector predicates for if_then_else.
+        let pred = match selection {
+            Some(where_expr) => plan_expr(&mut g, where_expr, &schema)?,
+            None => {
+                let nrows = stored.table.nrows();
+                assert!(nrows >= 0, "table nrows must be non-negative");
+                let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_BOOL, nrows) };
+                if vec.is_null() || crate::ffi_is_err(vec) {
+                    return Err(SqlError::Plan("Failed to allocate boolean vector".into()));
+                }
+                unsafe {
+                    let data = crate::ffi::td_data(vec) as *mut u8;
+                    std::ptr::write_bytes(data, 1u8, nrows as usize);
+                    (*vec).val.len = nrows;
+                }
+                let col = unsafe { g.const_vec(vec)? };
+                unsafe { crate::ffi_release(vec) };
+                col
+            }
+        };
+
         for col_name in &columns {
             let old_col = g.scan(col_name)?;
             if let Some(new_expr) = set_map.get(col_name.as_str()) {
                 let new_col = plan_expr(&mut g, new_expr, &schema)?;
-                match selection {
-                    Some(where_expr) => {
-                        let pred = plan_expr(&mut g, where_expr, &schema)?;
-                        let conditional = g.if_then_else(pred, new_col, old_col)?;
-                        out_cols.push(conditional);
-                    }
-                    None => {
-                        // No WHERE → update all rows. The C engine requires vector
-                        // predicates for if_then_else (scalars don't broadcast), so
-                        // we build a boolean vector of all-true values.
-                        let nrows = stored.table.nrows();
-                        let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_BOOL, nrows) };
-                        if vec.is_null() || crate::ffi_is_err(vec) {
-                            return Err(SqlError::Plan("Failed to allocate boolean vector".into()));
-                        }
-                        unsafe {
-                            let data = crate::ffi::td_data(vec) as *mut u8;
-                            std::ptr::write_bytes(data, 1u8, nrows as usize);
-                            (*vec).val.len = nrows;
-                        }
-                        let all_true = unsafe { g.const_vec(vec)? };
-                        unsafe { crate::ffi_release(vec) };
-                        let conditional = g.if_then_else(all_true, new_col, old_col)?;
-                        out_cols.push(conditional);
-                    }
-                }
+                let conditional = g.if_then_else(pred, new_col, old_col)?;
+                out_cols.push(conditional);
             } else {
                 out_cols.push(old_col);
             }
