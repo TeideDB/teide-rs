@@ -1980,3 +1980,76 @@ fn csv_group_by_with_narrow_sym() {
 
     std::fs::remove_file(path).ok();
 }
+
+// ---------------------------------------------------------------------------
+// DELETE tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_delete_with_where() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')").unwrap();
+    let result = session.execute("DELETE FROM t WHERE id = 2").unwrap();
+    match result {
+        ExecResult::Ddl(msg) => assert!(msg.contains("1"), "should delete 1 row: {msg}"),
+        _ => panic!("expected Ddl result"),
+    }
+    let r = unwrap_query(session.execute("SELECT id, name FROM t ORDER BY id").unwrap());
+    assert_eq!(r.table.nrows(), 2);
+    assert_eq!(r.table.get_i64(0, 0), Some(1));
+    assert_eq!(r.table.get_i64(0, 1), Some(3));
+    assert_eq!(r.table.get_str(1, 0), Some("alice".to_string()));
+    assert_eq!(r.table.get_str(1, 1), Some("carol".to_string()));
+}
+
+#[test]
+fn test_delete_all_rows() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (x INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+    let result = session.execute("DELETE FROM t").unwrap();
+    match result {
+        ExecResult::Ddl(msg) => assert!(msg.contains("3"), "should delete 3 rows: {msg}"),
+        _ => panic!("expected Ddl result"),
+    }
+    let r = unwrap_query(session.execute("SELECT x FROM t").unwrap());
+    assert_eq!(r.table.nrows(), 0);
+}
+
+#[test]
+fn test_delete_no_matching_rows() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (x INTEGER)").unwrap();
+    session.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+    let result = session.execute("DELETE FROM t WHERE x > 100").unwrap();
+    match result {
+        ExecResult::Ddl(msg) => assert!(msg.contains("0"), "should delete 0 rows: {msg}"),
+        _ => panic!("expected Ddl result"),
+    }
+    let r = unwrap_query(session.execute("SELECT x FROM t").unwrap());
+    assert_eq!(r.table.nrows(), 3);
+}
+
+#[test]
+fn test_delete_with_string_predicate() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    session.execute("CREATE TABLE t (id INTEGER, name VARCHAR)").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')").unwrap();
+    session.execute("DELETE FROM t WHERE name = 'bob'").unwrap();
+    let r = unwrap_query(session.execute("SELECT id, name FROM t").unwrap());
+    assert_eq!(r.table.nrows(), 1);
+    assert_eq!(r.table.get_str(1, 0), Some("alice".to_string()));
+}
+
+#[test]
+fn test_delete_nonexistent_table() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let mut session = Session::new().unwrap();
+    let result = session.execute("DELETE FROM nonexistent WHERE x = 1");
+    assert!(result.is_err());
+}

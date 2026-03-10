@@ -24,9 +24,10 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
-    BinaryOperator, ColumnDef, DataType, Distinct, Expr, FunctionArg, FunctionArgExpr, GroupByExpr,
-    Ident, Insert, JoinConstraint, JoinOperator, ObjectName, ObjectType, Query, SelectItem,
-    SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator, Value, Values,
+    BinaryOperator, ColumnDef, DataType, Delete, Distinct, Expr, FromTable, FunctionArg,
+    FunctionArgExpr, GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator, ObjectName,
+    ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator,
+    Value, Values,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -134,6 +135,8 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
         }
 
         Statement::Insert(insert) => plan_insert(session, &insert),
+
+        Statement::Delete(delete) => plan_delete(session, &delete),
 
         _ => Err(SqlError::Plan(
             "Only SELECT, CREATE TABLE AS, DROP TABLE, and INSERT INTO are supported".into(),
@@ -288,6 +291,95 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
     Ok(ExecResult::Ddl(format!(
         "Inserted {nrows} rows into '{table_name}'"
     )))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE FROM
+// ---------------------------------------------------------------------------
+
+fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, SqlError> {
+    // Extract table name from FROM clause
+    let tables = match &delete.from {
+        FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => t,
+    };
+
+    if tables.len() != 1 {
+        return Err(SqlError::Plan("DELETE supports exactly one table".into()));
+    }
+
+    let table_name = match &tables[0].relation {
+        TableFactor::Table { name, .. } => object_name_to_string(name).to_lowercase(),
+        _ => return Err(SqlError::Plan("DELETE FROM requires a table name".into())),
+    };
+
+    let stored = session
+        .tables
+        .get(&table_name)
+        .ok_or_else(|| SqlError::Plan(format!("Table '{table_name}' not found")))?;
+
+    let columns = stored.columns.clone();
+    let old_nrows = stored.table.nrows();
+
+    let new_table = if let Some(selection) = &delete.selection {
+        // DELETE WHERE pred → keep rows where NOT pred
+        let schema: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let mut g = session.ctx.graph(&stored.table)?;
+        let table_node = g.const_table(&stored.table)?;
+        let pred = plan_expr(&mut g, selection, &schema)?;
+        let not_pred = g.not(pred)?;
+        let filtered = g.filter(table_node, not_pred)?;
+        g.execute(filtered)?
+    } else {
+        // DELETE without WHERE → delete all rows → build empty table with same schema
+        build_empty_table(&stored.table, &columns)?
+    };
+
+    let new_nrows = new_table.nrows();
+    let deleted = old_nrows - new_nrows;
+
+    let new_table = new_table.with_column_names(&columns)?;
+
+    session.tables.insert(
+        table_name.clone(),
+        StoredTable {
+            table: new_table,
+            columns,
+        },
+    );
+
+    Ok(ExecResult::Ddl(format!(
+        "Deleted {deleted} rows from '{table_name}'"
+    )))
+}
+
+/// Build an empty table with the same schema (column types) as the source table.
+fn build_empty_table(source: &Table, columns: &[String]) -> Result<Table, SqlError> {
+    let ncols = source.ncols() as i64;
+    let mut builder = RawTableBuilder::new(ncols)?;
+
+    for (i, name) in columns.iter().enumerate() {
+        let typ = source.col_type(i);
+        let vec = unsafe { crate::raw::td_vec_new(typ, 0) };
+        if vec.is_null() {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        if crate::ffi_is_err(vec) {
+            return Err(engine_err_from_raw(vec));
+        }
+
+        let name_id = crate::sym_intern(name)?;
+        let res = builder.add_col(name_id, vec);
+        unsafe { crate::ffi_release(vec) };
+        res?;
+    }
+
+    let table = builder.finish()?;
+    Ok(table)
 }
 
 /// Build a Table from VALUES (...), (...) literal rows.
