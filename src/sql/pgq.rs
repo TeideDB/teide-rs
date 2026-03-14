@@ -27,11 +27,9 @@ pub(crate) struct EdgeLabel {
     pub label: String,
     pub src_col: String,
     pub src_ref_table: String,
-    #[allow(dead_code)]
     pub src_ref_col: String,
     pub dst_col: String,
     pub dst_ref_table: String,
-    #[allow(dead_code)]
     pub dst_ref_col: String,
 }
 
@@ -434,21 +432,28 @@ fn apply_node_filter(
     filter_text: &str,
     variable: Option<&str>,
 ) -> Result<Column, SqlError> {
-    // Strip the variable prefix (e.g., "a.name" -> "name")
-    let clean = if let Some(var) = variable {
-        filter_text.replace(&format!("{var} ."), "").replace(&format!("{var}."), "")
-    } else {
-        filter_text.to_string()
-    };
-
-    // Parse: col = 'value' or col = number
-    let parts: Vec<&str> = clean.splitn(2, '=').collect();
+    // Split on '=' first, then strip variable prefix only from the LHS
+    // to avoid corrupting string values that contain the variable name.
+    let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
     if parts.len() != 2 {
         return Err(SqlError::Plan(format!(
             "Unsupported node filter syntax: {filter_text}. Only 'col = value' is supported."
         )));
     }
-    let col_name = parts[0].trim().to_lowercase();
+    let lhs = parts[0].trim();
+    let col_name = if let Some(var) = variable {
+        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
+        let mut s = lhs.to_string();
+        for p in &prefixes {
+            if let Some(stripped) = s.strip_prefix(p.as_str()) {
+                s = stripped.to_string();
+                break;
+            }
+        }
+        s.trim().to_lowercase()
+    } else {
+        lhs.to_lowercase()
+    };
     let value = parts[1].trim();
 
     let scan_col = g.scan(&col_name)?;
@@ -849,8 +854,18 @@ fn plan_shortest_path(
         SqlError::Plan(format!("Edge label '{edge_label}' not found"))
     })?;
 
-    let src_id = extract_node_id(src_node, &stored_rel.edge_label.src_ref_table, session)?;
-    let dst_id = extract_node_id(dst_node, &stored_rel.edge_label.dst_ref_table, session)?;
+    let src_id = extract_node_id(
+        src_node,
+        &stored_rel.edge_label.src_ref_table,
+        &stored_rel.edge_label.src_ref_col,
+        session,
+    )?;
+    let dst_id = extract_node_id(
+        dst_node,
+        &stored_rel.edge_label.dst_ref_table,
+        &stored_rel.edge_label.dst_ref_col,
+        session,
+    )?;
 
     let max_depth: u8 = match edge.quantifier {
         PathQuantifier::Range { max, .. } => max,
@@ -1025,10 +1040,13 @@ fn reconstruct_shortest_path(
 }
 
 /// Extract a specific node ID from a WHERE filter.
-/// Looks for patterns like "a.id = 42" or "a.name = 'Alice'" and resolves to row index.
+/// Extract a specific node ID from a WHERE filter.
+/// Looks for patterns like "a.id = 42" or "a.name = 'Alice'" and resolves to the
+/// node's key value using the reference column from the edge label.
 fn extract_node_id(
     node: &NodePattern,
     table_name: &str,
+    key_col: &str,
     session: &Session,
 ) -> Result<i64, SqlError> {
     let filter = node.filter.as_deref().ok_or_else(|| {
@@ -1037,30 +1055,39 @@ fn extract_node_id(
         )
     })?;
 
-    let var = node.variable.as_deref().unwrap_or("");
-    let clean = if !var.is_empty() {
-        filter.replace(&format!("{var} ."), "").replace(&format!("{var}."), "")
-    } else {
-        filter.to_string()
-    };
-
-    let parts: Vec<&str> = clean.splitn(2, '=').collect();
+    // Split on '=' first, then strip variable prefix only from the LHS
+    let parts: Vec<&str> = filter.splitn(2, '=').collect();
     if parts.len() != 2 {
         return Err(SqlError::Plan(format!(
             "Cannot extract node ID from filter: {filter}"
         )));
     }
-    let col_name = parts[0].trim().to_lowercase();
+    let lhs = parts[0].trim();
+    let var = node.variable.as_deref().unwrap_or("");
+    let col_name = if !var.is_empty() {
+        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
+        let mut s = lhs.to_string();
+        for p in &prefixes {
+            if let Some(stripped) = s.strip_prefix(p.as_str()) {
+                s = stripped.to_string();
+                break;
+            }
+        }
+        s.trim().to_lowercase()
+    } else {
+        lhs.to_lowercase()
+    };
     let value = parts[1].trim();
 
     // If filtering by ID directly
-    if col_name == "id" {
+    // If filtering directly by the key column, try to parse the value immediately.
+    if col_name == key_col {
         if let Ok(id) = value.parse::<i64>() {
             return Ok(id);
         }
     }
 
-    // Otherwise, scan the table to find the matching row index
+    // Otherwise, scan the table to find the matching row and return the key column value.
     let stored = session.tables.get(table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{table_name}' not found"))
     })?;
@@ -1076,8 +1103,10 @@ fn extract_node_id(
         None
     };
 
-    // Find the ID column to return the actual node ID, not the row index.
-    let id_col_idx = stored.columns.iter().position(|c| c == "id");
+    // Use the key column (from edge label ref) to return the actual node key value.
+    let key_col_idx = stored.columns.iter().position(|c| c == key_col).ok_or_else(|| {
+        SqlError::Plan(format!("Key column '{key_col}' not found in '{table_name}'"))
+    })?;
 
     for row in 0..nrows {
         let matched = if let Some(sv) = str_val {
@@ -1089,14 +1118,12 @@ fn extract_node_id(
         };
 
         if matched {
-            // Return the actual ID value from the id column, not the row index.
-            if let Some(id_idx) = id_col_idx {
-                if let Some(id_val) = stored.table.get_i64(id_idx, row) {
-                    return Ok(id_val);
-                }
+            if let Some(key_val) = stored.table.get_i64(key_col_idx, row) {
+                return Ok(key_val);
             }
-            // Fall back to row index only if there's no id column.
-            return Ok(row as i64);
+            return Err(SqlError::Plan(format!(
+                "NULL key value in column '{key_col}' at row {row} of '{table_name}'"
+            )));
         }
     }
 
