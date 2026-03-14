@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph SQL Proposal - Teide</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin: 24px 0;
+    }
+    .comparison-grid .card { padding: 24px; }
+    .comparison-grid .card h3 { margin-top: 0; }
+    .phase-badge {
+      display: inline-block;
+      font-family: var(--font-heading);
+      font-size: .65rem;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: var(--radius-pill);
+      margin-bottom: 8px;
+    }
+    .phase-1 { background: #d4edda; color: #256; }
+    .phase-2 { background: #d6eaf8; color: #245; }
+    .phase-3 { background: #fef4e8; color: #754; }
+    .phase-4 { background: #e8daef; color: #534; }
+    .status-have { color: var(--accent-green); font-weight: 600; }
+    .status-gap { color: var(--accent-red); font-weight: 600; }
+    .status-partial { color: var(--accent-orange); font-weight: 600; }
+    .arch-diagram {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      border-radius: var(--radius);
+      padding: 24px 32px;
+      margin: 24px 0;
+      font-family: var(--font-mono);
+      font-size: .82rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    @media (max-width: 900px) {
+      .comparison-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/filtering.html" class="sidebar-link">Filtering</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="../sql/joins.html" class="sidebar-link">Joins</a>
+      <a href="../sql/window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="../sql/sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="../sql/set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="../sql/subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="../sql/table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../graph/" class="sidebar-link">Graph API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Plans</div>
+      <a href="./" class="sidebar-link active">Graph SQL Proposal</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">PROPOSAL</div>
+    <h1>Graph Queries in SQL</h1>
+    <p class="lead">Extending Teide's SQL layer with graph traversal, relationship management, and composable graph+relational analytics &mdash; leveraging the engine primitives we already have.</p>
+
+    <!-- ===== CONTEXT ===== -->
+    <h2>Context: Why Graph?</h2>
+
+    <p>Graph databases like <strong>FalkorDB</strong> and <strong>Neo4j</strong> have proven the value of property graph queries for knowledge graphs, social networks, fraud detection, and AI/RAG pipelines. FalkorDB's core insight is using <strong>sparse matrix algebra</strong> (via GraphBLAS) to represent adjacency and execute traversals as matrix operations.</p>
+
+    <p>Teide already has a comparable foundation: <strong>CSR (Compressed Sparse Row)</strong> adjacency indexes with forward/reverse directions, integrated into the same morsel-driven columnar executor that handles SQL. The graph primitives exist in the C engine and are exposed via the Rust API &mdash; but <strong>not yet accessible through SQL</strong>.</p>
+
+    <p>This proposal adds graph capabilities to the SQL layer without any C engine changes.</p>
+
+    <!-- ===== WHAT WE HAVE ===== -->
+    <h2>What Teide Already Has</h2>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-num">ENGINE</div>
+        <h3>CSR Adjacency Indexes</h3>
+        <p>Double-indexed (forward + reverse) compressed sparse row format. O(1) neighbor degree lookup, O(1) range access. Save/load/mmap persistence.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">ENGINE</div>
+        <h3>4 Graph Operations</h3>
+        <p><code>EXPAND</code> (1-hop), <code>VAR_EXPAND</code> (BFS), <code>SHORTEST_PATH</code>, and <code>WCO_JOIN</code> (Leapfrog Triejoin for cyclic patterns like triangle detection).</p>
+      </div>
+      <div class="card">
+        <div class="card-num">OPTIMIZER</div>
+        <h3>Graph-Aware Optimization</h3>
+        <p>Sideways Information Passing (SIP) propagates filters backward through traversals. Factorized vectors avoid materializing cross-products.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">EXECUTOR</div>
+        <h3>Unified Relational + Graph</h3>
+        <p>Graph ops compose with filter, join, aggregate, sort, window functions in the same DAG. One optimizer, one executor.</p>
+      </div>
+    </div>
+
+    <!-- ===== COMPARISON ===== -->
+    <h2>Teide vs FalkorDB</h2>
+
+    <table>
+      <thead>
+        <tr><th>Capability</th><th>Teide</th><th>FalkorDB</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Graph storage</td>
+          <td>CSR (forward + reverse)</td>
+          <td>GraphBLAS sparse matrices (CSC)</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>1-hop expansion</td>
+          <td><code>OP_EXPAND</code></td>
+          <td>Matrix-vector multiply</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Variable-length traversal</td>
+          <td><code>OP_VAR_EXPAND</code> (BFS)</td>
+          <td>Algebraic path expressions</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Shortest path</td>
+          <td><code>OP_SHORTEST_PATH</code></td>
+          <td>Via Cypher <code>shortestPath()</code></td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Cyclic pattern matching</td>
+          <td><code>OP_WCO_JOIN</code> (Leapfrog Triejoin)</td>
+          <td>Matrix multiplication</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Edge properties</td>
+          <td>Via rowmap + property table</td>
+          <td>Native on matrix entries</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Optimizer</td>
+          <td>SIP, factorized vectors, pushdown</td>
+          <td>Algebraic rewriting</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Execution model</td>
+          <td>Morsel-driven parallel</td>
+          <td>GraphBLAS kernel parallelism</td>
+          <td><span class="status-have">Have</span></td>
+        </tr>
+        <tr>
+          <td>Query language for graphs</td>
+          <td>Rust API only</td>
+          <td>OpenCypher</td>
+          <td><span class="status-gap">Gap</span></td>
+        </tr>
+        <tr>
+          <td>Wire protocol</td>
+          <td>PgWire (Postgres)</td>
+          <td>RESP + Bolt</td>
+          <td><span class="status-partial">Different</span></td>
+        </tr>
+        <tr>
+          <td>Property graph schema</td>
+          <td>Tables + manual Rel</td>
+          <td>Labels, typed relationships</td>
+          <td><span class="status-gap">Gap</span></td>
+        </tr>
+        <tr>
+          <td>Graph algorithms</td>
+          <td>Traversal primitives only</td>
+          <td>Traversal primitives only</td>
+          <td><span class="status-partial">Comparable</span></td>
+        </tr>
+        <tr>
+          <td>Vector similarity</td>
+          <td>&mdash;</td>
+          <td>Cosine, Euclidean</td>
+          <td><span class="status-gap">Gap</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>Key insight:</strong> The engine-level primitives are already competitive. The main gap is accessibility &mdash; graph operations can only be used via the Rust API, not through SQL or any query language.</p>
+    </div>
+
+    <!-- ===== ARCHITECTURAL ADVANTAGE ===== -->
+    <h2>Architectural Advantage</h2>
+
+    <p>Teide's CSR + morsel-driven columnar execution is <strong>more practical than pure linear algebra</strong> for many workloads:</p>
+
+    <ul>
+      <li><strong>CSR gives O(1) neighbor access</strong> &mdash; no matrix multiply needed for selective queries where you only need a few neighbors</li>
+      <li><strong>Columnar engine handles analytics natively</strong> &mdash; most graph databases struggle with aggregation, joins, and window functions</li>
+      <li><strong>Unified optimizer</strong> &mdash; graph traversals and relational operations share one optimization pipeline (SIP, predicate pushdown, fusion)</li>
+      <li><strong>No impedance mismatch</strong> &mdash; graph results flow directly into GROUP BY, ORDER BY, JOIN without serialization boundaries</li>
+    </ul>
+
+    <p>Most graph databases can't do efficient analytics. Most analytical databases can't do graph traversals. Teide does both in one engine.</p>
+
+    <!-- ===== PROPOSED ARCHITECTURE ===== -->
+    <h2>Proposed Architecture</h2>
+
+    <div class="arch-diagram">                         SQL Query
+                            |
+                     +------v-------+
+                     |  SQL Parser  |   sqlparser crate (DuckDB dialect)
+                     |  (existing)  |
+                     +------+-------+
+                            |
+               +------------+-------------+
+               |                          |
+        Relational AST            Graph Extensions
+        (SELECT, JOIN,         (CREATE RELATIONSHIP,
+         GROUP BY, ...)         EXPAND, VAR_EXPAND, ...)
+               |                          |
+               +------------+-------------+
+                            |
+                     +------v-------+
+                     |   Planner    |   Translates AST -> Teide DAG
+                     | (extended)   |
+                     +------+-------+
+                            |
+                    +-------v--------+
+                    |  Teide Graph   |   Lazy DAG with graph ops
+                    |   (existing)   |
+                    +-------+--------+
+                            |
+                    +-------v--------+
+                    |   Optimizer    |   SIP, pushdown, fusion, DCE
+                    |   (existing)   |
+                    +-------+--------+
+                            |
+                    +-------v--------+
+                    |   Executor     |   Morsel-driven parallel
+                    |   (existing)   |
+                    +----------------+</div>
+
+    <p>Only the planner layer needs changes. The parser, optimizer, and executor remain untouched.</p>
+
+    <!-- ===== PHASE 1 ===== -->
+    <h2 id="phase1">Phase 1: Graph Ops via SQL</h2>
+    <span class="phase-badge phase-1">LOW EFFORT &middot; HIGH VALUE</span>
+
+    <p>Expose existing graph primitives through SQL syntax. No C engine changes needed.</p>
+
+    <h3>Relationship DDL</h3>
+
+    <pre><code><span class="cm">-- Build a CSR index from a foreign-key column</span>
+<span class="kw">CREATE RELATIONSHIP</span> orders_of
+  <span class="kw">FROM</span> orders(customer_id) <span class="kw">TO</span> customers;
+
+<span class="cm">-- Build from an explicit edge table (social network style)</span>
+<span class="kw">CREATE RELATIONSHIP</span> follows
+  <span class="kw">FROM</span> edges(src, dst) <span class="kw">NODES</span> <span class="num">1000000</span>;
+
+<span class="cm">-- Persist to disk</span>
+<span class="kw">SAVE RELATIONSHIP</span> follows <span class="kw">TO</span> <span class="str">'/data/rels/follows'</span>;
+
+<span class="cm">-- Reload (or memory-map for zero-copy)</span>
+<span class="kw">LOAD RELATIONSHIP</span> follows <span class="kw">FROM</span> <span class="str">'/data/rels/follows'</span>;
+
+<span class="cm">-- Drop</span>
+<span class="kw">DROP RELATIONSHIP</span> follows;</code></pre>
+
+    <h3>Graph Table Functions</h3>
+
+    <p>Each graph operation becomes a table-valued function in the <code>FROM</code> clause:</p>
+
+    <pre><code><span class="cm">-- 1-hop expansion: who does Alice follow?</span>
+<span class="kw">SELECT</span> u.name
+<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
+<span class="kw">WHERE</span> e._src <span class="op">=</span> (<span class="kw">SELECT</span> _rowid <span class="kw">FROM</span> users <span class="kw">WHERE</span> name <span class="op">=</span> <span class="str">'Alice'</span>);</code></pre>
+
+    <pre><code><span class="cm">-- Variable-length BFS: all people within 3 hops</span>
+<span class="kw">SELECT</span> e._end, e._depth
+<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">3</span>) <span class="kw">AS</span> e
+<span class="kw">WHERE</span> e._start <span class="op">=</span> <span class="num">42</span>;</code></pre>
+
+    <pre><code><span class="cm">-- Shortest path between two nodes</span>
+<span class="kw">SELECT</span> sp._node, sp._depth
+<span class="kw">FROM</span> <span class="fn">SHORTEST_PATH</span>(follows, <span class="num">42</span>, <span class="num">99</span>, <span class="num">10</span>) <span class="kw">AS</span> sp;</code></pre>
+
+    <pre><code><span class="cm">-- Triangle detection via worst-case optimal join</span>
+<span class="kw">SELECT</span> t._v0, t._v1, t._v2
+<span class="kw">FROM</span> <span class="fn">WCO_JOIN</span>(follows, follows, follows, <span class="num">3</span>) <span class="kw">AS</span> t;</code></pre>
+
+    <h3>Mapping to Engine Ops</h3>
+    <table>
+      <thead>
+        <tr><th>SQL Function</th><th>Engine Method</th><th>Output Columns</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>EXPAND(rel, dir)</code></td><td><code>graph.expand()</code></td><td><code>_src</code>, <code>_dst</code></td></tr>
+        <tr><td><code>VAR_EXPAND(rel, dir, min, max)</code></td><td><code>graph.var_expand()</code></td><td><code>_start</code>, <code>_end</code>, <code>_depth</code></td></tr>
+        <tr><td><code>SHORTEST_PATH(rel, src, dst, max)</code></td><td><code>graph.shortest_path()</code></td><td><code>_node</code>, <code>_depth</code></td></tr>
+        <tr><td><code>WCO_JOIN(rel..., n_vars)</code></td><td><code>graph.wco_join()</code></td><td><code>_v0</code>, <code>_v1</code>, ..., <code>_vN</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Composable with Full SQL</h3>
+
+    <p>The real power: graph results flow seamlessly into standard SQL operations.</p>
+
+    <pre><code><span class="cm">-- Graph + aggregation: count followers per user</span>
+<span class="kw">SELECT</span> u.name, <span class="fn">COUNT</span>(<span class="op">*</span>) <span class="kw">AS</span> follower_count
+<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'reverse'</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
+<span class="kw">GROUP BY</span> u.name
+<span class="kw">ORDER BY</span> follower_count <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num">10</span>;</code></pre>
+
+    <pre><code><span class="cm">-- Graph + analytics: average path depth by community</span>
+<span class="kw">SELECT</span> c.community, <span class="fn">AVG</span>(e._depth) <span class="kw">AS</span> avg_reach
+<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">5</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._start
+<span class="kw">JOIN</span> communities c <span class="kw">ON</span> c.user_id <span class="op">=</span> u._rowid
+<span class="kw">GROUP BY</span> c.community;</code></pre>
+
+    <pre><code><span class="cm">-- Subquery-driven expansion: expand from VIP users only</span>
+<span class="kw">SELECT</span> e._dst
+<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
+<span class="kw">WHERE</span> e._src <span class="kw">IN</span> (<span class="kw">SELECT</span> _rowid <span class="kw">FROM</span> users <span class="kw">WHERE</span> tier <span class="op">=</span> <span class="str">'VIP'</span>);</code></pre>
+
+    <h3>Implementation Scope</h3>
+
+    <table>
+      <thead>
+        <tr><th>File</th><th>Change</th><th>Effort</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>src/sql/mod.rs</code></td>
+          <td>Add <code>rels: HashMap&lt;String, Rel&gt;</code> to <code>Session</code></td>
+          <td>~20 lines</td>
+        </tr>
+        <tr>
+          <td><code>src/sql/planner.rs</code></td>
+          <td>New match arms for <code>CREATE/DROP/SAVE/LOAD RELATIONSHIP</code>; table-function handler for <code>EXPAND</code>, <code>VAR_EXPAND</code>, <code>SHORTEST_PATH</code>, <code>WCO_JOIN</code> in the <code>FROM</code> clause</td>
+          <td>~500 lines</td>
+        </tr>
+        <tr>
+          <td><code>src/sql/expr.rs</code></td>
+          <td>Handle <code>_src</code>, <code>_dst</code>, <code>_depth</code>, etc. as column references from graph-op output tables</td>
+          <td>~50 lines</td>
+        </tr>
+        <tr>
+          <td><code>src/engine.rs</code></td>
+          <td>No changes</td>
+          <td>&mdash;</td>
+        </tr>
+        <tr>
+          <td>C engine</td>
+          <td>No changes</td>
+          <td>&mdash;</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>Estimated total:</strong> ~600 lines of planner code. All engine primitives already exist and are tested.</p>
+    </div>
+
+    <!-- ===== PHASE 2 ===== -->
+    <h2 id="phase2">Phase 2: OpenCypher Frontend</h2>
+    <span class="phase-badge phase-2">MEDIUM EFFORT &middot; BIG UNLOCK</span>
+
+    <p>Add a Cypher parser that compiles <code>MATCH</code> patterns down to the same graph ops.</p>
+
+    <pre><code><span class="cm">-- Cypher query</span>
+<span class="kw">MATCH</span> (a:Person)-[:KNOWS]->(b:Person)
+<span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>
+<span class="kw">RETURN</span> b.name, b.age</code></pre>
+
+    <p>This compiles to the same DAG as:</p>
+
+    <pre><code><span class="kw">SELECT</span> p2.name, p2.age
+<span class="kw">FROM</span> <span class="fn">EXPAND</span>(knows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> persons p1 <span class="kw">ON</span> p1._rowid <span class="op">=</span> e._src
+<span class="kw">JOIN</span> persons p2 <span class="kw">ON</span> p2._rowid <span class="op">=</span> e._dst
+<span class="kw">WHERE</span> p1.name <span class="op">=</span> <span class="str">'Alice'</span></code></pre>
+
+    <p>Key deliverables:</p>
+    <ul>
+      <li>OpenCypher parser (using <code>nom</code>/<code>pest</code> or the <code>opencypher-parser</code> crate)</li>
+      <li>Cypher planner: <code>MATCH</code> pattern &rarr; <code>expand</code>/<code>var_expand</code>/<code>wco_join</code> ops</li>
+      <li>Variable-length path syntax: <code>[:KNOWS*1..3]</code> &rarr; <code>var_expand(min=1, max=3)</code></li>
+      <li>Optional: Bolt wire protocol for Neo4j client compatibility</li>
+    </ul>
+
+    <!-- ===== PHASE 3 ===== -->
+    <h2 id="phase3">Phase 3: Property Graph Catalog</h2>
+    <span class="phase-badge phase-3">MEDIUM EFFORT</span>
+
+    <p>Formalize the mapping between tables and graph entities:</p>
+
+    <pre><code><span class="cm">-- Register a table as a node label</span>
+<span class="kw">CREATE NODE LABEL</span> Person <span class="kw">FROM</span> persons;
+
+<span class="cm">-- Register a relationship type with its source and target labels</span>
+<span class="kw">CREATE EDGE LABEL</span> KNOWS
+  <span class="kw">FROM</span> Person <span class="kw">TO</span> Person
+  <span class="kw">USING</span> friendships(person_a, person_b);
+
+<span class="cm">-- Query the catalog</span>
+<span class="kw">SHOW NODE LABELS</span>;
+<span class="kw">SHOW EDGE LABELS</span>;</code></pre>
+
+    <p>This adds:</p>
+    <ul>
+      <li>Node label registry: which tables represent which node types</li>
+      <li>Edge label registry: name &rarr; <code>Rel</code> mapping with source/target labels</li>
+      <li>Schema validation on graph mutations</li>
+      <li>Automatic relationship building when edge data is inserted</li>
+    </ul>
+
+    <!-- ===== PHASE 4 ===== -->
+    <h2 id="phase4">Phase 4: Graph Algorithms</h2>
+    <span class="phase-badge phase-4">INCREMENTAL</span>
+
+    <p>Built-in graph algorithms exposed as SQL functions:</p>
+
+    <pre><code><span class="cm">-- PageRank</span>
+<span class="kw">SELECT</span> node_id, <span class="fn">PAGERANK</span>(follows, <span class="num">20</span>, <span class="num">0.85</span>) <span class="kw">AS</span> rank
+<span class="kw">FROM</span> users
+<span class="kw">ORDER BY</span> rank <span class="kw">DESC</span> <span class="kw">LIMIT</span> <span class="num">10</span>;
+
+<span class="cm">-- Connected components</span>
+<span class="kw">SELECT</span> node_id, <span class="fn">CONNECTED_COMPONENT</span>(follows) <span class="kw">AS</span> component_id
+<span class="kw">FROM</span> users;
+
+<span class="cm">-- Community detection (Louvain)</span>
+<span class="kw">SELECT</span> node_id, <span class="fn">COMMUNITY</span>(follows) <span class="kw">AS</span> community_id
+<span class="kw">FROM</span> users;</code></pre>
+
+    <p>These can be implemented as iterative graph operations using existing engine primitives. Each algorithm becomes a Rust function that builds a computation DAG, executes it in a loop until convergence, and returns the result as a table.</p>
+
+    <!-- ===== ROADMAP ===== -->
+    <h2>Roadmap Summary</h2>
+
+    <table>
+      <thead>
+        <tr><th>Phase</th><th>What</th><th>Engine Changes</th><th>Effort</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="phase-badge phase-1">Phase 1</span></td>
+          <td>Graph ops via SQL table functions + relationship DDL</td>
+          <td>None</td>
+          <td>~600 lines</td>
+        </tr>
+        <tr>
+          <td><span class="phase-badge phase-2">Phase 2</span></td>
+          <td>OpenCypher parser &amp; planner</td>
+          <td>None</td>
+          <td>~2000 lines</td>
+        </tr>
+        <tr>
+          <td><span class="phase-badge phase-3">Phase 3</span></td>
+          <td>Property graph catalog (labels, schema)</td>
+          <td>None</td>
+          <td>~800 lines</td>
+        </tr>
+        <tr>
+          <td><span class="phase-badge phase-4">Phase 4</span></td>
+          <td>Graph algorithms (PageRank, components, community)</td>
+          <td>Optional C kernels</td>
+          <td>Per algorithm</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ===== END-TO-END EXAMPLE ===== -->
+    <h2>End-to-End Example: Social Network</h2>
+
+    <p>A complete session demonstrating the Phase 1 SQL extensions:</p>
+
+    <pre><code><span class="cm">-- 1. Load data</span>
+<span class="kw">CREATE TABLE</span> users <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'users.csv'</span>);
+<span class="kw">CREATE TABLE</span> edges <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'follows.csv'</span>);
+
+<span class="cm">-- 2. Build the relationship index</span>
+<span class="kw">CREATE RELATIONSHIP</span> follows <span class="kw">FROM</span> edges(src, dst) <span class="kw">NODES</span> <span class="num">1000000</span>;
+
+<span class="cm">-- 3. Who are the most-followed users?</span>
+<span class="kw">SELECT</span> u.name, <span class="fn">COUNT</span>(<span class="op">*</span>) <span class="kw">AS</span> followers
+<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'reverse'</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
+<span class="kw">GROUP BY</span> u.name
+<span class="kw">ORDER BY</span> followers <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num">10</span>;
+
+<span class="cm">-- 4. Find all people within 3 hops of user 42</span>
+<span class="kw">SELECT</span> u.name, e._depth
+<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">3</span>) <span class="kw">AS</span> e
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._end
+<span class="kw">WHERE</span> e._start <span class="op">=</span> <span class="num">42</span>
+<span class="kw">ORDER BY</span> e._depth;
+
+<span class="cm">-- 5. Shortest path between two users</span>
+<span class="kw">SELECT</span> u.name, sp._depth
+<span class="kw">FROM</span> <span class="fn">SHORTEST_PATH</span>(follows, <span class="num">42</span>, <span class="num">99</span>, <span class="num">10</span>) <span class="kw">AS</span> sp
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> sp._node;
+
+<span class="cm">-- 6. Find triangles (mutual follow clusters)</span>
+<span class="kw">SELECT</span> u0.name, u1.name, u2.name
+<span class="kw">FROM</span> <span class="fn">WCO_JOIN</span>(follows, follows, follows, <span class="num">3</span>) <span class="kw">AS</span> t
+<span class="kw">JOIN</span> users u0 <span class="kw">ON</span> u0._rowid <span class="op">=</span> t._v0
+<span class="kw">JOIN</span> users u1 <span class="kw">ON</span> u1._rowid <span class="op">=</span> t._v1
+<span class="kw">JOIN</span> users u2 <span class="kw">ON</span> u2._rowid <span class="op">=</span> t._v2
+<span class="kw">LIMIT</span> <span class="num">100</span>;
+
+<span class="cm">-- 7. Save the index for later</span>
+<span class="kw">SAVE RELATIONSHIP</span> follows <span class="kw">TO</span> <span class="str">'/data/indexes/follows'</span>;</code></pre>
+
+    <!-- ===== WHY NOT CYPHER FIRST ===== -->
+    <h2>Why SQL First, Not Cypher?</h2>
+
+    <ul>
+      <li><strong>Zero new parser</strong> &mdash; <code>sqlparser</code> already handles table functions and custom syntax via the DuckDB dialect</li>
+      <li><strong>Zero engine changes</strong> &mdash; every graph op already exists and is tested in the C engine</li>
+      <li><strong>Full composability</strong> &mdash; graph results flow into joins, aggregations, window functions, ORDER BY &mdash; things Cypher handles poorly</li>
+      <li><strong>PgWire compatible</strong> &mdash; any Postgres client (DBeaver, psql, psycopg2) can run graph queries immediately</li>
+      <li><strong>Incremental path</strong> &mdash; Cypher can be added later as a separate frontend that compiles to the same graph ops</li>
+      <li><strong>SQL/PGQ alignment</strong> &mdash; the ISO SQL/PGQ standard is adding graph pattern matching to SQL; our table-function approach is a pragmatic step in that direction</li>
+    </ul>
+
+    <div class="note">
+      <p><strong>Bottom line:</strong> The C engine already does the hard work. Phase 1 is ~600 lines of planner code to unlock graph queries for every SQL client.</p>
+    </div>
+
+    <nav class="page-nav">
+      <a href="../graph/" class="prev">Graph API</a>
+      <a href="../architecture/" class="next">Architecture</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>
