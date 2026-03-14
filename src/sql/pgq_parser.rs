@@ -842,6 +842,11 @@ fn parse_edge_and_node(
                 .parse()
                 .map_err(|_| SqlError::Parse(format!("Invalid max depth: {max_str}")))?;
             t.expect("}")?;
+            if min > max {
+                return Err(SqlError::Parse(format!(
+                    "Invalid path quantifier: min ({min}) > max ({max})"
+                )));
+            }
             quantifier = PathQuantifier::Range { min, max };
         }
         _ => {}

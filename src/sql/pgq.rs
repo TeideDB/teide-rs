@@ -188,7 +188,13 @@ pub(crate) fn build_property_graph(
 
         // Validate that edge src/dst column values are 0-based row indices.
         // The C engine CSR treats these as row offsets into the vertex tables.
-        let n_edges = edge_stored.table.nrows() as usize;
+        let n_edges_i64 = edge_stored.table.nrows();
+        if n_edges_i64 < 0 {
+            return Err(SqlError::Plan(format!(
+                "Edge table '{}' has invalid row count", et.table_name
+            )));
+        }
+        let n_edges = n_edges_i64 as usize;
         let src_col_idx = find_col_idx(&edge_stored.table, &et.src_col).ok_or_else(|| {
             SqlError::Plan(format!(
                 "Column '{}' not found in edge table '{}'",
@@ -553,14 +559,18 @@ fn project_columns(
     let mut src_indices = Vec::with_capacity(nrows);
     let mut dst_indices = Vec::with_capacity(nrows);
     for row in 0..nrows {
-        src_indices.push(
-            expand_result.get_i64(src_idx_col, row)
-                .ok_or_else(|| SqlError::Plan(format!("NULL _src index at row {row}")))? as usize,
-        );
-        dst_indices.push(
-            expand_result.get_i64(dst_idx_col, row)
-                .ok_or_else(|| SqlError::Plan(format!("NULL _dst index at row {row}")))? as usize,
-        );
+        let src_val = expand_result.get_i64(src_idx_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _src index at row {row}")))?;
+        if src_val < 0 {
+            return Err(SqlError::Plan(format!("Negative _src index {src_val} at row {row}")));
+        }
+        src_indices.push(src_val as usize);
+        let dst_val = expand_result.get_i64(dst_idx_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _dst index at row {row}")))?;
+        if dst_val < 0 {
+            return Err(SqlError::Plan(format!("Negative _dst index {dst_val} at row {row}")));
+        }
+        dst_indices.push(dst_val as usize);
     }
 
     // Build CSV string for result table
@@ -799,14 +809,18 @@ fn project_var_length_columns(
     let mut start_indices = Vec::with_capacity(nrows);
     let mut end_indices = Vec::with_capacity(nrows);
     for row in 0..nrows {
-        start_indices.push(
-            var_result.get_i64(start_idx_col, row)
-                .ok_or_else(|| SqlError::Plan(format!("NULL _start index at row {row}")))? as usize,
-        );
-        end_indices.push(
-            var_result.get_i64(end_idx_col, row)
-                .ok_or_else(|| SqlError::Plan(format!("NULL _end index at row {row}")))? as usize,
-        );
+        let start_val = var_result.get_i64(start_idx_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _start index at row {row}")))?;
+        if start_val < 0 {
+            return Err(SqlError::Plan(format!("Negative _start index {start_val} at row {row}")));
+        }
+        start_indices.push(start_val as usize);
+        let end_val = var_result.get_i64(end_idx_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _end index at row {row}")))?;
+        if end_val < 0 {
+            return Err(SqlError::Plan(format!("Negative _end index {end_val} at row {row}")));
+        }
+        end_indices.push(end_val as usize);
     }
 
     // Build column specs in COLUMNS clause order
@@ -965,6 +979,25 @@ fn plan_shortest_path(
     let mut path = reconstruct_shortest_path(
         session, src_id, dst_id, max_depth as i64, stored_rel, direction,
     )?;
+
+    if path.is_empty() {
+        // No path found → return empty result table
+        let display_names: Vec<String> = columns.iter().map(|e| {
+            e.alias.as_deref().unwrap_or(&e.expr).to_string()
+        }).collect();
+        let csv_col_names: Vec<String> = (0..columns.len())
+            .map(|i| format!("__c{i}"))
+            .collect();
+        let csv = format!("{}\n", csv_col_names.join(","));
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = format!("/tmp/__pgq_{}_{counter}.csv", std::process::id());
+        std::fs::write(&tmp_path, csv.as_bytes())
+            .map_err(|e| SqlError::Plan(format!("Failed to write temp CSV: {e}")))?;
+        let result = session.ctx.read_csv(&tmp_path);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Ok((result?, display_names));
+    }
+
     path.reverse(); // path is built backwards, reverse to get src -> dst order
 
     // Build result as CSV with _node and _depth columns
@@ -1117,9 +1150,7 @@ fn reconstruct_shortest_path(
         }
     }
 
-    Err(SqlError::Plan(format!(
-        "No path found from node {src_id} to node {dst_id}"
-    )))
+    Ok(Vec::new()) // no path found → empty result
 }
 
 /// Extract a node's row index from a WHERE filter.
