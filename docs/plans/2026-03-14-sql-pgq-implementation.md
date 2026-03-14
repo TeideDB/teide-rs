@@ -157,7 +157,7 @@ Parse `CREATE PROPERTY GRAPH` statements. Since sqlparser has no PGQ support, we
 **Files:**
 - Modify: `src/sql/pgq_parser.rs`
 
-- [ ] **Step 1: Write the CREATE PROPERTY GRAPH parser**
+- [x] **Step 1: Write the CREATE PROPERTY GRAPH parser**
 
 The parser handles this syntax:
 ```sql
@@ -451,12 +451,12 @@ fn parse_drop_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [x] **Step 2: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/sql/pgq_parser.rs
