@@ -500,7 +500,7 @@ fn apply_node_filter(
     variable: Option<&str>,
 ) -> Result<Column, SqlError> {
     // Reject unsupported comparison operators before splitting on '='.
-    for op in &["!=", "<>", ">=", "<="] {
+    for op in &["!=", "<>", ">=", "<=", ">", "<"] {
         if filter_text.contains(op) {
             return Err(SqlError::Plan(format!(
                 "Unsupported operator '{op}' in node filter: {filter_text}. Only 'col = value' is supported."
@@ -533,7 +533,7 @@ fn apply_node_filter(
 
     let scan_col = g.scan(&col_name)?;
 
-    let const_col = if value.starts_with('\'') && value.ends_with('\'') {
+    let const_col = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
         let s = value[1..value.len() - 1].replace("''", "'");
         g.const_str(&s)?
     } else if let Ok(n) = value.parse::<i64>() {
@@ -1132,9 +1132,9 @@ fn reconstruct_shortest_path(
 
     let src_col_name = &stored_rel.edge_label.src_col;
     let dst_col_name = &stored_rel.edge_label.dst_col;
-    let src_col_idx = edge_stored.columns.iter().position(|c| c == src_col_name)
+    let src_col_idx = find_col_idx(&edge_stored.table, src_col_name)
         .ok_or_else(|| SqlError::Plan(format!("Column '{src_col_name}' not found in edge table")))?;
-    let dst_col_idx = edge_stored.columns.iter().position(|c| c == dst_col_name)
+    let dst_col_idx = find_col_idx(&edge_stored.table, dst_col_name)
         .ok_or_else(|| SqlError::Plan(format!("Column '{dst_col_name}' not found in edge table")))?;
 
     // Build adjacency list from edge table
@@ -1226,11 +1226,11 @@ fn extract_node_id(
     })?;
 
     let nrows = checked_nrows(&stored.table)?;
-    let col_idx = stored.columns.iter().position(|c| c == &col_name).ok_or_else(|| {
+    let col_idx = find_col_idx(&stored.table, &col_name).ok_or_else(|| {
         SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
     })?;
 
-    let str_val = if value.starts_with('\'') && value.ends_with('\'') {
+    let str_val = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
         Some(value[1..value.len() - 1].replace("''", "'"))
     } else {
         None
