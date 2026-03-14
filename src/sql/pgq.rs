@@ -11,7 +11,7 @@ use super::{ExecResult, Session, SqlError};
 
 /// Safe conversion of `Table::nrows()` (i64) to usize, returning an error
 /// if the C engine returned a negative sentinel.
-fn checked_nrows(table: &Table) -> Result<usize, SqlError> {
+pub(super) fn checked_nrows(table: &Table) -> Result<usize, SqlError> {
     let n = table.nrows();
     if n < 0 {
         return Err(SqlError::Plan(format!("nrows() returned negative value ({n}); possible engine error")));
@@ -499,6 +499,14 @@ fn apply_node_filter(
     filter_text: &str,
     variable: Option<&str>,
 ) -> Result<Column, SqlError> {
+    // Reject unsupported comparison operators before splitting on '='.
+    for op in &["!=", "<>", ">=", "<="] {
+        if filter_text.contains(op) {
+            return Err(SqlError::Plan(format!(
+                "Unsupported operator '{op}' in node filter: {filter_text}. Only 'col = value' is supported."
+            )));
+        }
+    }
     // Split on '=' first, then strip variable prefix only from the LHS
     // to avoid corrupting string values that contain the variable name.
     let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
@@ -666,7 +674,11 @@ fn project_columns(
 
 /// Find a column index by name in a table.
 pub(super) fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
-    let ncols = table.ncols() as usize;
+    let ncols = table.ncols();
+    if ncols < 0 {
+        return None;
+    }
+    let ncols = ncols as usize;
     (0..ncols).find(|&i| table.col_name_str(i).to_lowercase() == name)
 }
 

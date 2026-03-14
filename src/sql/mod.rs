@@ -265,7 +265,7 @@ impl Session {
                 // Re-validate edge endpoint values are within vertex table bounds
                 let n_src = src_stored.table.nrows();
                 let n_dst = dst_stored.table.nrows();
-                let n_edges = edge_stored.table.nrows() as usize;
+                let n_edges = pgq::checked_nrows(&edge_stored.table)?;
                 let src_col_idx =
                     pgq::find_col_idx(&edge_stored.table, &el.src_col).ok_or_else(|| {
                         SqlError::Plan(format!(
