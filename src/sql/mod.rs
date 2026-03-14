@@ -124,6 +124,10 @@ impl Session {
     /// Execute a SQL statement, which may be a SELECT, CREATE TABLE AS, DROP TABLE,
     /// INSERT INTO, UPDATE, or DELETE.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
+        // Check for PGQ statements first (sqlparser has no SQL/PGQ support)
+        if let Some(pgq_stmt) = pgq_parser::try_parse_pgq(sql)? {
+            return pgq::execute_pgq(self, pgq_stmt);
+        }
         planner::session_execute(self, sql)
     }
 

@@ -474,7 +474,7 @@ Wire the parsed `CreatePropertyGraph` statement into `session_execute()` to buil
 - Modify: `src/sql/planner.rs:51-148` (add PGQ dispatch)
 - Modify: `src/sql/mod.rs:120-124` (call pre-parser)
 
-- [ ] **Step 1: Add `build_property_graph` to `src/sql/pgq.rs`**
+- [x] **Step 1: Add `build_property_graph` to `src/sql/pgq.rs`**
 
 Append to `src/sql/pgq.rs`:
 
@@ -583,7 +583,7 @@ pub(crate) fn build_property_graph(
 }
 ```
 
-- [ ] **Step 2: Add PGQ dispatch in `Session::execute()`**
+- [x] **Step 2: Add PGQ dispatch in `Session::execute()`**
 
 In `src/sql/mod.rs`, change `Session::execute()` (line 122-124) to call the pre-parser first:
 
@@ -597,7 +597,7 @@ pub fn execute(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
 }
 ```
 
-- [ ] **Step 3: Add `execute_pgq` dispatch function to `src/sql/pgq.rs`**
+- [x] **Step 3: Add `execute_pgq` dispatch function to `src/sql/pgq.rs`**
 
 Append to `src/sql/pgq.rs`:
 
@@ -645,12 +645,12 @@ pub(crate) fn execute_pgq(
 }
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Write initial SLT test for CREATE/DROP PROPERTY GRAPH**
+- [x] **Step 5: Write initial SLT test for CREATE/DROP PROPERTY GRAPH**
 
 Create `tests/slt/pgq.slt`:
 
@@ -695,7 +695,7 @@ statement error
 CREATE PROPERTY GRAPH bad VERTEX TABLES (nonexistent LABEL Foo) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES nonexistent (id) DESTINATION KEY (dst) REFERENCES nonexistent (id) LABEL Bar)
 ```
 
-- [ ] **Step 6: Add SLT test runner**
+- [x] **Step 6: Add SLT test runner**
 
 Add to `tests/slt_runner.rs`:
 
@@ -706,12 +706,12 @@ fn slt_pgq() {
 }
 ```
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `cargo test --all-features -- slt_pgq`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/sql/pgq.rs src/sql/mod.rs tests/slt/pgq.slt tests/slt_runner.rs

@@ -224,3 +224,8 @@ fn slt_regressions() {
 fn slt_temporal() {
     run_slt("tests/slt/temporal.slt");
 }
+
+#[test]
+fn slt_pgq() {
+    run_slt("tests/slt/pgq.slt");
+}

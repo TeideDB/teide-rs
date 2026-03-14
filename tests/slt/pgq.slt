@@ -1,0 +1,38 @@
+# SQL/PGQ: Property graph creation and deletion
+
+# Setup: create vertex and edge tables
+statement ok
+CREATE TABLE persons (id INTEGER, name VARCHAR, city VARCHAR)
+
+statement ok
+INSERT INTO persons VALUES (0, 'Alice', 'NYC'), (1, 'Bob', 'SF'), (2, 'Carol', 'NYC'), (3, 'Dave', 'LA'), (4, 'Eve', 'SF')
+
+statement ok
+CREATE TABLE knows_edges (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO knows_edges VALUES (0, 1), (0, 2), (1, 3), (2, 3), (3, 4)
+
+# Test: CREATE PROPERTY GRAPH
+statement ok
+CREATE PROPERTY GRAPH social VERTEX TABLES (persons LABEL Person) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES persons (id) DESTINATION KEY (dst) REFERENCES persons (id) LABEL Knows)
+
+# Test: duplicate graph name should fail
+statement error
+CREATE PROPERTY GRAPH social VERTEX TABLES (persons LABEL Person) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES persons (id) DESTINATION KEY (dst) REFERENCES persons (id) LABEL Knows)
+
+# Test: DROP PROPERTY GRAPH
+statement ok
+DROP PROPERTY GRAPH social
+
+# Test: DROP non-existent should fail
+statement error
+DROP PROPERTY GRAPH social
+
+# Test: DROP IF EXISTS non-existent should succeed
+statement ok
+DROP PROPERTY GRAPH IF EXISTS social
+
+# Test: referencing non-existent table should fail
+statement error
+CREATE PROPERTY GRAPH bad VERTEX TABLES (nonexistent LABEL Foo) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES nonexistent (id) DESTINATION KEY (dst) REFERENCES nonexistent (id) LABEL Bar)
