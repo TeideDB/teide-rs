@@ -400,7 +400,7 @@ Dijkstra's algorithm with edge weights read from the CSR edge property table. Us
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [ ] **Step 1: Add builder function to `graph.c`**
+- [x] **Step 1: Add builder function to `graph.c`**
 
 ```c
 td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
@@ -430,7 +430,7 @@ td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
 }
 ```
 
-- [ ] **Step 2: Add Dijkstra kernel to `exec.c`**
+- [x] **Step 2: Add Dijkstra kernel to `exec.c`**
 
 ```c
 /* Min-heap entry for Dijkstra */
@@ -609,7 +609,7 @@ static td_t* exec_dijkstra(td_graph_t* g, td_op_t* op,
 }
 ```
 
-- [ ] **Step 3: Add dispatch and dump**
+- [x] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -630,12 +630,12 @@ In `dump.c`:
 case OP_DIJKSTRA: return "DIJKSTRA";
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vendor/teide/
