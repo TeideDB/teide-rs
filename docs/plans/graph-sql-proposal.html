@@ -102,17 +102,17 @@
 
   <main class="content">
     <div class="section-label">PROPOSAL</div>
-    <h1>Graph Queries in SQL</h1>
-    <p class="lead">Extending Teide's SQL layer with graph traversal, relationship management, and composable graph+relational analytics &mdash; leveraging the engine primitives we already have.</p>
+    <h1>SQL/PGQ &mdash; Graph Queries in Teide</h1>
+    <p class="lead">Extending Teide with ISO SQL/PGQ (SQL:2023 Part 16) graph pattern matching &mdash; property graphs over existing tables, <code>GRAPH_TABLE</code> queries, and full composability with SQL analytics.</p>
 
     <!-- ===== CONTEXT ===== -->
     <h2>Context: Why Graph?</h2>
 
-    <p>Graph databases like <strong>FalkorDB</strong> and <strong>Neo4j</strong> have proven the value of property graph queries for knowledge graphs, social networks, fraud detection, and AI/RAG pipelines. FalkorDB's core insight is using <strong>sparse matrix algebra</strong> (via GraphBLAS) to represent adjacency and execute traversals as matrix operations.</p>
+    <p>Graph databases like <strong>FalkorDB</strong> and <strong>Neo4j</strong> have proven the value of property graph queries for knowledge graphs, social networks, fraud detection, and AI/RAG pipelines. FalkorDB uses <strong>sparse matrix algebra</strong> (via GraphBLAS); Neo4j uses its own Cypher language.</p>
 
-    <p>Teide already has a comparable foundation: <strong>CSR (Compressed Sparse Row)</strong> adjacency indexes with forward/reverse directions, integrated into the same morsel-driven columnar executor that handles SQL. The graph primitives exist in the C engine and are exposed via the Rust API &mdash; but <strong>not yet accessible through SQL</strong>.</p>
+    <p>The industry is converging on <strong>SQL/PGQ</strong> (ISO 9075-16:2023) &mdash; graph pattern matching integrated directly into SQL. Oracle 23ai, Postgres 18, and DuckDB (via DuckPGQ) are all adopting this standard. It gives you Cypher-like pattern matching without abandoning SQL's strengths in analytics.</p>
 
-    <p>This proposal adds graph capabilities to the SQL layer without any C engine changes.</p>
+    <p>Teide already has a strong foundation: <strong>CSR adjacency indexes</strong>, <strong>4 graph traversal operations</strong>, and a <strong>graph-aware optimizer</strong> &mdash; all in the C engine. The gap is purely at the query language level.</p>
 
     <!-- ===== WHAT WE HAVE ===== -->
     <h2>What Teide Already Has</h2>
@@ -220,18 +220,50 @@
           <td>Traversal primitives only</td>
           <td><span class="status-partial">Comparable</span></td>
         </tr>
-        <tr>
-          <td>Vector similarity</td>
-          <td>&mdash;</td>
-          <td>Cosine, Euclidean</td>
-          <td><span class="status-gap">Gap</span></td>
-        </tr>
       </tbody>
     </table>
 
     <div class="note">
-      <p><strong>Key insight:</strong> The engine-level primitives are already competitive. The main gap is accessibility &mdash; graph operations can only be used via the Rust API, not through SQL or any query language.</p>
+      <p><strong>Key insight:</strong> The engine-level primitives are already competitive. The main gap is accessibility &mdash; graph operations can only be used via the Rust API, not through any query language.</p>
     </div>
+
+    <!-- ===== WHY SQL/PGQ ===== -->
+    <h2>Why SQL/PGQ?</h2>
+
+    <p>We considered three approaches for exposing graph queries:</p>
+
+    <table>
+      <thead>
+        <tr><th>Approach</th><th>Graph Queries</th><th>Analytics</th><th>Ecosystem</th><th>Standard</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Cypher only</strong></td>
+          <td>Excellent</td>
+          <td>Poor (no GROUP BY, window functions)</td>
+          <td>Bolt protocol, limited tooling</td>
+          <td>De facto (Neo4j)</td>
+        </tr>
+        <tr>
+          <td><strong>Datalog</strong></td>
+          <td>Excellent (recursive rules)</td>
+          <td>Poor (needs non-standard extensions)</td>
+          <td>Almost none</td>
+          <td>Academic</td>
+        </tr>
+        <tr>
+          <td><strong>SQL/PGQ</strong></td>
+          <td>Excellent (Cypher-like MATCH)</td>
+          <td>Excellent (full SQL)</td>
+          <td>PgWire, every SQL tool</td>
+          <td>ISO SQL:2023</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>SQL/PGQ gives us Cypher-like pattern matching <em>inside</em> SQL. Graph results flow directly into <code>GROUP BY</code>, <code>ORDER BY</code>, <code>JOIN</code>, window functions &mdash; no impedance mismatch. Every Postgres client (DBeaver, psql, Grafana, psycopg2) works immediately via PgWire.</p>
+
+    <p>Oracle 23ai, Postgres 18, and DuckDB (DuckPGQ) are all adopting this standard. We join that wave rather than inventing something new.</p>
 
     <!-- ===== ARCHITECTURAL ADVANTAGE ===== -->
     <h2>Architectural Advantage</h2>
@@ -239,7 +271,7 @@
     <p>Teide's CSR + morsel-driven columnar execution is <strong>more practical than pure linear algebra</strong> for many workloads:</p>
 
     <ul>
-      <li><strong>CSR gives O(1) neighbor access</strong> &mdash; no matrix multiply needed for selective queries where you only need a few neighbors</li>
+      <li><strong>CSR gives O(1) neighbor access</strong> &mdash; no matrix multiply needed for selective queries</li>
       <li><strong>Columnar engine handles analytics natively</strong> &mdash; most graph databases struggle with aggregation, joins, and window functions</li>
       <li><strong>Unified optimizer</strong> &mdash; graph traversals and relational operations share one optimization pipeline (SIP, predicate pushdown, fusion)</li>
       <li><strong>No impedance mismatch</strong> &mdash; graph results flow directly into GROUP BY, ORDER BY, JOIN without serialization boundaries</li>
@@ -250,243 +282,277 @@
     <!-- ===== PROPOSED ARCHITECTURE ===== -->
     <h2>Proposed Architecture</h2>
 
-    <div class="arch-diagram">                         SQL Query
-                            |
-                     +------v-------+
-                     |  SQL Parser  |   sqlparser crate (DuckDB dialect)
-                     |  (existing)  |
-                     +------+-------+
-                            |
-               +------------+-------------+
-               |                          |
-        Relational AST            Graph Extensions
-        (SELECT, JOIN,         (CREATE RELATIONSHIP,
-         GROUP BY, ...)         EXPAND, VAR_EXPAND, ...)
-               |                          |
-               +------------+-------------+
-                            |
-                     +------v-------+
-                     |   Planner    |   Translates AST -> Teide DAG
-                     | (extended)   |
-                     +------+-------+
-                            |
-                    +-------v--------+
-                    |  Teide Graph   |   Lazy DAG with graph ops
-                    |   (existing)   |
-                    +-------+--------+
-                            |
-                    +-------v--------+
-                    |   Optimizer    |   SIP, pushdown, fusion, DCE
-                    |   (existing)   |
-                    +-------+--------+
-                            |
-                    +-------v--------+
-                    |   Executor     |   Morsel-driven parallel
-                    |   (existing)   |
-                    +----------------+</div>
+    <div class="arch-diagram">                    SQL/PGQ Query
+                          |
+                   +------v-------+
+                   |  SQL Parser  |   sqlparser crate (DuckDB dialect)
+                   |  (extended)  |   + GRAPH_TABLE / MATCH parsing
+                   +------+-------+
+                          |
+             +------------+-------------+
+             |            |             |
+       Relational    GRAPH_TABLE    CREATE
+       AST           + MATCH        PROPERTY GRAPH
+             |            |             |
+             +------------+-------------+
+                          |
+                   +------v-------+
+                   | PGQ Planner  |   MATCH pattern &rarr; expand / var_expand
+                   |   (new)      |   / shortest_path / wco_join ops
+                   +------+-------+
+                          |
+                  +-------v--------+
+                  |  Teide Graph   |   Lazy DAG with graph ops
+                  |  (existing)    |
+                  +-------+--------+
+                          |
+                  +-------v--------+
+                  |  Optimizer     |   SIP, pushdown, fusion, DCE
+                  |  (existing)    |
+                  +-------+--------+
+                          |
+                  +-------v--------+
+                  |  Executor      |   Morsel-driven parallel
+                  |  (existing)    |
+                  +----------------+</div>
 
-    <p>Only the planner layer needs changes. The parser, optimizer, and executor remain untouched.</p>
+    <p>Changes are isolated to the parser and a new PGQ planner module. The optimizer and executor remain untouched.</p>
 
     <!-- ===== PHASE 1 ===== -->
-    <h2 id="phase1">Phase 1: Graph Ops via SQL</h2>
-    <span class="phase-badge phase-1">LOW EFFORT &middot; HIGH VALUE</span>
+    <h2 id="phase1">Phase 1: Property Graphs + Basic MATCH</h2>
+    <span class="phase-badge phase-1">FOUNDATION</span>
 
-    <p>Expose existing graph primitives through SQL syntax. No C engine changes needed.</p>
+    <p>Define property graphs over existing tables and run basic 1-hop pattern matching.</p>
 
-    <h3>Relationship DDL</h3>
+    <h3>CREATE PROPERTY GRAPH</h3>
 
-    <pre><code><span class="cm">-- Build a CSR index from a foreign-key column</span>
-<span class="kw">CREATE RELATIONSHIP</span> orders_of
-  <span class="kw">FROM</span> orders(customer_id) <span class="kw">TO</span> customers;
+    <p>Following the SQL:2023 standard, a property graph is a named schema object that maps existing tables to graph nodes and edges:</p>
 
-<span class="cm">-- Build from an explicit edge table (social network style)</span>
-<span class="kw">CREATE RELATIONSHIP</span> follows
-  <span class="kw">FROM</span> edges(src, dst) <span class="kw">NODES</span> <span class="num">1000000</span>;
+    <pre><code><span class="cm">-- Load relational data as usual</span>
+<span class="kw">CREATE TABLE</span> persons <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'persons.csv'</span>);
+<span class="kw">CREATE TABLE</span> companies <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'companies.csv'</span>);
+<span class="kw">CREATE TABLE</span> knows_edges <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'knows.csv'</span>);
+<span class="kw">CREATE TABLE</span> works_at <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'works_at.csv'</span>);
 
-<span class="cm">-- Persist to disk</span>
-<span class="kw">SAVE RELATIONSHIP</span> follows <span class="kw">TO</span> <span class="str">'/data/rels/follows'</span>;
+<span class="cm">-- Define a property graph over those tables</span>
+<span class="kw">CREATE PROPERTY GRAPH</span> social
+<span class="kw">VERTEX TABLES</span> (
+  persons  <span class="kw">LABEL</span> Person,
+  companies <span class="kw">LABEL</span> Company
+)
+<span class="kw">EDGE TABLES</span> (
+  knows_edges
+    <span class="kw">SOURCE KEY</span> (person1_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">DESTINATION KEY</span> (person2_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">LABEL</span> Knows,
+  works_at
+    <span class="kw">SOURCE KEY</span> (person_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">DESTINATION KEY</span> (company_id) <span class="kw">REFERENCES</span> companies (id)
+    <span class="kw">LABEL</span> WorksAt
+);</code></pre>
 
-<span class="cm">-- Reload (or memory-map for zero-copy)</span>
-<span class="kw">LOAD RELATIONSHIP</span> follows <span class="kw">FROM</span> <span class="str">'/data/rels/follows'</span>;
+    <p>Under the hood, <code>CREATE PROPERTY GRAPH</code> builds CSR indexes (via <code>Rel::from_edges()</code>) for each edge table and registers the graph metadata in the session catalog.</p>
 
-<span class="cm">-- Drop</span>
-<span class="kw">DROP RELATIONSHIP</span> follows;</code></pre>
+    <h3>GRAPH_TABLE &mdash; Basic Pattern Matching</h3>
 
-    <h3>Graph Table Functions</h3>
+    <p>Query the graph using <code>GRAPH_TABLE</code> with Cypher-like <code>MATCH</code> patterns:</p>
 
-    <p>Each graph operation becomes a table-valued function in the <code>FROM</code> clause:</p>
+    <pre><code><span class="cm">-- Who does Alice know?</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[k:Knows]->(b:Person)
+  <span class="kw">COLUMNS</span> (b.name, b.age)
+);</code></pre>
 
-    <pre><code><span class="cm">-- 1-hop expansion: who does Alice follow?</span>
-<span class="kw">SELECT</span> u.name
-<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
-<span class="kw">WHERE</span> e._src <span class="op">=</span> (<span class="kw">SELECT</span> _rowid <span class="kw">FROM</span> users <span class="kw">WHERE</span> name <span class="op">=</span> <span class="str">'Alice'</span>);</code></pre>
-
-    <pre><code><span class="cm">-- Variable-length BFS: all people within 3 hops</span>
-<span class="kw">SELECT</span> e._end, e._depth
-<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">3</span>) <span class="kw">AS</span> e
-<span class="kw">WHERE</span> e._start <span class="op">=</span> <span class="num">42</span>;</code></pre>
-
-    <pre><code><span class="cm">-- Shortest path between two nodes</span>
-<span class="kw">SELECT</span> sp._node, sp._depth
-<span class="kw">FROM</span> <span class="fn">SHORTEST_PATH</span>(follows, <span class="num">42</span>, <span class="num">99</span>, <span class="num">10</span>) <span class="kw">AS</span> sp;</code></pre>
-
-    <pre><code><span class="cm">-- Triangle detection via worst-case optimal join</span>
-<span class="kw">SELECT</span> t._v0, t._v1, t._v2
-<span class="kw">FROM</span> <span class="fn">WCO_JOIN</span>(follows, follows, follows, <span class="num">3</span>) <span class="kw">AS</span> t;</code></pre>
+    <pre><code><span class="cm">-- Where does Bob work?</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (p:Person <span class="kw">WHERE</span> p.name <span class="op">=</span> <span class="str">'Bob'</span>)-[w:WorksAt]->(c:Company)
+  <span class="kw">COLUMNS</span> (c.name <span class="kw">AS</span> company)
+);</code></pre>
 
     <h3>Mapping to Engine Ops</h3>
-    <table>
-      <thead>
-        <tr><th>SQL Function</th><th>Engine Method</th><th>Output Columns</th></tr>
-      </thead>
-      <tbody>
-        <tr><td><code>EXPAND(rel, dir)</code></td><td><code>graph.expand()</code></td><td><code>_src</code>, <code>_dst</code></td></tr>
-        <tr><td><code>VAR_EXPAND(rel, dir, min, max)</code></td><td><code>graph.var_expand()</code></td><td><code>_start</code>, <code>_end</code>, <code>_depth</code></td></tr>
-        <tr><td><code>SHORTEST_PATH(rel, src, dst, max)</code></td><td><code>graph.shortest_path()</code></td><td><code>_node</code>, <code>_depth</code></td></tr>
-        <tr><td><code>WCO_JOIN(rel..., n_vars)</code></td><td><code>graph.wco_join()</code></td><td><code>_v0</code>, <code>_v1</code>, ..., <code>_vN</code></td></tr>
-      </tbody>
-    </table>
 
-    <h3>Composable with Full SQL</h3>
-
-    <p>The real power: graph results flow seamlessly into standard SQL operations.</p>
-
-    <pre><code><span class="cm">-- Graph + aggregation: count followers per user</span>
-<span class="kw">SELECT</span> u.name, <span class="fn">COUNT</span>(<span class="op">*</span>) <span class="kw">AS</span> follower_count
-<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'reverse'</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
-<span class="kw">GROUP BY</span> u.name
-<span class="kw">ORDER BY</span> follower_count <span class="kw">DESC</span>
-<span class="kw">LIMIT</span> <span class="num">10</span>;</code></pre>
-
-    <pre><code><span class="cm">-- Graph + analytics: average path depth by community</span>
-<span class="kw">SELECT</span> c.community, <span class="fn">AVG</span>(e._depth) <span class="kw">AS</span> avg_reach
-<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">5</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._start
-<span class="kw">JOIN</span> communities c <span class="kw">ON</span> c.user_id <span class="op">=</span> u._rowid
-<span class="kw">GROUP BY</span> c.community;</code></pre>
-
-    <pre><code><span class="cm">-- Subquery-driven expansion: expand from VIP users only</span>
-<span class="kw">SELECT</span> e._dst
-<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
-<span class="kw">WHERE</span> e._src <span class="kw">IN</span> (<span class="kw">SELECT</span> _rowid <span class="kw">FROM</span> users <span class="kw">WHERE</span> tier <span class="op">=</span> <span class="str">'VIP'</span>);</code></pre>
-
-    <h3>Implementation Scope</h3>
+    <p>The PGQ planner translates <code>MATCH</code> patterns into existing engine operations:</p>
 
     <table>
       <thead>
-        <tr><th>File</th><th>Change</th><th>Effort</th></tr>
+        <tr><th>MATCH Pattern</th><th>Engine Op</th><th>Description</th></tr>
       </thead>
       <tbody>
         <tr>
-          <td><code>src/sql/mod.rs</code></td>
-          <td>Add <code>rels: HashMap&lt;String, Rel&gt;</code> to <code>Session</code></td>
-          <td>~20 lines</td>
+          <td><code>(a)-[e]->(b)</code></td>
+          <td><code>graph.expand()</code></td>
+          <td>1-hop neighbor expansion via CSR</td>
         </tr>
         <tr>
-          <td><code>src/sql/planner.rs</code></td>
-          <td>New match arms for <code>CREATE/DROP/SAVE/LOAD RELATIONSHIP</code>; table-function handler for <code>EXPAND</code>, <code>VAR_EXPAND</code>, <code>SHORTEST_PATH</code>, <code>WCO_JOIN</code> in the <code>FROM</code> clause</td>
-          <td>~500 lines</td>
+          <td><code>(a)-[e]->+(b)</code></td>
+          <td><code>graph.var_expand()</code></td>
+          <td>Variable-length BFS</td>
         </tr>
         <tr>
-          <td><code>src/sql/expr.rs</code></td>
-          <td>Handle <code>_src</code>, <code>_dst</code>, <code>_depth</code>, etc. as column references from graph-op output tables</td>
-          <td>~50 lines</td>
+          <td><code>ANY SHORTEST (a)-[e]->+(b)</code></td>
+          <td><code>graph.shortest_path()</code></td>
+          <td>BFS shortest path</td>
         </tr>
         <tr>
-          <td><code>src/engine.rs</code></td>
-          <td>No changes</td>
-          <td>&mdash;</td>
-        </tr>
-        <tr>
-          <td>C engine</td>
-          <td>No changes</td>
-          <td>&mdash;</td>
+          <td><code>(a)->(b)->(c), (a)->(c)</code></td>
+          <td><code>graph.wco_join()</code></td>
+          <td>Cyclic pattern via Leapfrog Triejoin</td>
         </tr>
       </tbody>
     </table>
 
     <div class="note">
-      <p><strong>Estimated total:</strong> ~600 lines of planner code. All engine primitives already exist and are tested.</p>
+      <p><strong>Key point:</strong> <code>GRAPH_TABLE</code> returns a regular SQL table. This means graph results compose naturally with <code>GROUP BY</code>, <code>ORDER BY</code>, <code>JOIN</code>, subqueries, window functions &mdash; everything SQL already does well.</p>
     </div>
 
     <!-- ===== PHASE 2 ===== -->
-    <h2 id="phase2">Phase 2: OpenCypher Frontend</h2>
-    <span class="phase-badge phase-2">MEDIUM EFFORT &middot; BIG UNLOCK</span>
+    <h2 id="phase2">Phase 2: Variable-Length Paths + Shortest Path</h2>
+    <span class="phase-badge phase-2">TRAVERSAL</span>
 
-    <p>Add a Cypher parser that compiles <code>MATCH</code> patterns down to the same graph ops.</p>
+    <p>Add quantified path patterns and shortest path support to <code>MATCH</code>.</p>
 
-    <pre><code><span class="cm">-- Cypher query</span>
-<span class="kw">MATCH</span> (a:Person)-[:KNOWS]->(b:Person)
-<span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>
-<span class="kw">RETURN</span> b.name, b.age</code></pre>
+    <h3>Variable-Length Paths</h3>
 
-    <p>This compiles to the same DAG as:</p>
+    <pre><code><span class="cm">-- Friends within 1-3 hops</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[k:Knows]->{<span class="num">1</span>,<span class="num">3</span>}(b:Person)
+  <span class="kw">COLUMNS</span> (b.name, b.city)
+);</code></pre>
 
-    <pre><code><span class="kw">SELECT</span> p2.name, p2.age
-<span class="kw">FROM</span> <span class="fn">EXPAND</span>(knows, <span class="str">'forward'</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> persons p1 <span class="kw">ON</span> p1._rowid <span class="op">=</span> e._src
-<span class="kw">JOIN</span> persons p2 <span class="kw">ON</span> p2._rowid <span class="op">=</span> e._dst
-<span class="kw">WHERE</span> p1.name <span class="op">=</span> <span class="str">'Alice'</span></code></pre>
+    <pre><code><span class="cm">-- Reachable in any number of hops</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.id <span class="op">=</span> <span class="num">42</span>)-[k:Knows]->+(b:Person)
+  <span class="kw">COLUMNS</span> (b.name)
+);</code></pre>
 
-    <p>Key deliverables:</p>
-    <ul>
-      <li>OpenCypher parser (using <code>nom</code>/<code>pest</code> or the <code>opencypher-parser</code> crate)</li>
-      <li>Cypher planner: <code>MATCH</code> pattern &rarr; <code>expand</code>/<code>var_expand</code>/<code>wco_join</code> ops</li>
-      <li>Variable-length path syntax: <code>[:KNOWS*1..3]</code> &rarr; <code>var_expand(min=1, max=3)</code></li>
-      <li>Optional: Bolt wire protocol for Neo4j client compatibility</li>
-    </ul>
+    <p>Path quantifiers map directly to <code>var_expand()</code> parameters:</p>
+
+    <table>
+      <thead>
+        <tr><th>SQL/PGQ Quantifier</th><th>Engine Call</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>-[e]-></code></td><td><code>expand()</code></td><td>Exactly 1 hop</td></tr>
+        <tr><td><code>-[e]->{2,5}</code></td><td><code>var_expand(min=2, max=5)</code></td><td>2 to 5 hops</td></tr>
+        <tr><td><code>-[e]->+</code></td><td><code>var_expand(min=1, max=255)</code></td><td>1 or more hops</td></tr>
+        <tr><td><code>-[e]->*</code></td><td><code>var_expand(min=0, max=255)</code></td><td>0 or more hops</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Shortest Path</h3>
+
+    <pre><code><span class="cm">-- Shortest path from Alice to Bob</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> p <span class="op">=</span> <span class="kw">ANY SHORTEST</span>
+    (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[k:Knows]->+(b:Person <span class="kw">WHERE</span> b.name <span class="op">=</span> <span class="str">'Bob'</span>)
+  <span class="kw">COLUMNS</span> (<span class="fn">path_length</span>(p) <span class="kw">AS</span> distance)
+);</code></pre>
+
+    <pre><code><span class="cm">-- Shortest paths from Alice to everyone, with path details</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> p <span class="op">=</span> <span class="kw">ANY SHORTEST</span>
+    (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[k:Knows]->+(b:Person)
+  <span class="kw">COLUMNS</span> (b.name, <span class="fn">path_length</span>(p) <span class="kw">AS</span> hops)
+)
+<span class="kw">ORDER BY</span> hops;</code></pre>
 
     <!-- ===== PHASE 3 ===== -->
-    <h2 id="phase3">Phase 3: Property Graph Catalog</h2>
-    <span class="phase-badge phase-3">MEDIUM EFFORT</span>
+    <h2 id="phase3">Phase 3: Cyclic Patterns + Graph Analytics</h2>
+    <span class="phase-badge phase-3">ADVANCED</span>
 
-    <p>Formalize the mapping between tables and graph entities:</p>
+    <h3>Triangle Detection</h3>
 
-    <pre><code><span class="cm">-- Register a table as a node label</span>
-<span class="kw">CREATE NODE LABEL</span> Person <span class="kw">FROM</span> persons;
+    <p>Cyclic patterns like triangles map to <code>wco_join()</code>:</p>
 
-<span class="cm">-- Register a relationship type with its source and target labels</span>
-<span class="kw">CREATE EDGE LABEL</span> KNOWS
-  <span class="kw">FROM</span> Person <span class="kw">TO</span> Person
-  <span class="kw">USING</span> friendships(person_a, person_b);
+    <pre><code><span class="cm">-- Find all triangles: three people who all know each other</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person)-[:Knows]->(b:Person)-[:Knows]->(c:Person),
+        (a)-[:Knows]->(c)
+  <span class="kw">COLUMNS</span> (a.name <span class="kw">AS</span> person1, b.name <span class="kw">AS</span> person2, c.name <span class="kw">AS</span> person3)
+);</code></pre>
 
-<span class="cm">-- Query the catalog</span>
-<span class="kw">SHOW NODE LABELS</span>;
-<span class="kw">SHOW EDGE LABELS</span>;</code></pre>
+    <h3>Graph + Full SQL Composability</h3>
 
-    <p>This adds:</p>
-    <ul>
-      <li>Node label registry: which tables represent which node types</li>
-      <li>Edge label registry: name &rarr; <code>Rel</code> mapping with source/target labels</li>
-      <li>Schema validation on graph mutations</li>
-      <li>Automatic relationship building when edge data is inserted</li>
-    </ul>
+    <p>Because <code>GRAPH_TABLE</code> returns a regular table, graph results compose with the entire SQL language:</p>
 
-    <!-- ===== PHASE 4 ===== -->
-    <h2 id="phase4">Phase 4: Graph Algorithms</h2>
-    <span class="phase-badge phase-4">INCREMENTAL</span>
+    <pre><code><span class="cm">-- Top 10 most-connected people (graph + aggregation)</span>
+<span class="kw">SELECT</span> person, <span class="fn">COUNT</span>(<span class="op">*</span>) <span class="kw">AS</span> connections
+<span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person)-[:Knows]-(b:Person)
+  <span class="kw">COLUMNS</span> (a.name <span class="kw">AS</span> person)
+)
+<span class="kw">GROUP BY</span> person
+<span class="kw">ORDER BY</span> connections <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num">10</span>;</code></pre>
 
-    <p>Built-in graph algorithms exposed as SQL functions:</p>
+    <pre><code><span class="cm">-- Average network reach by company (graph + join + aggregation)</span>
+<span class="kw">SELECT</span> company, <span class="fn">AVG</span>(reach) <span class="kw">AS</span> avg_reach
+<span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (p:Person)-[:WorksAt]->(c:Company),
+        (p)-[:Knows]->{<span class="num">1</span>,<span class="num">3</span>}(friend:Person)
+  <span class="kw">COLUMNS</span> (c.name <span class="kw">AS</span> company, <span class="fn">COUNT</span>(friend.id) <span class="kw">AS</span> reach)
+)
+<span class="kw">GROUP BY</span> company
+<span class="kw">ORDER BY</span> avg_reach <span class="kw">DESC</span>;</code></pre>
 
-    <pre><code><span class="cm">-- PageRank</span>
-<span class="kw">SELECT</span> node_id, <span class="fn">PAGERANK</span>(follows, <span class="num">20</span>, <span class="num">0.85</span>) <span class="kw">AS</span> rank
-<span class="kw">FROM</span> users
+    <pre><code><span class="cm">-- Graph results as a CTE, then join with other tables</span>
+<span class="kw">WITH</span> influencers <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> person_id, connections
+  <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+    <span class="kw">MATCH</span> (a:Person)-[:Knows]-(b:Person)
+    <span class="kw">COLUMNS</span> (a.id <span class="kw">AS</span> person_id, <span class="fn">COUNT</span>(b.id) <span class="kw">AS</span> connections)
+  )
+  <span class="kw">WHERE</span> connections <span class="op">></span> <span class="num">100</span>
+)
+<span class="kw">SELECT</span> p.name, p.email, i.connections
+<span class="kw">FROM</span> influencers i
+<span class="kw">JOIN</span> persons p <span class="kw">ON</span> p.id <span class="op">=</span> i.person_id
+<span class="kw">ORDER BY</span> i.connections <span class="kw">DESC</span>;</code></pre>
+
+    <h3>Graph Algorithms as SQL Functions</h3>
+
+    <pre><code><span class="cm">-- PageRank (future)</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (p:Person)
+  <span class="kw">COLUMNS</span> (p.name, <span class="fn">PAGERANK</span>(social, p, <span class="num">20</span>, <span class="num">0.85</span>) <span class="kw">AS</span> rank)
+)
 <span class="kw">ORDER BY</span> rank <span class="kw">DESC</span> <span class="kw">LIMIT</span> <span class="num">10</span>;
 
-<span class="cm">-- Connected components</span>
-<span class="kw">SELECT</span> node_id, <span class="fn">CONNECTED_COMPONENT</span>(follows) <span class="kw">AS</span> component_id
-<span class="kw">FROM</span> users;
+<span class="cm">-- Connected components (future)</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (p:Person)
+  <span class="kw">COLUMNS</span> (p.name, <span class="fn">CONNECTED_COMPONENT</span>(social, p) <span class="kw">AS</span> component)
+);</code></pre>
 
-<span class="cm">-- Community detection (Louvain)</span>
-<span class="kw">SELECT</span> node_id, <span class="fn">COMMUNITY</span>(follows) <span class="kw">AS</span> community_id
-<span class="kw">FROM</span> users;</code></pre>
+    <!-- ===== COMPARISON WITH ALTERNATIVES ===== -->
+    <h2>SQL/PGQ vs Cypher vs Datalog</h2>
 
-    <p>These can be implemented as iterative graph operations using existing engine primitives. Each algorithm becomes a Rust function that builds a computation DAG, executes it in a loop until convergence, and returns the result as a table.</p>
+    <p>The same query in three languages &mdash; "Find friends-of-friends of Alice who work at Google":</p>
 
-    <!-- ===== ROADMAP ===== -->
-    <h2>Roadmap Summary</h2>
+    <h3>SQL/PGQ (our target)</h3>
+    <pre><code><span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)
+        -[:Knows]->{<span class="num">2</span>,<span class="num">2</span>}
+        (fof:Person)-[:WorksAt]->(c:Company <span class="kw">WHERE</span> c.name <span class="op">=</span> <span class="str">'Google'</span>)
+  <span class="kw">COLUMNS</span> (fof.name, fof.email)
+);</code></pre>
+
+    <h3>Cypher</h3>
+    <pre><code><span class="kw">MATCH</span> (a:Person {name: <span class="str">'Alice'</span>})-[:KNOWS*2..2]->(fof:Person)-[:WORKS_AT]->(c:Company {name: <span class="str">'Google'</span>})
+<span class="kw">RETURN</span> fof.name, fof.email</code></pre>
+    <p class="text-gray text-sm">Similar readability, but no composability with SQL analytics.</p>
+
+    <h3>Datalog</h3>
+    <pre><code>fof(X, Y) :- knows(X, Z), knows(Z, Y).
+result(Name, Email) :- person(<span class="str">'Alice'</span>, AliceId),
+                       fof(AliceId, FofId),
+                       works_at(FofId, CompId),
+                       company(CompId, <span class="str">'Google'</span>),
+                       person_attrs(FofId, Name, Email).</code></pre>
+    <p class="text-gray text-sm">Elegant for recursion, but aggregation/sorting need non-standard extensions. No SQL tool ecosystem.</p>
+
+    <!-- ===== IMPLEMENTATION PLAN ===== -->
+    <h2>Implementation Plan</h2>
 
     <table>
       <thead>
@@ -495,27 +561,51 @@
       <tbody>
         <tr>
           <td><span class="phase-badge phase-1">Phase 1</span></td>
-          <td>Graph ops via SQL table functions + relationship DDL</td>
-          <td>None</td>
-          <td>~600 lines</td>
-        </tr>
-        <tr>
-          <td><span class="phase-badge phase-2">Phase 2</span></td>
-          <td>OpenCypher parser &amp; planner</td>
-          <td>None</td>
-          <td>~2000 lines</td>
-        </tr>
-        <tr>
-          <td><span class="phase-badge phase-3">Phase 3</span></td>
-          <td>Property graph catalog (labels, schema)</td>
+          <td><code>CREATE PROPERTY GRAPH</code> + basic 1-hop <code>MATCH</code></td>
           <td>None</td>
           <td>~800 lines</td>
         </tr>
         <tr>
-          <td><span class="phase-badge phase-4">Phase 4</span></td>
-          <td>Graph algorithms (PageRank, components, community)</td>
+          <td><span class="phase-badge phase-2">Phase 2</span></td>
+          <td>Variable-length paths (<code>->{1,3}</code>, <code>->+</code>) + <code>ANY SHORTEST</code></td>
+          <td>None</td>
+          <td>~600 lines</td>
+        </tr>
+        <tr>
+          <td><span class="phase-badge phase-3">Phase 3</span></td>
+          <td>Cyclic patterns (triangles) + graph algorithms</td>
           <td>Optional C kernels</td>
-          <td>Per algorithm</td>
+          <td>~500 lines + per algorithm</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Implementation Scope by File</h3>
+
+    <table>
+      <thead>
+        <tr><th>File</th><th>Change</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>src/sql/mod.rs</code></td>
+          <td>Add <code>PropertyGraph</code> catalog + <code>graphs: HashMap&lt;String, PropertyGraph&gt;</code> to <code>Session</code></td>
+        </tr>
+        <tr>
+          <td><code>src/sql/pgq.rs</code></td>
+          <td><strong>New module:</strong> PGQ planner &mdash; parse <code>GRAPH_TABLE</code>, translate <code>MATCH</code> patterns to graph DAG ops</td>
+        </tr>
+        <tr>
+          <td><code>src/sql/planner.rs</code></td>
+          <td>Add match arms for <code>CREATE PROPERTY GRAPH</code> / <code>DROP</code>; delegate <code>GRAPH_TABLE</code> in <code>FROM</code> to <code>pgq.rs</code></td>
+        </tr>
+        <tr>
+          <td><code>src/engine.rs</code></td>
+          <td>No changes</td>
+        </tr>
+        <tr>
+          <td>C engine</td>
+          <td>No changes</td>
         </tr>
       </tbody>
     </table>
@@ -523,60 +613,106 @@
     <!-- ===== END-TO-END EXAMPLE ===== -->
     <h2>End-to-End Example: Social Network</h2>
 
-    <p>A complete session demonstrating the Phase 1 SQL extensions:</p>
+    <p>A complete session demonstrating the SQL/PGQ workflow:</p>
 
-    <pre><code><span class="cm">-- 1. Load data</span>
-<span class="kw">CREATE TABLE</span> users <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'users.csv'</span>);
-<span class="kw">CREATE TABLE</span> edges <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'follows.csv'</span>);
+    <pre><code><span class="cm">-- 1. Load relational data</span>
+<span class="kw">CREATE TABLE</span> persons <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'persons.csv'</span>);
+<span class="kw">CREATE TABLE</span> companies <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'companies.csv'</span>);
+<span class="kw">CREATE TABLE</span> friendships <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'friendships.csv'</span>);
+<span class="kw">CREATE TABLE</span> employment <span class="kw">AS SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">read_csv</span>(<span class="str">'employment.csv'</span>);
 
-<span class="cm">-- 2. Build the relationship index</span>
-<span class="kw">CREATE RELATIONSHIP</span> follows <span class="kw">FROM</span> edges(src, dst) <span class="kw">NODES</span> <span class="num">1000000</span>;
+<span class="cm">-- 2. Define the property graph</span>
+<span class="kw">CREATE PROPERTY GRAPH</span> social
+<span class="kw">VERTEX TABLES</span> (
+  persons    <span class="kw">LABEL</span> Person,
+  companies  <span class="kw">LABEL</span> Company
+)
+<span class="kw">EDGE TABLES</span> (
+  friendships
+    <span class="kw">SOURCE KEY</span> (person1_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">DESTINATION KEY</span> (person2_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">LABEL</span> Knows,
+  employment
+    <span class="kw">SOURCE KEY</span> (person_id) <span class="kw">REFERENCES</span> persons (id)
+    <span class="kw">DESTINATION KEY</span> (company_id) <span class="kw">REFERENCES</span> companies (id)
+    <span class="kw">LABEL</span> WorksAt
+);
 
-<span class="cm">-- 3. Who are the most-followed users?</span>
-<span class="kw">SELECT</span> u.name, <span class="fn">COUNT</span>(<span class="op">*</span>) <span class="kw">AS</span> followers
-<span class="kw">FROM</span> <span class="fn">EXPAND</span>(follows, <span class="str">'reverse'</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._dst
-<span class="kw">GROUP BY</span> u.name
-<span class="kw">ORDER BY</span> followers <span class="kw">DESC</span>
-<span class="kw">LIMIT</span> <span class="num">10</span>;
+<span class="cm">-- 3. Basic pattern match: who does Alice know?</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[:Knows]->(b:Person)
+  <span class="kw">COLUMNS</span> (b.name, b.city)
+);
 
-<span class="cm">-- 4. Find all people within 3 hops of user 42</span>
-<span class="kw">SELECT</span> u.name, e._depth
-<span class="kw">FROM</span> <span class="fn">VAR_EXPAND</span>(follows, <span class="str">'forward'</span>, <span class="num">1</span>, <span class="num">3</span>) <span class="kw">AS</span> e
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> e._end
-<span class="kw">WHERE</span> e._start <span class="op">=</span> <span class="num">42</span>
-<span class="kw">ORDER BY</span> e._depth;
+<span class="cm">-- 4. Variable-length: all people within 3 hops of Alice</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[:Knows]->{<span class="num">1</span>,<span class="num">3</span>}(b:Person)
+  <span class="kw">COLUMNS</span> (b.name, b.city)
+);
 
-<span class="cm">-- 5. Shortest path between two users</span>
-<span class="kw">SELECT</span> u.name, sp._depth
-<span class="kw">FROM</span> <span class="fn">SHORTEST_PATH</span>(follows, <span class="num">42</span>, <span class="num">99</span>, <span class="num">10</span>) <span class="kw">AS</span> sp
-<span class="kw">JOIN</span> users u <span class="kw">ON</span> u._rowid <span class="op">=</span> sp._node;
+<span class="cm">-- 5. Shortest path</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> p <span class="op">=</span> <span class="kw">ANY SHORTEST</span>
+    (a:Person <span class="kw">WHERE</span> a.name <span class="op">=</span> <span class="str">'Alice'</span>)-[:Knows]->+(b:Person <span class="kw">WHERE</span> b.name <span class="op">=</span> <span class="str">'Zara'</span>)
+  <span class="kw">COLUMNS</span> (<span class="fn">path_length</span>(p) <span class="kw">AS</span> hops)
+);
 
-<span class="cm">-- 6. Find triangles (mutual follow clusters)</span>
-<span class="kw">SELECT</span> u0.name, u1.name, u2.name
-<span class="kw">FROM</span> <span class="fn">WCO_JOIN</span>(follows, follows, follows, <span class="num">3</span>) <span class="kw">AS</span> t
-<span class="kw">JOIN</span> users u0 <span class="kw">ON</span> u0._rowid <span class="op">=</span> t._v0
-<span class="kw">JOIN</span> users u1 <span class="kw">ON</span> u1._rowid <span class="op">=</span> t._v1
-<span class="kw">JOIN</span> users u2 <span class="kw">ON</span> u2._rowid <span class="op">=</span> t._v2
-<span class="kw">LIMIT</span> <span class="num">100</span>;
+<span class="cm">-- 6. Graph + analytics: most connected people by company</span>
+<span class="kw">SELECT</span> company, person, connections
+<span class="kw">FROM</span> (
+  <span class="kw">SELECT</span> company, person, connections,
+         <span class="fn">ROW_NUMBER</span>() <span class="kw">OVER</span> (<span class="kw">PARTITION BY</span> company <span class="kw">ORDER BY</span> connections <span class="kw">DESC</span>) <span class="kw">AS</span> rn
+  <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+    <span class="kw">MATCH</span> (p:Person)-[:Knows]-(friend:Person),
+          (p)-[:WorksAt]->(c:Company)
+    <span class="kw">COLUMNS</span> (c.name <span class="kw">AS</span> company, p.name <span class="kw">AS</span> person, <span class="fn">COUNT</span>(friend.id) <span class="kw">AS</span> connections)
+  )
+)
+<span class="kw">WHERE</span> rn <span class="op">&lt;=</span> <span class="num">5</span>
+<span class="kw">ORDER BY</span> company, connections <span class="kw">DESC</span>;
 
-<span class="cm">-- 7. Save the index for later</span>
-<span class="kw">SAVE RELATIONSHIP</span> follows <span class="kw">TO</span> <span class="str">'/data/indexes/follows'</span>;</code></pre>
+<span class="cm">-- 7. Find triangles</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="fn">GRAPH_TABLE</span> (social
+  <span class="kw">MATCH</span> (a:Person)-[:Knows]->(b:Person)-[:Knows]->(c:Person),
+        (a)-[:Knows]->(c)
+  <span class="kw">COLUMNS</span> (a.name <span class="kw">AS</span> p1, b.name <span class="kw">AS</span> p2, c.name <span class="kw">AS</span> p3)
+) <span class="kw">LIMIT</span> <span class="num">100</span>;</code></pre>
 
-    <!-- ===== WHY NOT CYPHER FIRST ===== -->
-    <h2>Why SQL First, Not Cypher?</h2>
+    <!-- ===== STANDARDS ALIGNMENT ===== -->
+    <h2>Standards Alignment</h2>
 
-    <ul>
-      <li><strong>Zero new parser</strong> &mdash; <code>sqlparser</code> already handles table functions and custom syntax via the DuckDB dialect</li>
-      <li><strong>Zero engine changes</strong> &mdash; every graph op already exists and is tested in the C engine</li>
-      <li><strong>Full composability</strong> &mdash; graph results flow into joins, aggregations, window functions, ORDER BY &mdash; things Cypher handles poorly</li>
-      <li><strong>PgWire compatible</strong> &mdash; any Postgres client (DBeaver, psql, psycopg2) can run graph queries immediately</li>
-      <li><strong>Incremental path</strong> &mdash; Cypher can be added later as a separate frontend that compiles to the same graph ops</li>
-      <li><strong>SQL/PGQ alignment</strong> &mdash; the ISO SQL/PGQ standard is adding graph pattern matching to SQL; our table-function approach is a pragmatic step in that direction</li>
-    </ul>
+    <p>Our SQL/PGQ implementation aligns with the emerging ecosystem:</p>
+
+    <table>
+      <thead>
+        <tr><th>Database</th><th>SQL/PGQ Support</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Oracle 23ai/26ai</td>
+          <td><code>CREATE PROPERTY GRAPH</code>, <code>GRAPH_TABLE</code>, <code>MATCH</code></td>
+          <td>Production</td>
+        </tr>
+        <tr>
+          <td>PostgreSQL 18</td>
+          <td><code>CREATE PROPERTY GRAPH</code>, <code>GRAPH_TABLE</code> (experimental)</td>
+          <td>Development</td>
+        </tr>
+        <tr>
+          <td>DuckDB (DuckPGQ)</td>
+          <td><code>CREATE PROPERTY GRAPH</code>, <code>GRAPH_TABLE</code>, <code>ANY SHORTEST</code></td>
+          <td>Extension</td>
+        </tr>
+        <tr>
+          <td><strong>Teide (proposed)</strong></td>
+          <td><code>CREATE PROPERTY GRAPH</code>, <code>GRAPH_TABLE</code>, <code>ANY SHORTEST</code></td>
+          <td><strong>Planned</strong></td>
+        </tr>
+      </tbody>
+    </table>
 
     <div class="note">
-      <p><strong>Bottom line:</strong> The C engine already does the hard work. Phase 1 is ~600 lines of planner code to unlock graph queries for every SQL client.</p>
+      <p><strong>Bottom line:</strong> SQL/PGQ gives us Cypher-like graph pattern matching without abandoning SQL. Every pattern maps directly to an existing Teide engine operation. The optimizer and executor need zero changes. We join Oracle, Postgres, and DuckDB in adopting the ISO standard.</p>
     </div>
 
     <nav class="page-nav">
