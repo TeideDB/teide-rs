@@ -1074,7 +1074,7 @@ Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`
 - Create: `tests/slt/pgq_algorithms.slt`
 - Modify: `tests/slt_runner.rs`
 
-- [ ] **Step 1: Add algorithm dispatch to `pgq.rs`**
+- [x] **Step 1: Add algorithm dispatch to `pgq.rs`**
 
 In the COLUMNS projection logic, handle algorithm function calls. Add a new function:
 
@@ -1113,7 +1113,7 @@ pub(crate) fn execute_graph_algorithm(
 }
 ```
 
-- [ ] **Step 2: Create SLT tests**
+- [x] **Step 2: Create SLT tests**
 
 Create `tests/slt/pgq_algorithms.slt`:
 
@@ -1157,7 +1157,7 @@ SELECT COUNT(DISTINCT community) FROM GRAPH_TABLE (social MATCH (p:Person) COLUM
 
 Note: exact output values for PageRank/Louvain depend on convergence, so tests check invariants rather than specific values.
 
-- [ ] **Step 3: Add SLT runner**
+- [x] **Step 3: Add SLT runner**
 
 Add to `tests/slt_runner.rs`:
 ```rust
@@ -1167,12 +1167,12 @@ fn slt_pgq_algorithms() {
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/sql/pgq.rs tests/slt/pgq_algorithms.slt tests/slt_runner.rs

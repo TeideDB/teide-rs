@@ -370,6 +370,9 @@ pub(crate) fn plan_graph_table(
         (2, 1, PathMode::Walk) => {
             plan_single_hop(session, graph, pattern, &expr.columns)
         }
+        (1, 0, _) => {
+            plan_algorithm_query(session, graph, pattern, &expr.columns)
+        }
         _ => {
             if pattern.nodes.len() >= 3 {
                 Err(SqlError::Plan(
@@ -1253,4 +1256,208 @@ fn extract_node_id(
     Err(SqlError::Plan(format!(
         "No matching row for filter: {filter}"
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Graph algorithm planner
+// ---------------------------------------------------------------------------
+
+/// Known graph algorithm function names.
+const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain"];
+
+/// Parse a COLUMNS expression to check if it's a graph algorithm function call.
+/// Returns `Some((func_name, args))` if the expression matches `FUNC(arg1, arg2, ...)`.
+fn parse_algo_function(expr: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = expr.trim();
+    let open = trimmed.find('(')?;
+    let func_name = trimmed[..open].trim().to_lowercase();
+    if !ALGO_FUNCTIONS.contains(&func_name.as_str()) {
+        return None;
+    }
+    // Find matching closing paren
+    let inner = trimmed[open + 1..].strip_suffix(')')?.trim().to_string();
+    let args: Vec<String> = inner.split(',').map(|s| s.trim().to_lowercase()).collect();
+    Some((func_name, args))
+}
+
+/// Plan a single-node pattern with algorithm function calls in COLUMNS.
+/// Handles patterns like: (p:Person) COLUMNS (PAGERANK(social, p) AS rank)
+fn plan_algorithm_query(
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    columns: &[ColumnEntry],
+) -> Result<(Table, Vec<String>), SqlError> {
+    let node = &pattern.nodes[0];
+
+    // Resolve vertex label for the node
+    let vertex_label = if let Some(label) = &node.label {
+        graph.vertex_labels.get(label).ok_or_else(|| {
+            SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
+        })?
+    } else {
+        graph.vertex_labels.values().next().ok_or_else(|| {
+            SqlError::Plan("Graph has no vertex labels".into())
+        })?
+    };
+
+    let vertex_stored = session.tables.get(&vertex_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", vertex_label.table_name))
+    })?;
+    let nrows = checked_nrows(&vertex_stored.table)?;
+
+    // Determine edge label: use the only one, or require specification
+    let default_edge_label = if graph.edge_labels.len() == 1 {
+        graph.edge_labels.keys().next().cloned()
+    } else {
+        None
+    };
+
+    // Process each COLUMNS entry - collect algorithm results and property lookups
+    let mut col_names: Vec<String> = Vec::new();
+    enum AlgoColKind {
+        AlgoResult { algo_col_idx: usize },  // index into algorithm result table
+        Property { table_col_idx: usize },    // index into vertex table
+    }
+    let mut col_specs: Vec<AlgoColKind> = Vec::new();
+    let mut algo_result: Option<Table> = None;
+
+    let node_var = node.variable.as_deref().unwrap_or("__node");
+
+    for entry in columns {
+        let alias = entry.alias.as_deref();
+
+        if let Some((func_name, _args)) = parse_algo_function(&entry.expr) {
+            // Execute algorithm if not already done
+            if algo_result.is_none() {
+                let edge_label_name = default_edge_label.as_deref().ok_or_else(|| {
+                    SqlError::Plan(
+                        "Graph has multiple edge labels; cannot auto-select for algorithm. \
+                         Please use a graph with a single edge label.".into()
+                    )
+                })?;
+                algo_result = Some(execute_graph_algorithm(
+                    session, graph, &func_name, edge_label_name,
+                )?);
+            }
+
+            // Map function name to result column
+            let result_col_name = match func_name.as_str() {
+                "pagerank" => "_rank",
+                "component" | "connected_component" => "_component",
+                "community" | "louvain" => "_community",
+                _ => return Err(SqlError::Plan(format!("Unknown algorithm: {func_name}"))),
+            };
+            let default_alias = result_col_name.trim_start_matches('_');
+            let out_name = alias.unwrap_or(default_alias).to_string();
+
+            let result_table = algo_result.as_ref().unwrap();
+            let algo_col = find_col_idx(result_table, result_col_name).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Algorithm result missing column '{result_col_name}'"
+                ))
+            })?;
+            col_names.push(out_name);
+            col_specs.push(AlgoColKind::AlgoResult { algo_col_idx: algo_col });
+        } else if let Some(dot_pos) = entry.expr.find('.') {
+            let var = entry.expr[..dot_pos].trim().to_lowercase();
+            let col = entry.expr[dot_pos + 1..].trim().to_lowercase();
+            let out_name = alias.unwrap_or(&col).to_string();
+
+            if var == node_var {
+                let col_idx = find_col_idx(&vertex_stored.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!("Column '{col}' not found in vertex table"))
+                })?;
+                col_names.push(out_name);
+                col_specs.push(AlgoColKind::Property { table_col_idx: col_idx });
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in COLUMNS. Available: {node_var}"
+                )));
+            }
+        } else {
+            return Err(SqlError::Plan(format!(
+                "COLUMNS: unsupported expression '{}'. Expected algorithm function or var.col format.",
+                entry.expr
+            )));
+        }
+    }
+
+    if col_specs.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Build CSV result
+    let csv_col_names: Vec<String> = (0..col_names.len())
+        .map(|i| format!("__c{i}"))
+        .collect();
+
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    for row in 0..nrows {
+        for (i, spec) in col_specs.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            match spec {
+                AlgoColKind::AlgoResult { algo_col_idx } => {
+                    let result_table = algo_result.as_ref().unwrap();
+                    csv.push_str(&get_cell_string(result_table, *algo_col_idx, row));
+                }
+                AlgoColKind::Property { table_col_idx } => {
+                    csv.push_str(&get_cell_string(&vertex_stored.table, *table_col_idx, row));
+                }
+            }
+        }
+        csv.push('\n');
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "__pgq_algo_{}_{}.csv",
+        std::process::id(),
+        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp_path, csv.as_bytes())
+        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
+    let path_str = tmp_path.to_str().ok_or_else(|| {
+        SqlError::Plan("Temp file path not valid UTF-8".into())
+    })?;
+    let result = session.ctx.read_csv(path_str);
+    let _ = std::fs::remove_file(&tmp_path);
+    let result = result?.with_column_names(&col_names)?;
+
+    Ok((result, col_names))
+}
+
+/// Execute a graph algorithm and return its result table.
+fn execute_graph_algorithm(
+    session: &Session,
+    graph: &PropertyGraph,
+    func_name: &str,
+    edge_label_name: &str,
+) -> Result<Table, SqlError> {
+    let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
+    })?;
+
+    // Need a base table to create a Graph handle
+    let src_table_name = &stored_rel.edge_label.src_ref_table;
+    let src_table = &session.tables.get(src_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{src_table_name}' not found"))
+    })?.table;
+
+    let g = session.ctx.graph(src_table)?;
+
+    let result_col = match func_name {
+        "pagerank" => g.pagerank(&stored_rel.rel, 20, 0.85)?,
+        "component" | "connected_component" => g.connected_comp(&stored_rel.rel)?,
+        "community" | "louvain" => g.louvain(&stored_rel.rel, 100)?,
+        _ => return Err(SqlError::Plan(format!(
+            "Unknown graph algorithm: {func_name}"
+        ))),
+    };
+
+    let result = g.execute(result_col)?;
+    Ok(result)
 }
