@@ -462,16 +462,21 @@ pub(crate) fn extract_graph_tables(
                 }
                 result.push_str(&sql[start..i]);
             }
-            // Block comment
+            // Block comment (supports nested /* */)
             b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
                 let start = i;
                 i += 2;
-                while i + 1 < len {
-                    if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                let mut depth = 1u32;
+                while depth > 0 && i < len {
+                    if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        depth += 1;
                         i += 2;
-                        break;
+                    } else if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
-                    i += 1;
                 }
                 result.push_str(&sql[start..i]);
             }

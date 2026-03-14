@@ -60,7 +60,7 @@ The C engine uses global state (thread-local arenas, global symbol table). Key c
 
 ### Graph API (Lazy DAG)
 
-All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`scan`, `filter`, `add`, etc.) → `g.execute(root)`. `Column` is a non-owning `Copy` handle (raw `*mut td_op_t`). On `execute()`, the C optimizer runs (type inference, constant fold, predicate pushdown, CSE, fusion, DCE), then the morsel-driven executor runs.
+All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`scan`, `filter`, `add`, etc.) → `g.execute(root)`. `Column` is a non-owning `Copy` handle (raw `*mut td_op_t`). On `execute()`, the C optimizer runs (type inference, constant fold, predicate pushdown, CSE, fusion, DCE), then the morsel-driven executor runs. Graph algorithm ops (`pagerank`, `connected_comp`, `dijkstra`, `louvain`) operate directly on CSR indexes and return TD_TABLE results with computed per-node values.
 
 ### SQL Layer
 

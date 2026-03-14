@@ -502,16 +502,9 @@ fn apply_node_filter(
     filter_text: &str,
     variable: Option<&str>,
 ) -> Result<Column, SqlError> {
-    // Reject unsupported comparison operators before splitting on '='.
-    for op in &["!=", "<>", ">=", "<=", ">", "<"] {
-        if filter_text.contains(op) {
-            return Err(SqlError::Plan(format!(
-                "Unsupported operator '{op}' in node filter: {filter_text}. Only 'col = value' is supported."
-            )));
-        }
-    }
-    // Split on '=' first, then strip variable prefix only from the LHS
-    // to avoid corrupting string values that contain the variable name.
+    // Split on '=' first, then check only the LHS for unsupported operators.
+    // Checking the full filter_text would false-reject values containing
+    // operator characters (e.g. a.name = 'A>B').
     let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
     if parts.len() != 2 {
         return Err(SqlError::Plan(format!(
@@ -519,6 +512,13 @@ fn apply_node_filter(
         )));
     }
     let lhs = parts[0].trim();
+    // After splitting on '=', a trailing '!', '>', or '<' on the LHS means
+    // the original expression used !=, >=, or <= — reject those.
+    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
+        return Err(SqlError::Plan(format!(
+            "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
+        )));
+    }
     let col_name = if let Some(var) = variable {
         let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
         let mut s = lhs.to_string();
@@ -724,7 +724,7 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> String {
     if let Some(s) = table.get_str(col, row) {
         return csv_quote(&s);
     }
-    // Try i64
+    // Try i64 (also covers BOOL which is stored as 0/1 i64)
     if let Some(v) = table.get_i64(col, row) {
         return v.to_string();
     }
@@ -732,6 +732,7 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> String {
     if let Some(v) = table.get_f64(col, row) {
         return v.to_string();
     }
+    // Unknown type - return empty (DATE/TIME/TIMESTAMP not yet supported in CSV round-trip)
     String::new()
 }
 
@@ -1207,6 +1208,12 @@ fn extract_node_id(
         )));
     }
     let lhs = parts[0].trim();
+    // Reject !=, >=, <= operators (detected by trailing !, >, < on LHS after split)
+    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
+        return Err(SqlError::Plan(format!(
+            "Unsupported operator in node filter: {filter}. Only 'col = value' is supported."
+        )));
+    }
     let var = node.variable.as_deref().unwrap_or("");
     let col_name = if !var.is_empty() {
         let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
@@ -1321,6 +1328,7 @@ fn plan_algorithm_query(
     }
     let mut col_specs: Vec<AlgoColKind> = Vec::new();
     let mut algo_result: Option<Table> = None;
+    let mut algo_func_used: Option<String> = None;
 
     let node_var = node.variable.as_deref().unwrap_or("__node");
 
@@ -1328,6 +1336,27 @@ fn plan_algorithm_query(
         let alias = entry.alias.as_deref();
 
         if let Some((func_name, _args)) = parse_algo_function(&entry.expr) {
+            // Reject mixing different algorithms in the same COLUMNS clause
+            if let Some(ref prev) = algo_func_used {
+                let prev_canonical = match prev.as_str() {
+                    "component" | "connected_component" => "connected_component",
+                    "community" | "louvain" => "louvain",
+                    other => other,
+                };
+                let cur_canonical = match func_name.as_str() {
+                    "component" | "connected_component" => "connected_component",
+                    "community" | "louvain" => "louvain",
+                    other => other,
+                };
+                if prev_canonical != cur_canonical {
+                    return Err(SqlError::Plan(format!(
+                        "Cannot mix different algorithms ({prev} and {func_name}) in the same COLUMNS clause. \
+                         Use separate GRAPH_TABLE queries for each algorithm."
+                    )));
+                }
+            }
+            algo_func_used = Some(func_name.clone());
+
             // Execute algorithm if not already done
             if algo_result.is_none() {
                 let edge_label_name = default_edge_label.as_deref().ok_or_else(|| {
