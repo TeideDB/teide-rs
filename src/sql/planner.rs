@@ -85,13 +85,24 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                 let ncols = result.columns.len();
 
                 let table = result.table.with_column_names(&result.columns)?;
-                session.tables.insert(
+                let old_table = session.tables.insert(
                     table_name.clone(),
                     StoredTable {
                         table,
                         columns: result.columns,
                     },
                 );
+                if create.or_replace {
+                    if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
+                        // Rollback: restore the old table
+                        if let Some(old) = old_table {
+                            session.tables.insert(table_name, old);
+                        } else {
+                            session.tables.remove(&table_name);
+                        }
+                        return Err(e);
+                    }
+                }
 
                 Ok(ExecResult::Ddl(format!(
                     "Created table '{table_name}' ({nrows} rows, {ncols} cols)"
@@ -100,9 +111,19 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                 // CREATE TABLE t (col1 TYPE, col2 TYPE, ...)
                 let (table, columns) = create_empty_table(&create.columns)?;
                 let ncols = columns.len();
-                session
+                let old_table = session
                     .tables
                     .insert(table_name.clone(), StoredTable { table, columns });
+                if create.or_replace {
+                    if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
+                        if let Some(old) = old_table {
+                            session.tables.insert(table_name, old);
+                        } else {
+                            session.tables.remove(&table_name);
+                        }
+                        return Err(e);
+                    }
+                }
 
                 Ok(ExecResult::Ddl(format!(
                     "Created table '{table_name}' (0 rows, {ncols} cols)"
@@ -124,6 +145,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
             for name in &names {
                 let table_name = object_name_to_string(name).to_lowercase();
                 if session.tables.remove(&table_name).is_some() {
+                    session.remove_graphs_for_table(&table_name);
                     msgs.push(format!("Dropped table '{table_name}'"));
                 } else if if_exists {
                     msgs.push(format!("Table '{table_name}' not found (skipped)"));
@@ -284,13 +306,21 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
     // Rename columns to match target schema
     let merged = merged.with_column_names(&target_cols)?;
 
-    session.tables.insert(
+    let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
             table: merged,
             columns: target_cols,
         },
     );
+
+    if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
+        // Rollback: restore the previous table state
+        if let Some(old) = old_table {
+            session.tables.insert(table_name, old);
+        }
+        return Err(e);
+    }
 
     Ok(ExecResult::Ddl(format!(
         "Inserted {nrows} rows into '{table_name}'"
@@ -348,13 +378,20 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
     let new_table = new_table.with_column_names(&columns)?;
 
-    session.tables.insert(
+    let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
             table: new_table,
             columns,
         },
     );
+
+    if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
+        if let Some(old) = old_table {
+            session.tables.insert(table_name, old);
+        }
+        return Err(e);
+    }
 
     Ok(ExecResult::Ddl(format!(
         "Deleted {deleted} rows from '{table_name}'"
@@ -493,13 +530,20 @@ fn plan_update(
 
     let result = result.with_column_names(&columns)?;
 
-    session.tables.insert(
+    let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
             table: result,
             columns,
         },
     );
+
+    if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
+        if let Some(old) = old_table {
+            session.tables.insert(table_name, old);
+        }
+        return Err(e);
+    }
 
     Ok(ExecResult::Ddl(format!(
         "Updated {updated_count} rows in '{table_name}'"

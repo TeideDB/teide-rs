@@ -21,6 +21,7 @@ pub(crate) struct VertexLabel {
 }
 
 /// An edge label mapping: label name -> edge table with source/dest references.
+#[derive(Clone)]
 pub(crate) struct EdgeLabel {
     pub table_name: String,
     #[allow(dead_code)]
@@ -185,6 +186,48 @@ pub(crate) fn build_property_graph(
         let n_src = src_stored.table.nrows();
         let n_dst = dst_stored.table.nrows();
 
+        // Validate that edge src/dst column values are 0-based row indices.
+        // The C engine CSR treats these as row offsets into the vertex tables.
+        let n_edges = edge_stored.table.nrows() as usize;
+        let src_col_idx = find_col_idx(&edge_stored.table, &et.src_col).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Column '{}' not found in edge table '{}'",
+                et.src_col, et.table_name
+            ))
+        })?;
+        let dst_col_idx = find_col_idx(&edge_stored.table, &et.dst_col).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Column '{}' not found in edge table '{}'",
+                et.dst_col, et.table_name
+            ))
+        })?;
+        for row in 0..n_edges {
+            if let Some(v) = edge_stored.table.get_i64(src_col_idx, row) {
+                if v < 0 || v >= n_src {
+                    return Err(SqlError::Plan(format!(
+                        "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
+                         into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
+                        et.table_name, et.src_col, row, v, et.src_ref_table, n_src
+                    )));
+                }
+            }
+            if let Some(v) = edge_stored.table.get_i64(dst_col_idx, row) {
+                if v < 0 || v >= n_dst {
+                    return Err(SqlError::Plan(format!(
+                        "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
+                         into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
+                        et.table_name, et.dst_col, row, v, et.dst_ref_table, n_dst
+                    )));
+                }
+            }
+        }
+
+        // Validate that vertex key columns contain 0-based sequential row indices.
+        // The traversal code (expand, shortest path BFS) uses key column values as
+        // CSR node indices, so they must match row positions.
+        validate_key_column_is_rowid(src_stored, &et.src_ref_col, &et.src_ref_table)?;
+        validate_key_column_is_rowid(dst_stored, &et.dst_ref_col, &et.dst_ref_table)?;
+
         let rel = Rel::from_edges(
             &edge_stored.table,
             &et.src_col,
@@ -285,6 +328,14 @@ pub(crate) fn plan_graph_table(
 
     if match_clause.patterns.is_empty() {
         return Err(SqlError::Plan("MATCH requires at least one pattern".into()));
+    }
+
+    if match_clause.patterns.len() > 1 {
+        return Err(SqlError::Plan(
+            "Multiple comma-separated MATCH patterns are not yet supported. \
+             Use a single pattern: (a)-[e]->(b)."
+                .into(),
+        ));
     }
 
     let pattern = &match_clause.patterns[0];
@@ -594,9 +645,41 @@ fn project_columns(
 }
 
 /// Find a column index by name in a table.
-fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
+pub(super) fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
     let ncols = table.ncols() as usize;
     (0..ncols).find(|&i| table.col_name_str(i).to_lowercase() == name)
+}
+
+/// Validate that a vertex table's key column contains values 0..n-1 matching row indices.
+/// The CSR and traversal code use key column values as node indices, so they must
+/// be 0-based sequential integers matching row positions.
+pub(super) fn validate_key_column_is_rowid(
+    stored: &super::StoredTable,
+    key_col: &str,
+    table_name: &str,
+) -> Result<(), SqlError> {
+    let col_idx = find_col_idx(&stored.table, key_col).ok_or_else(|| {
+        SqlError::Plan(format!(
+            "Key column '{key_col}' not found in vertex table '{table_name}'"
+        ))
+    })?;
+    let nrows = stored.table.nrows() as usize;
+    for row in 0..nrows {
+        let val = stored.table.get_i64(col_idx, row).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Vertex table '{table_name}' key column '{key_col}' has NULL at row {row}. \
+                 Key column must contain 0-based sequential row indices."
+            ))
+        })?;
+        if val != row as i64 {
+            return Err(SqlError::Plan(format!(
+                "Vertex table '{table_name}' key column '{key_col}' row {row}: value {val} \
+                 does not match row index. Key column must contain 0-based sequential row \
+                 indices (0, 1, 2, ...) for CSR graph traversal."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Get a cell value as a string for CSV output.
@@ -1039,14 +1122,13 @@ fn reconstruct_shortest_path(
     )))
 }
 
-/// Extract a specific node ID from a WHERE filter.
-/// Extract a specific node ID from a WHERE filter.
+/// Extract a node's row index from a WHERE filter.
 /// Looks for patterns like "a.id = 42" or "a.name = 'Alice'" and resolves to the
-/// node's key value using the reference column from the edge label.
+/// row index in the vertex table. The row index is used as a CSR node index.
 fn extract_node_id(
     node: &NodePattern,
     table_name: &str,
-    key_col: &str,
+    _key_col: &str,
     session: &Session,
 ) -> Result<i64, SqlError> {
     let filter = node.filter.as_deref().ok_or_else(|| {
@@ -1079,15 +1161,7 @@ fn extract_node_id(
     };
     let value = parts[1].trim();
 
-    // If filtering by ID directly
-    // If filtering directly by the key column, try to parse the value immediately.
-    if col_name == key_col {
-        if let Ok(id) = value.parse::<i64>() {
-            return Ok(id);
-        }
-    }
-
-    // Otherwise, scan the table to find the matching row and return the key column value.
+    // Scan the table to find the matching row and return its row index.
     let stored = session.tables.get(table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{table_name}' not found"))
     })?;
@@ -1103,11 +1177,6 @@ fn extract_node_id(
         None
     };
 
-    // Use the key column (from edge label ref) to return the actual node key value.
-    let key_col_idx = stored.columns.iter().position(|c| c == key_col).ok_or_else(|| {
-        SqlError::Plan(format!("Key column '{key_col}' not found in '{table_name}'"))
-    })?;
-
     for row in 0..nrows {
         let matched = if let Some(sv) = str_val {
             stored.table.get_str(col_idx, row).as_deref() == Some(sv)
@@ -1118,12 +1187,7 @@ fn extract_node_id(
         };
 
         if matched {
-            if let Some(key_val) = stored.table.get_i64(key_col_idx, row) {
-                return Ok(key_val);
-            }
-            return Err(SqlError::Plan(format!(
-                "NULL key value in column '{key_col}' at row {row} of '{table_name}'"
-            )));
+            return Ok(row as i64);
         }
     }
 

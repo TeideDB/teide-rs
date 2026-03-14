@@ -5,6 +5,29 @@
 // before they reach the SQL parser and handle them directly.
 
 use super::SqlError;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global counter to generate unique temp table names for GRAPH_TABLE results.
+/// Combined with a process-level random nonce to avoid collisions with
+/// user-defined table names.
+static PGQ_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Random nonce generated once per process to make temp table names unpredictable
+/// and avoid collisions with user tables.
+fn temp_nonce() -> u64 {
+    use std::sync::OnceLock;
+    static NONCE: OnceLock<u64> = OnceLock::new();
+    *NONCE.get_or_init(|| {
+        // Use time + pid as a simple source of entropy without pulling in rand
+        let pid = std::process::id() as u64;
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        // Mix bits so similar timestamps don't produce similar nonces
+        pid.wrapping_mul(6364136223846793005).wrapping_add(time)
+    })
+}
 
 // ---------------------------------------------------------------------------
 // PGQ statement types (parsed from raw SQL)
@@ -45,17 +68,42 @@ pub(crate) enum PgqStatement {
 // Pre-parser: detect and extract PGQ statements from raw SQL
 // ---------------------------------------------------------------------------
 
+/// Strip leading SQL comments (single-line `--` and block `/* */`) and whitespace.
+/// Returns the remaining SQL text after all leading comments are removed.
+fn strip_leading_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if s.starts_with("--") {
+            // Single-line comment: skip to end of line
+            match s.find('\n') {
+                Some(pos) => s = s[pos + 1..].trim_start(),
+                None => return "", // entire string is a comment
+            }
+        } else if s.starts_with("/*") {
+            // Block comment: find matching */
+            match s.find("*/") {
+                Some(pos) => s = s[pos + 2..].trim_start(),
+                None => return "", // unterminated block comment
+            }
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 /// Check if a SQL string is a PGQ statement and parse it.
 /// Returns None if the SQL is not a PGQ statement (should be passed to sqlparser).
 pub(crate) fn try_parse_pgq(sql: &str) -> Result<Option<PgqStatement>, SqlError> {
-    let trimmed = sql.trim();
-    let upper = trimmed.to_uppercase();
+    let stripped = strip_leading_comments(sql);
+    let upper = stripped.to_uppercase();
 
     if upper.starts_with("CREATE PROPERTY GRAPH") {
-        return Ok(Some(parse_create_property_graph(trimmed)?));
+        // Pass the full original SQL (trimmed) to the parser so line positions are preserved
+        return Ok(Some(parse_create_property_graph(stripped)?));
     }
     if upper.starts_with("DROP PROPERTY GRAPH") {
-        return Ok(Some(parse_drop_property_graph(trimmed)?));
+        return Ok(Some(parse_drop_property_graph(stripped)?));
     }
     Ok(None)
 }
@@ -108,6 +156,50 @@ fn tokenize(sql: &str) -> Vec<String> {
 
     while let Some(&ch) = chars.peek() {
         match ch {
+            // -- line comments: skip to end of line
+            '-' if {
+                let mut peek2 = chars.clone();
+                peek2.next();
+                peek2.peek() == Some(&'-')
+            } => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                // Skip until end of line
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            // /* */ block comments: skip entirely (supports nesting)
+            '/' if {
+                let mut peek2 = chars.clone();
+                peek2.next();
+                peek2.peek() == Some(&'*')
+            } => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                chars.next(); // consume '/'
+                chars.next(); // consume '*'
+                let mut depth = 1u32;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('/') if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            }
             '\'' => {
                 // Keep single-quoted strings as one token (e.g. 'Alice')
                 // Handles SQL-style escaped quotes: 'O''Brien' -> 'O''Brien'
@@ -135,7 +227,31 @@ fn tokenize(sql: &str) -> Vec<String> {
                 }
                 tokens.push(s);
             }
-            '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '.' => {
+            '"' => {
+                // Double-quoted identifier: keep as one token (e.g. "My Column")
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                let mut s = String::new();
+                chars.next(); // consume opening quote
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == '"' {
+                        // Check for escaped double quote ("")
+                        if chars.peek() == Some(&'"') {
+                            s.push('"');
+                            chars.next(); // consume second quote
+                        } else {
+                            break;
+                        }
+                    } else {
+                        s.push(c);
+                    }
+                }
+                // Store unquoted content - callers compare case-insensitively
+                tokens.push(s);
+            }
+            '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '/' | '.' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -282,64 +398,128 @@ use super::pgq::{
 };
 
 /// Scan SQL for GRAPH_TABLE(...) in FROM clauses and extract them.
-/// Returns a list of extracted GraphTableExpr and the rewritten SQL
-/// (with GRAPH_TABLE replaced by a placeholder like `__pgq_result_0`).
+/// Returns the rewritten SQL and a list of (temp_name, GraphTableExpr) pairs
+/// (with GRAPH_TABLE replaced by a unique placeholder).
+///
+/// Properly skips single-quoted strings, double-quoted identifiers,
+/// line comments (`--`), and block comments (`/* */`).
 pub(crate) fn extract_graph_tables(
     sql: &str,
-) -> Result<(String, Vec<GraphTableExpr>), SqlError> {
-    let upper = sql.to_uppercase();
+) -> Result<(String, Vec<(String, GraphTableExpr)>), SqlError> {
     let mut result = String::with_capacity(sql.len());
     let mut exprs = Vec::new();
-    let mut pos = 0;
     let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
 
-    while pos < bytes.len() {
-        if let Some(gt_pos) = upper[pos..].find("GRAPH_TABLE") {
-            let abs_pos = pos + gt_pos;
-
-            // Check that GRAPH_TABLE is not inside a string literal
-            let in_str = sql[..abs_pos].chars().filter(|&c| c == '\'').count() % 2 != 0;
-            if in_str {
-                result.push_str(&sql[pos..abs_pos + "GRAPH_TABLE".len()]);
-                pos = abs_pos + "GRAPH_TABLE".len();
-                continue;
+    while i < len {
+        match bytes[i] {
+            // Single-quoted string literal
+            b'\'' => {
+                let start = i;
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\'' {
+                        i += 1;
+                        if i < len && bytes[i] == b'\'' {
+                            i += 1; // escaped quote
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                result.push_str(&sql[start..i]);
             }
-
-            // Check word boundaries to avoid matching inside identifiers
-            let before_ok = abs_pos == 0
-                || !sql.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
-                    && sql.as_bytes()[abs_pos - 1] != b'_';
-            let after_pos = abs_pos + "GRAPH_TABLE".len();
-            let after_ok = after_pos >= sql.len()
-                || !sql.as_bytes()[after_pos].is_ascii_alphanumeric()
-                    && sql.as_bytes()[after_pos] != b'_';
-            if !before_ok || !after_ok {
-                result.push_str(&sql[pos..after_pos]);
-                pos = after_pos;
-                continue;
+            // Double-quoted identifier
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        if i < len && bytes[i] == b'"' {
+                            i += 1; // escaped quote
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                result.push_str(&sql[start..i]);
             }
+            // Line comment
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => {
+                let start = i;
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1; // skip newline
+                }
+                result.push_str(&sql[start..i]);
+            }
+            // Block comment
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                let start = i;
+                i += 2;
+                while i + 1 < len {
+                    if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                result.push_str(&sql[start..i]);
+            }
+            _ => {
+                // Check for GRAPH_TABLE keyword
+                if i + 11 <= len {
+                    if let Some(slice) = sql.get(i..i + 11) {
+                        if slice.eq_ignore_ascii_case("GRAPH_TABLE") {
+                            let before_ok = i == 0
+                                || (!bytes[i - 1].is_ascii_alphanumeric()
+                                    && bytes[i - 1] != b'_');
+                            let after_pos = i + 11;
+                            let after_ok = after_pos >= len
+                                || (!bytes[after_pos].is_ascii_alphanumeric()
+                                    && bytes[after_pos] != b'_');
 
-            result.push_str(&sql[pos..abs_pos]);
+                            if before_ok && after_ok {
+                                // Only treat as GRAPH_TABLE if followed by '(' (skip comments)
+                                let rest = &sql[after_pos..];
+                                let trimmed = super::skip_whitespace_and_comments(rest);
+                                if trimmed.starts_with('(') {
+                                    let paren_start =
+                                        after_pos + (rest.len() - trimmed.len());
 
-            let after_gt = abs_pos + "GRAPH_TABLE".len();
-            let paren_start = sql[after_gt..]
-                .find('(')
-                .ok_or_else(|| SqlError::Parse("Expected '(' after GRAPH_TABLE".into()))?
-                + after_gt;
+                                    let inner_end = find_matching_paren(sql, paren_start)?;
+                                    let inner = &sql[paren_start + 1..inner_end];
 
-            let inner_end = find_matching_paren(sql, paren_start)?;
-            let inner = &sql[paren_start + 1..inner_end];
+                                    let expr = parse_graph_table_inner(inner)?;
+                                    let uid = PGQ_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                                    let temp_name = format!("__pgq_tmp_{:x}_{uid}", temp_nonce());
+                                    exprs.push((temp_name.clone(), expr));
 
-            let expr = parse_graph_table_inner(inner)?;
-            let idx = exprs.len();
-            exprs.push(expr);
-
-            result.push_str(&format!("__pgq_result_{idx}"));
-
-            pos = inner_end + 1;
-        } else {
-            result.push_str(&sql[pos..]);
-            break;
+                                    result.push_str(&temp_name);
+                                    i = inner_end + 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Advance by UTF-8 char width to avoid landing on continuation bytes
+                if let Some(ch) = sql[i..].chars().next() {
+                    result.push(ch);
+                    i += ch.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
 
@@ -347,21 +527,88 @@ pub(crate) fn extract_graph_tables(
 }
 
 /// Find the matching closing parenthesis for an opening one at `start`.
+/// Handles single-quoted strings, double-quoted identifiers,
+/// `--` line comments, and `/* */` block comments.
 fn find_matching_paren(sql: &str, start: usize) -> Result<usize, SqlError> {
-    let mut depth = 0;
-    let mut in_string = false;
-    for (i, ch) in sql[start..].char_indices() {
-        match ch {
-            '\'' if !in_string => in_string = true,
-            '\'' if in_string => in_string = false,
-            '(' if !in_string => depth += 1,
-            ')' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(start + i);
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut depth = 0i32;
+    let mut i = start;
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b'\'' => {
+                // Single-quoted string: skip to closing quote (handle '' escapes)
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\'' {
+                        i += 1;
+                        if i < len && bytes[i] == b'\'' {
+                            i += 1; // escaped quote
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
                 }
             }
-            _ => {}
+            b'"' => {
+                // Double-quoted identifier: skip to closing double quote
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        if i < len && bytes[i] == b'"' {
+                            i += 1; // escaped double quote
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => {
+                // Line comment: skip to end of line
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1; // skip the newline
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                // Block comment: skip to closing */
+                i += 2;
+                let mut comment_depth = 1;
+                while i + 1 < len && comment_depth > 0 {
+                    if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        comment_depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        comment_depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(i);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
     Err(SqlError::Parse("Unmatched parenthesis in GRAPH_TABLE".into()))
