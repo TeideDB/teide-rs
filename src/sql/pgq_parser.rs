@@ -80,9 +80,9 @@ fn strip_leading_comments(sql: &str) -> &str {
                 None => return "", // entire string is a comment
             }
         } else if s.starts_with("/*") {
-            // Block comment: find matching */
-            match s.find("*/") {
-                Some(pos) => s = s[pos + 2..].trim_start(),
+            // Block comment: find matching */ (search from position 2 to skip the opening /*)
+            match s[2..].find("*/") {
+                Some(pos) => s = s[2 + pos + 2..].trim_start(),
                 None => return "", // unterminated block comment
             }
         } else {
