@@ -25,9 +25,11 @@
 // CSV files.
 
 pub mod expr;
+pub mod pgq;
+pub mod pgq_parser;
 pub mod planner;
 
-use crate::{Context, Table};
+use crate::{Context, Rel, Table};
 use std::collections::HashMap;
 
 /// Errors produced by the SQL layer.
@@ -104,6 +106,7 @@ impl Clone for StoredTable {
 // add complexity without safety benefit since planner is the only consumer.
 pub struct Session {
     pub(crate) tables: HashMap<String, StoredTable>,
+    pub(crate) graphs: HashMap<String, pgq::PropertyGraph>,
     pub(crate) ctx: Context,
 }
 
@@ -114,6 +117,7 @@ impl Session {
         Ok(Session {
             ctx,
             tables: HashMap::new(),
+            graphs: HashMap::new(),
         })
     }
 

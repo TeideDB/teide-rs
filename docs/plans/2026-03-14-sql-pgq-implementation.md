@@ -45,7 +45,7 @@ Define the data structures for storing property graph metadata in the session.
 - Modify: `src/sql/mod.rs:30` (add `Rel` import)
 - Modify: `src/sql/mod.rs:105-118` (add `graphs` to Session)
 
-- [ ] **Step 1: Create `src/sql/pgq.rs` with catalog types**
+- [x] **Step 1: Create `src/sql/pgq.rs` with catalog types**
 
 ```rust
 // src/sql/pgq.rs
@@ -91,7 +91,7 @@ pub(crate) struct PropertyGraph {
 }
 ```
 
-- [ ] **Step 2: Add module declarations to `src/sql/mod.rs`**
+- [x] **Step 2: Add module declarations to `src/sql/mod.rs`**
 
 Add after line 28 (`pub mod planner;`):
 ```rust
@@ -104,7 +104,7 @@ Add `Rel` to the import at line 30:
 use crate::{Context, Rel, Table};
 ```
 
-- [ ] **Step 3: Add `graphs` field to `Session`**
+- [x] **Step 3: Add `graphs` field to `Session`**
 
 In `src/sql/mod.rs`, change the Session struct (line 105-108):
 ```rust
@@ -127,7 +127,7 @@ pub fn new() -> Result<Self, SqlError> {
 }
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: compilation succeeds (pgq_parser.rs doesn't exist yet — create an empty placeholder)
@@ -141,7 +141,7 @@ Create `src/sql/pgq_parser.rs`:
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS (warnings about unused imports are OK)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/sql/pgq.rs src/sql/pgq_parser.rs src/sql/mod.rs
