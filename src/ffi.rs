@@ -234,6 +234,12 @@ pub const OP_VAR_EXPAND: u16 = 81;
 pub const OP_SHORTEST_PATH: u16 = 82;
 pub const OP_WCO_JOIN: u16 = 83;
 
+// Graph algorithm ops
+pub const OP_PAGERANK: u16 = 84;
+pub const OP_CONNECTED_COMP: u16 = 85;
+pub const OP_DIJKSTRA: u16 = 86;
+pub const OP_LOUVAIN: u16 = 87;
+
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
 pub const TD_WIN_RANK: u8 = 1;
@@ -899,6 +905,31 @@ extern "C" {
         rels: *mut *mut td_rel_t,
         n_rels: u8,
         n_vars: u8,
+    ) -> *mut td_op_t;
+
+    // --- Graph Algorithm Ops ---
+    pub fn td_pagerank(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+        max_iter: u16,
+        damping: c_double,
+    ) -> *mut td_op_t;
+    pub fn td_connected_comp(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+    ) -> *mut td_op_t;
+    pub fn td_dijkstra(
+        g: *mut td_graph_t,
+        src: *mut td_op_t,
+        dst: *mut td_op_t,
+        rel: *mut td_rel_t,
+        weight_col: *const c_char,
+        max_depth: u8,
+    ) -> *mut td_op_t;
+    pub fn td_louvain(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+        max_iter: u16,
     ) -> *mut td_op_t;
 
     // --- CSR / Relationship API ---

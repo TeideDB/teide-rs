@@ -1740,6 +1740,50 @@ impl<'a> Graph<'a> {
             )
         })
     }
+
+    // ---- Graph algorithm ops ------------------------------------------------
+
+    /// Compute PageRank over a relationship's CSR index.
+    /// Returns a table with `_node` (I64) and `_rank` (F64) columns.
+    pub fn pagerank(&self, rel: &'a Rel, max_iter: u16, damping: f64) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_pagerank(self.raw, rel.ptr, max_iter, damping)
+        })
+    }
+
+    /// Compute connected components via label propagation.
+    /// Returns a table with `_node` (I64) and `_component` (I64) columns.
+    pub fn connected_comp(&self, rel: &'a Rel) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_connected_comp(self.raw, rel.ptr)
+        })
+    }
+
+    /// Weighted shortest path via Dijkstra's algorithm.
+    /// Requires edge properties with a weight column.
+    /// Returns a table with `_node` (I64), `_dist` (F64), `_depth` (I64) columns.
+    pub fn dijkstra(
+        &self,
+        src: Column,
+        dst: Option<Column>,
+        rel: &'a Rel,
+        weight_col: &str,
+        max_depth: u8,
+    ) -> Result<Column> {
+        let c_col = CString::new(weight_col).map_err(|_| Error::InvalidInput)?;
+        let dst_ptr = dst.map(|d| d.raw).unwrap_or(std::ptr::null_mut());
+        Self::check_op(unsafe {
+            ffi::td_dijkstra(self.raw, src.raw, dst_ptr, rel.ptr, c_col.as_ptr(), max_depth)
+        })
+    }
+
+    /// Community detection via Louvain modularity optimization.
+    /// Returns a table with `_node` (I64) and `_community` (I64) columns.
+    pub fn louvain(&self, rel: &'a Rel, max_iter: u16) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_louvain(self.raw, rel.ptr, max_iter)
+        })
+    }
 }
 
 impl Drop for Graph<'_> {
