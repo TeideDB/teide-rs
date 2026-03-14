@@ -285,11 +285,7 @@ pub(crate) fn plan_graph_table(
 
     match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
         (2, 1, PathMode::AnyShortest) => {
-            Err(SqlError::Plan(
-                "ANY SHORTEST path queries are not yet supported. \
-                 Use single-hop (a)-[e]->(b) patterns."
-                    .into(),
-            ))
+            plan_shortest_path(session, graph, pattern, match_clause, &expr.columns)
         }
         (2, 1, PathMode::Walk) if is_var_length => {
             plan_var_length(session, graph, pattern, &expr.columns)
@@ -803,4 +799,351 @@ fn project_var_length_columns(
     let result = result.with_column_names(&col_names)?;
 
     Ok((result, col_names))
+}
+
+// ---------------------------------------------------------------------------
+// Shortest path planner
+// ---------------------------------------------------------------------------
+
+/// Plan an ANY SHORTEST MATCH using BFS via var_expand.
+///
+/// Since the C engine's `shortest_path` op is not yet implemented,
+/// we use var_expand to do a BFS from the source node, then
+/// reconstruct the shortest path by backtracking from the destination.
+fn plan_shortest_path(
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    _match_clause: &MatchClause,
+    columns: &[ColumnEntry],
+) -> Result<(Table, Vec<String>), SqlError> {
+    let src_node = &pattern.nodes[0];
+    let edge = &pattern.edges[0];
+    let dst_node = &pattern.nodes[1];
+
+    let edge_label = edge.label.as_deref().ok_or_else(|| {
+        SqlError::Plan("Edge pattern must specify a label".into())
+    })?;
+    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label}' not found"))
+    })?;
+
+    let src_id = extract_node_id(src_node, &stored_rel.edge_label.src_ref_table, session)?;
+    let dst_id = extract_node_id(dst_node, &stored_rel.edge_label.dst_ref_table, session)?;
+
+    let src_label = resolve_node_label(src_node, &stored_rel.edge_label.src_ref_table, graph)?;
+    let src_table = &session.tables.get(&src_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
+    })?.table;
+
+    let max_depth: u8 = match edge.quantifier {
+        PathQuantifier::Range { max, .. } => max,
+        _ => 255,
+    };
+
+    let direction: u8 = match edge.direction {
+        MatchDirection::Forward => 0,
+        MatchDirection::Reverse => 1,
+        MatchDirection::Undirected => 2,
+    };
+
+    // Use var_expand from source to get all reachable nodes with depths
+    let g = session.ctx.graph(src_table)?;
+    let src_ref_col = &stored_rel.edge_label.src_ref_col;
+    let src_ids = g.scan(src_ref_col)?;
+
+    // Filter to just the source node
+    let src_const = g.const_i64(src_id)?;
+    let pred = g.eq(src_ids, src_const)?;
+    let filtered_src = g.filter(src_ids, pred)?;
+
+    let var_exp = g.var_expand(filtered_src, &stored_rel.rel, direction, 0, max_depth, false)?;
+    let bfs_result = g.execute(var_exp)?;
+
+    // var_expand gives us _start, _end, _depth
+    // Find the shortest depth that reaches dst_id, then reconstruct path
+    let nrows = bfs_result.nrows() as usize;
+    let end_col = find_col_idx(&bfs_result, "_end")
+        .ok_or_else(|| SqlError::Plan("var_expand result missing _end column".into()))?;
+    let depth_col = find_col_idx(&bfs_result, "_depth")
+        .ok_or_else(|| SqlError::Plan("var_expand result missing _depth column".into()))?;
+
+    // Find the minimum depth to reach dst_id
+    let mut min_dst_depth: Option<i64> = None;
+    for row in 0..nrows {
+        let end_id = bfs_result.get_i64(end_col, row).unwrap_or(-1);
+        let depth = bfs_result.get_i64(depth_col, row).unwrap_or(-1);
+        if end_id == dst_id {
+            match min_dst_depth {
+                None => min_dst_depth = Some(depth),
+                Some(d) if depth < d => min_dst_depth = Some(depth),
+                _ => {}
+            }
+        }
+    }
+
+    let target_depth = min_dst_depth.ok_or_else(|| {
+        SqlError::Plan(format!(
+            "No path found from node {src_id} to node {dst_id}"
+        ))
+    })?;
+
+    // Reconstruct the shortest path by backtracking:
+    // At depth target_depth we have dst_id.
+    // At each depth d, find a node that reaches the node at depth d+1.
+    // Build a map: for each (end_id, depth), store it
+    use std::collections::HashMap as HM;
+    let mut reachable_at_depth: HM<i64, Vec<i64>> = HM::new(); // depth -> list of end_ids
+    let mut parent_map: HM<(i64, i64), i64> = HM::new(); // (end_id, depth) -> start_id that reached it at depth-1
+
+    // Also build adjacency from var_expand: who reaches whom
+    let start_col = find_col_idx(&bfs_result, "_start")
+        .ok_or_else(|| SqlError::Plan("var_expand result missing _start column".into()))?;
+
+    for row in 0..nrows {
+        let start_id = bfs_result.get_i64(start_col, row).unwrap_or(-1);
+        let end_id = bfs_result.get_i64(end_col, row).unwrap_or(-1);
+        let depth = bfs_result.get_i64(depth_col, row).unwrap_or(-1);
+        reachable_at_depth.entry(depth).or_default().push(end_id);
+        // var_expand: at depth d, _start is the starting node of the expansion,
+        // _end is the node reached at depth d. For BFS path reconstruction,
+        // we need the predecessor. With var_expand from a single source,
+        // _start is always src_id. We need to use expand level by level instead.
+        let _ = parent_map.entry((end_id, depth)).or_insert(start_id);
+    }
+
+    // Since var_expand always has _start = src_id (it tracks the expansion origin,
+    // not the predecessor), we can't directly reconstruct the path from var_expand.
+    // Instead, use single-hop expand iteratively to do BFS and track predecessors.
+    let mut path = reconstruct_shortest_path(
+        session, src_id, dst_id, target_depth, stored_rel, src_table, direction,
+    )?;
+    path.reverse(); // path is built backwards, reverse to get src -> dst order
+
+    // Build result as CSV with _node and _depth columns
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_indices: Vec<usize> = Vec::new(); // 0 = _node col, 1 = _depth col
+    let mut has_node = false;
+    let mut has_depth = false;
+
+    for entry in columns {
+        let lower = entry.expr.to_lowercase();
+        let alias = entry.alias.as_deref();
+
+        if lower.contains("path_length") {
+            col_names.push(alias.unwrap_or("path_length").to_string());
+            col_indices.push(1); // depth
+            has_depth = true;
+        } else if lower == "_node" || lower == "node" {
+            col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| entry.expr.to_lowercase()));
+            col_indices.push(0); // node
+            has_node = true;
+        } else if lower == "_depth" || lower == "depth" {
+            col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| entry.expr.to_lowercase()));
+            col_indices.push(1); // depth
+            has_depth = true;
+        } else if let Some(dot_pos) = lower.find('.') {
+            let var = lower[..dot_pos].trim();
+            let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+            if var == dst_var {
+                return Err(SqlError::Plan(
+                    "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
+                     Property lookups on path nodes are not yet supported."
+                        .into(),
+                ));
+            }
+            return Err(SqlError::Plan(format!(
+                "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
+            )));
+        } else {
+            return Err(SqlError::Plan(format!(
+                "COLUMNS: unsupported expression '{}'",
+                entry.expr
+            )));
+        }
+    }
+
+    let _ = (has_node, has_depth); // suppress unused warnings
+
+    if col_names.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Build CSV
+    let csv_col_names: Vec<String> = (0..col_names.len())
+        .map(|i| format!("__c{i}"))
+        .collect();
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    for (depth, &node_id) in path.iter().enumerate() {
+        for (i, &col_idx) in col_indices.iter().enumerate() {
+            if i > 0 { csv.push(','); }
+            match col_idx {
+                0 => csv.push_str(&node_id.to_string()),
+                1 => csv.push_str(&depth.to_string()),
+                _ => {}
+            }
+        }
+        csv.push('\n');
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!("__pgq_sp_{}.csv", std::process::id()));
+    std::fs::write(&tmp_path, csv.as_bytes())
+        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
+    let path_str = tmp_path.to_str().ok_or_else(|| {
+        SqlError::Plan("Temp file path not valid UTF-8".into())
+    })?;
+    let result = session.ctx.read_csv(path_str)?;
+    let _ = std::fs::remove_file(&tmp_path);
+    let result = result.with_column_names(&col_names)?;
+
+    Ok((result, col_names))
+}
+
+/// Reconstruct shortest path using iterative single-hop BFS.
+/// Returns the path as a Vec of node IDs from dst back to src (reversed).
+fn reconstruct_shortest_path(
+    session: &Session,
+    src_id: i64,
+    dst_id: i64,
+    max_depth: i64,
+    stored_rel: &StoredRel,
+    src_table: &Table,
+    direction: u8,
+) -> Result<Vec<i64>, SqlError> {
+    use std::collections::{HashMap as HM, VecDeque};
+
+    // BFS using single-hop expand, tracking predecessors
+    let mut visited: HM<i64, i64> = HM::new(); // node -> predecessor
+    visited.insert(src_id, -1);
+    let mut frontier = VecDeque::new();
+    frontier.push_back((src_id, 0i64));
+
+    // Get all edges for adjacency lookup
+    let edge_table_name = &stored_rel.edge_label.table_name;
+    let edge_stored = session.tables.get(edge_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge table '{}' not found", edge_table_name))
+    })?;
+
+    let src_col_name = &stored_rel.edge_label.src_col;
+    let dst_col_name = &stored_rel.edge_label.dst_col;
+    let src_col_idx = edge_stored.columns.iter().position(|c| c == src_col_name)
+        .ok_or_else(|| SqlError::Plan(format!("Column '{src_col_name}' not found in edge table")))?;
+    let dst_col_idx = edge_stored.columns.iter().position(|c| c == dst_col_name)
+        .ok_or_else(|| SqlError::Plan(format!("Column '{dst_col_name}' not found in edge table")))?;
+
+    // Build adjacency list from edge table
+    let n_edges = edge_stored.table.nrows() as usize;
+    let mut adj: HM<i64, Vec<i64>> = HM::new();
+    for row in 0..n_edges {
+        let s = edge_stored.table.get_i64(src_col_idx, row).unwrap_or(-1);
+        let d = edge_stored.table.get_i64(dst_col_idx, row).unwrap_or(-1);
+        match direction {
+            0 => { adj.entry(s).or_default().push(d); } // forward
+            1 => { adj.entry(d).or_default().push(s); } // reverse
+            _ => { // undirected
+                adj.entry(s).or_default().push(d);
+                adj.entry(d).or_default().push(s);
+            }
+        }
+    }
+
+    // BFS
+    while let Some((node, depth)) = frontier.pop_front() {
+        if node == dst_id {
+            // Reconstruct path
+            let mut path = Vec::new();
+            let mut cur = dst_id;
+            while cur != -1 {
+                path.push(cur);
+                cur = *visited.get(&cur).unwrap_or(&-1);
+            }
+            return Ok(path);
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        if let Some(neighbors) = adj.get(&node) {
+            for &next in neighbors {
+                if !visited.contains_key(&next) {
+                    visited.insert(next, node);
+                    frontier.push_back((next, depth + 1));
+                }
+            }
+        }
+    }
+
+    Err(SqlError::Plan(format!(
+        "No path found from node {src_id} to node {dst_id}"
+    )))
+}
+
+/// Extract a specific node ID from a WHERE filter.
+/// Looks for patterns like "a.id = 42" or "a.name = 'Alice'" and resolves to row index.
+fn extract_node_id(
+    node: &NodePattern,
+    table_name: &str,
+    session: &Session,
+) -> Result<i64, SqlError> {
+    let filter = node.filter.as_deref().ok_or_else(|| {
+        SqlError::Plan(
+            "SHORTEST_PATH requires WHERE filters on both source and destination nodes".into(),
+        )
+    })?;
+
+    let var = node.variable.as_deref().unwrap_or("");
+    let clean = if !var.is_empty() {
+        filter.replace(&format!("{var} ."), "").replace(&format!("{var}."), "")
+    } else {
+        filter.to_string()
+    };
+
+    let parts: Vec<&str> = clean.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(SqlError::Plan(format!(
+            "Cannot extract node ID from filter: {filter}"
+        )));
+    }
+    let col_name = parts[0].trim().to_lowercase();
+    let value = parts[1].trim();
+
+    // If filtering by ID directly
+    if col_name == "id" {
+        if let Ok(id) = value.parse::<i64>() {
+            return Ok(id);
+        }
+    }
+
+    // Otherwise, scan the table to find the matching row index
+    let stored = session.tables.get(table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{table_name}' not found"))
+    })?;
+
+    let nrows = stored.table.nrows() as usize;
+    let col_idx = stored.columns.iter().position(|c| c == &col_name).ok_or_else(|| {
+        SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
+    })?;
+
+    let str_val = if value.starts_with('\'') && value.ends_with('\'') {
+        Some(&value[1..value.len() - 1])
+    } else {
+        None
+    };
+
+    for row in 0..nrows {
+        if let Some(sv) = str_val {
+            if stored.table.get_str(col_idx, row).as_deref() == Some(sv) {
+                return Ok(row as i64);
+            }
+        } else if let Ok(iv) = value.parse::<i64>() {
+            if stored.table.get_i64(col_idx, row) == Some(iv) {
+                return Ok(row as i64);
+            }
+        }
+    }
+
+    Err(SqlError::Plan(format!(
+        "No matching row for filter: {filter}"
+    )))
 }

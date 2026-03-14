@@ -1856,7 +1856,7 @@ Add `ANY SHORTEST` path support to MATCH patterns.
 - Modify: `src/sql/pgq.rs` (add `plan_shortest_path` function)
 - Modify: `tests/slt/pgq_paths.slt`
 
-- [ ] **Step 1: Add `plan_shortest_path` to `src/sql/pgq.rs`**
+- [x] **Step 1: Add `plan_shortest_path` to `src/sql/pgq.rs`**
 
 ```rust
 /// Plan an ANY SHORTEST MATCH.
@@ -2029,7 +2029,7 @@ fn extract_node_id(
 }
 ```
 
-- [ ] **Step 2: Add shortest path SLT tests**
+- [x] **Step 2: Add shortest path SLT tests**
 
 Append to `tests/slt/pgq_paths.slt`:
 
@@ -2044,12 +2044,12 @@ SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a:Person WHERE a.id = 
 4 3
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test --all-features -- slt_pgq_paths`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/sql/pgq.rs tests/slt/pgq_paths.slt

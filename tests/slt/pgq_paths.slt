@@ -38,3 +38,12 @@ Bob
 Carol
 Dave
 Eve
+
+# Shortest path from Alice (0) to Eve (4)
+query II
+SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[:Knows]->+(b:Person WHERE b.id = 4) COLUMNS (_node, _depth)) ORDER BY _depth
+----
+0 0
+1 1
+3 2
+4 3
