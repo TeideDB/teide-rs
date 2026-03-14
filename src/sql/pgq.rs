@@ -1416,6 +1416,17 @@ fn plan_algorithm_query(
         return Err(SqlError::Plan("COLUMNS clause is empty".into()));
     }
 
+    // Validate algorithm result row count matches vertex table
+    if let Some(ref result_table) = algo_result {
+        let algo_nrows = checked_nrows(result_table)?;
+        if algo_nrows != nrows {
+            return Err(SqlError::Plan(format!(
+                "Algorithm result has {algo_nrows} rows but vertex table has {nrows} rows. \
+                 Ensure the vertex label matches the edge label's source vertex table."
+            )));
+        }
+    }
+
     // Build CSV result
     let csv_col_names: Vec<String> = (0..col_names.len())
         .map(|i| format!("__c{i}"))
