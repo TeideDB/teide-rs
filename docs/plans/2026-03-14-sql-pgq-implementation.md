@@ -1236,7 +1236,7 @@ Plan and execute basic 1-hop `MATCH (a)-[e]->(b)` patterns by translating them i
 - Modify: `src/sql/mod.rs:120-124` (add GRAPH_TABLE extraction)
 - Modify: `src/sql/planner.rs:1628-1664` (handle `__pgq_result_N` placeholder tables)
 
-- [ ] **Step 1: Add `plan_graph_table` to `src/sql/pgq.rs`**
+- [x] **Step 1: Add `plan_graph_table` to `src/sql/pgq.rs`**
 
 This function takes a `GraphTableExpr` and a `Session`, and returns a `(Table, Vec<String>)` — the result table and column names.
 
@@ -1520,7 +1520,7 @@ fn project_columns(
 }
 ```
 
-- [ ] **Step 2: Wire GRAPH_TABLE extraction into `Session::execute()`**
+- [x] **Step 2: Wire GRAPH_TABLE extraction into `Session::execute()`**
 
 In `src/sql/mod.rs`, update `Session::execute()`:
 
@@ -1577,12 +1577,12 @@ fn execute_with_graph_table(&mut self, sql: &str) -> Result<ExecResult, SqlError
 }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Add basic GRAPH_TABLE SLT tests**
+- [x] **Step 4: Add basic GRAPH_TABLE SLT tests**
 
 Append to `tests/slt/pgq.slt`:
 
@@ -1618,17 +1618,17 @@ Carol 1
 Dave 1
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test --all-features -- slt_pgq`
 Expected: PASS
 
-- [ ] **Step 6: Run full test suite to check for regressions**
+- [x] **Step 6: Run full test suite to check for regressions**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All existing tests PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/sql/pgq.rs src/sql/pgq_parser.rs src/sql/mod.rs tests/slt/pgq.slt

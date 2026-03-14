@@ -116,6 +116,24 @@ fn tokenize(sql: &str) -> Vec<String> {
 
     while let Some(&ch) = chars.peek() {
         match ch {
+            '\'' => {
+                // Keep single-quoted strings as one token (e.g. 'Alice')
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                let mut s = String::new();
+                s.push('\'');
+                chars.next(); // consume opening quote
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == '\'' {
+                        s.push('\'');
+                        break;
+                    }
+                    s.push(c);
+                }
+                tokens.push(s);
+            }
             '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '.' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));

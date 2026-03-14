@@ -29,7 +29,7 @@ pub mod pgq;
 pub mod pgq_parser;
 pub mod planner;
 
-use crate::{Context, Rel, Table};
+use crate::{Context, Table};
 use std::collections::HashMap;
 
 /// Errors produced by the SQL layer.
@@ -128,7 +128,43 @@ impl Session {
         if let Some(pgq_stmt) = pgq_parser::try_parse_pgq(sql)? {
             return pgq::execute_pgq(self, pgq_stmt);
         }
+
+        // Check for GRAPH_TABLE in FROM clause and extract/execute
+        let upper = sql.to_uppercase();
+        if upper.contains("GRAPH_TABLE") {
+            return self.execute_with_graph_table(sql);
+        }
+
         planner::session_execute(self, sql)
+    }
+
+    /// Execute SQL containing GRAPH_TABLE expressions.
+    /// Extracts GRAPH_TABLE, executes the graph query, stores the result
+    /// as a temporary table, rewrites the SQL, and runs the modified SQL.
+    fn execute_with_graph_table(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
+        let (rewritten_sql, graph_exprs) = pgq_parser::extract_graph_tables(sql)?;
+
+        // Execute each GRAPH_TABLE and store results as temp tables
+        let mut temp_names = Vec::new();
+        for (i, expr) in graph_exprs.iter().enumerate() {
+            let temp_name = format!("__pgq_result_{i}");
+            let (table, columns) = pgq::plan_graph_table(self, expr)?;
+            self.tables.insert(
+                temp_name.clone(),
+                StoredTable { table, columns },
+            );
+            temp_names.push(temp_name);
+        }
+
+        // Run the rewritten SQL (which references __pgq_result_N tables)
+        let result = planner::session_execute(self, &rewritten_sql);
+
+        // Clean up temp tables
+        for name in &temp_names {
+            self.tables.remove(name);
+        }
+
+        result
     }
 
     /// Execute a multi-statement SQL script (statements separated by `;`).

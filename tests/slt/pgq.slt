@@ -36,3 +36,37 @@ DROP PROPERTY GRAPH IF EXISTS social
 # Test: referencing non-existent table should fail
 statement error
 CREATE PROPERTY GRAPH bad VERTEX TABLES (nonexistent LABEL Foo) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES nonexistent (id) DESTINATION KEY (dst) REFERENCES nonexistent (id) LABEL Bar)
+
+# ===================================================================
+# GRAPH_TABLE with MATCH patterns
+# ===================================================================
+
+# Re-create the graph for GRAPH_TABLE tests
+statement ok
+CREATE PROPERTY GRAPH social VERTEX TABLES (persons LABEL Person) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES persons (id) DESTINATION KEY (dst) REFERENCES persons (id) LABEL Knows)
+
+# Basic 1-hop: who does Alice know?
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (b.name, b.city))
+----
+Bob SF
+Carol NYC
+
+# 1-hop without source filter: all knows relationships
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name)) ORDER BY src_name, dst_name
+----
+Alice Bob
+Alice Carol
+Bob Dave
+Carol Dave
+Dave Eve
+
+# Composable with SQL: graph + aggregation
+query TI
+SELECT src_name, COUNT(*) AS cnt FROM GRAPH_TABLE (social MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.name AS src_name)) GROUP BY src_name ORDER BY cnt DESC
+----
+Alice 2
+Bob 1
+Carol 1
+Dave 1
