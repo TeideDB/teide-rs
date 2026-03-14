@@ -9,6 +9,16 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 use super::pgq_parser::{CreatePropertyGraph as ParsedCPG, PgqStatement};
 use super::{ExecResult, Session, SqlError};
 
+/// Safe conversion of `Table::nrows()` (i64) to usize, returning an error
+/// if the C engine returned a negative sentinel.
+fn checked_nrows(table: &Table) -> Result<usize, SqlError> {
+    let n = table.nrows();
+    if n < 0 {
+        return Err(SqlError::Plan(format!("nrows() returned negative value ({n}); possible engine error")));
+    }
+    Ok(n as usize)
+}
+
 // ---------------------------------------------------------------------------
 // Property graph catalog types
 // ---------------------------------------------------------------------------
@@ -516,8 +526,8 @@ fn apply_node_filter(
     let scan_col = g.scan(&col_name)?;
 
     let const_col = if value.starts_with('\'') && value.ends_with('\'') {
-        let s = &value[1..value.len() - 1];
-        g.const_str(s)?
+        let s = value[1..value.len() - 1].replace("''", "'");
+        g.const_str(&s)?
     } else if let Ok(n) = value.parse::<i64>() {
         g.const_i64(n)?
     } else if let Ok(f) = value.parse::<f64>() {
@@ -548,7 +558,7 @@ fn project_columns(
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
 
     // Use row-level extraction: _src/_dst are row indices into vertex tables
-    let nrows = expand_result.nrows() as usize;
+    let nrows = checked_nrows(expand_result)?;
 
     // Find _src and _dst column indices in expand result
     let src_idx_col = find_col_idx(expand_result, "_src")
@@ -673,7 +683,7 @@ pub(super) fn validate_key_column_is_rowid(
             "Key column '{key_col}' not found in vertex table '{table_name}'"
         ))
     })?;
-    let nrows = stored.table.nrows() as usize;
+    let nrows = checked_nrows(&stored.table)?;
     for row in 0..nrows {
         let val = stored.table.get_i64(col_idx, row).ok_or_else(|| {
             SqlError::Plan(format!(
@@ -798,7 +808,7 @@ fn project_var_length_columns(
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
 
-    let nrows = var_result.nrows() as usize;
+    let nrows = checked_nrows(var_result)?;
 
     let start_idx_col = find_col_idx(var_result, "_start")
         .ok_or_else(|| SqlError::Plan("var_expand result missing _start column".into()))?;
@@ -990,10 +1000,16 @@ fn plan_shortest_path(
             .collect();
         let csv = format!("{}\n", csv_col_names.join(","));
         let counter = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = format!("/tmp/__pgq_{}_{counter}.csv", std::process::id());
+        let tmp_path = std::env::temp_dir().join(format!(
+            "__pgq_{}_{counter}.csv",
+            std::process::id()
+        ));
         std::fs::write(&tmp_path, csv.as_bytes())
             .map_err(|e| SqlError::Plan(format!("Failed to write temp CSV: {e}")))?;
-        let result = session.ctx.read_csv(&tmp_path);
+        let path_str = tmp_path.to_str().ok_or_else(|| {
+            SqlError::Plan("Temp file path not valid UTF-8".into())
+        })?;
+        let result = session.ctx.read_csv(path_str);
         let _ = std::fs::remove_file(&tmp_path);
         return Ok((result?, display_names));
     }
@@ -1110,7 +1126,7 @@ fn reconstruct_shortest_path(
         .ok_or_else(|| SqlError::Plan(format!("Column '{dst_col_name}' not found in edge table")))?;
 
     // Build adjacency list from edge table
-    let n_edges = edge_stored.table.nrows() as usize;
+    let n_edges = checked_nrows(&edge_stored.table)?;
     let mut adj: HM<i64, Vec<i64>> = HM::new();
     for row in 0..n_edges {
         let s = edge_stored.table.get_i64(src_col_idx, row).unwrap_or(-1);
@@ -1197,20 +1213,20 @@ fn extract_node_id(
         SqlError::Plan(format!("Table '{table_name}' not found"))
     })?;
 
-    let nrows = stored.table.nrows() as usize;
+    let nrows = checked_nrows(&stored.table)?;
     let col_idx = stored.columns.iter().position(|c| c == &col_name).ok_or_else(|| {
         SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
     })?;
 
     let str_val = if value.starts_with('\'') && value.ends_with('\'') {
-        Some(&value[1..value.len() - 1])
+        Some(value[1..value.len() - 1].replace("''", "'"))
     } else {
         None
     };
 
     for row in 0..nrows {
-        let matched = if let Some(sv) = str_val {
-            stored.table.get_str(col_idx, row).as_deref() == Some(sv)
+        let matched = if let Some(ref sv) = str_val {
+            stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
         } else if let Ok(iv) = value.parse::<i64>() {
             stored.table.get_i64(col_idx, row) == Some(iv)
         } else {
