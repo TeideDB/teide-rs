@@ -497,8 +497,14 @@ fn project_columns(
     let mut src_indices = Vec::with_capacity(nrows);
     let mut dst_indices = Vec::with_capacity(nrows);
     for row in 0..nrows {
-        src_indices.push(expand_result.get_i64(src_idx_col, row).unwrap_or(0) as usize);
-        dst_indices.push(expand_result.get_i64(dst_idx_col, row).unwrap_or(0) as usize);
+        src_indices.push(
+            expand_result.get_i64(src_idx_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _src index at row {row}")))? as usize,
+        );
+        dst_indices.push(
+            expand_result.get_i64(dst_idx_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _dst index at row {row}")))? as usize,
+        );
     }
 
     // Build CSV string for result table
@@ -575,9 +581,9 @@ fn project_columns(
     let path_str = tmp_path.to_str().ok_or_else(|| {
         SqlError::Plan("Temp file path not valid UTF-8".into())
     })?;
-    let result = session.ctx.read_csv(path_str)?;
+    let result = session.ctx.read_csv(path_str);
     let _ = std::fs::remove_file(&tmp_path);
-    let result = result.with_column_names(&col_names)?;
+    let result = result?.with_column_names(&col_names)?;
 
     Ok((result, col_names))
 }
@@ -705,8 +711,14 @@ fn project_var_length_columns(
     let mut start_indices = Vec::with_capacity(nrows);
     let mut end_indices = Vec::with_capacity(nrows);
     for row in 0..nrows {
-        start_indices.push(var_result.get_i64(start_idx_col, row).unwrap_or(0) as usize);
-        end_indices.push(var_result.get_i64(end_idx_col, row).unwrap_or(0) as usize);
+        start_indices.push(
+            var_result.get_i64(start_idx_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _start index at row {row}")))? as usize,
+        );
+        end_indices.push(
+            var_result.get_i64(end_idx_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _end index at row {row}")))? as usize,
+        );
     }
 
     // Build column specs in COLUMNS clause order
@@ -805,9 +817,9 @@ fn project_var_length_columns(
     let path_str = tmp_path.to_str().ok_or_else(|| {
         SqlError::Plan("Temp file path not valid UTF-8".into())
     })?;
-    let result = session.ctx.read_csv(path_str)?;
+    let result = session.ctx.read_csv(path_str);
     let _ = std::fs::remove_file(&tmp_path);
-    let result = result.with_column_names(&col_names)?;
+    let result = result?.with_column_names(&col_names)?;
 
     Ok((result, col_names))
 }
@@ -928,9 +940,9 @@ fn plan_shortest_path(
     let path_str = tmp_path.to_str().ok_or_else(|| {
         SqlError::Plan("Temp file path not valid UTF-8".into())
     })?;
-    let result = session.ctx.read_csv(path_str)?;
+    let result = session.ctx.read_csv(path_str);
     let _ = std::fs::remove_file(&tmp_path);
-    let result = result.with_column_names(&col_names)?;
+    let result = result?.with_column_names(&col_names)?;
 
     Ok((result, col_names))
 }

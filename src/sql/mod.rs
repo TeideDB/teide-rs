@@ -172,21 +172,16 @@ impl Session {
     /// Execute a multi-statement SQL script (statements separated by `;`).
     /// Returns the result of the last statement.
     ///
-    /// Uses sqlparser to split statements correctly, respecting string
-    /// literals and quoted identifiers.
+    /// Splits on `;` while respecting single-quoted string literals,
+    /// so that PGQ statements (which sqlparser cannot parse) are handled.
     pub fn execute_script(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
-        use sqlparser::dialect::DuckDbDialect;
-        use sqlparser::parser::Parser;
-
-        let dialect = DuckDbDialect {};
-        let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| SqlError::Parse(e.to_string()))?;
+        let stmts = split_sql_statements(sql);
         if stmts.is_empty() {
             return Err(SqlError::Plan("Empty script".into()));
         }
         let mut last = None;
         for stmt in &stmts {
-            let s = stmt.to_string();
-            last = Some(self.execute(&s)?);
+            last = Some(self.execute(stmt)?);
         }
         last.ok_or_else(|| SqlError::Plan("Empty script".into()))
     }
@@ -209,6 +204,33 @@ impl Session {
             .get(name)
             .map(|st| (st.table.nrows(), st.columns.len()))
     }
+}
+
+/// Split a SQL script into individual statements on `;`, respecting
+/// single-quoted string literals so that semicolons inside strings
+/// are not treated as statement separators.
+fn split_sql_statements(sql: &str) -> Vec<&str> {
+    let mut stmts = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    for (i, ch) in sql.char_indices() {
+        match ch {
+            '\'' => in_string = !in_string,
+            ';' if !in_string => {
+                let s = sql[start..i].trim();
+                if !s.is_empty() {
+                    stmts.push(s);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let s = sql[start..].trim();
+    if !s.is_empty() {
+        stmts.push(s);
+    }
+    stmts
 }
 
 /// Parse and execute a SQL query, returning the result table and column list.

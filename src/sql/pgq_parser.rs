@@ -296,6 +296,29 @@ pub(crate) fn extract_graph_tables(
     while pos < bytes.len() {
         if let Some(gt_pos) = upper[pos..].find("GRAPH_TABLE") {
             let abs_pos = pos + gt_pos;
+
+            // Check that GRAPH_TABLE is not inside a string literal
+            let in_str = sql[..abs_pos].chars().filter(|&c| c == '\'').count() % 2 != 0;
+            if in_str {
+                result.push_str(&sql[pos..abs_pos + "GRAPH_TABLE".len()]);
+                pos = abs_pos + "GRAPH_TABLE".len();
+                continue;
+            }
+
+            // Check word boundaries to avoid matching inside identifiers
+            let before_ok = abs_pos == 0
+                || !sql.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                    && sql.as_bytes()[abs_pos - 1] != b'_';
+            let after_pos = abs_pos + "GRAPH_TABLE".len();
+            let after_ok = after_pos >= sql.len()
+                || !sql.as_bytes()[after_pos].is_ascii_alphanumeric()
+                    && sql.as_bytes()[after_pos] != b'_';
+            if !before_ok || !after_ok {
+                result.push_str(&sql[pos..after_pos]);
+                pos = after_pos;
+                continue;
+            }
+
             result.push_str(&sql[pos..abs_pos]);
 
             let after_gt = abs_pos + "GRAPH_TABLE".len();
