@@ -146,25 +146,27 @@ impl Session {
 
         // Execute each GRAPH_TABLE and store results as temp tables
         let mut temp_names = Vec::new();
-        for (i, expr) in graph_exprs.iter().enumerate() {
-            let temp_name = format!("__pgq_result_{i}");
-            let (table, columns) = pgq::plan_graph_table(self, expr)?;
-            self.tables.insert(
-                temp_name.clone(),
-                StoredTable { table, columns },
-            );
-            temp_names.push(temp_name);
-        }
+        let graph_result = (|| {
+            for (i, expr) in graph_exprs.iter().enumerate() {
+                let temp_name = format!("__pgq_result_{i}");
+                let (table, columns) = pgq::plan_graph_table(self, expr)?;
+                self.tables.insert(
+                    temp_name.clone(),
+                    StoredTable { table, columns },
+                );
+                temp_names.push(temp_name);
+            }
 
-        // Run the rewritten SQL (which references __pgq_result_N tables)
-        let result = planner::session_execute(self, &rewritten_sql);
+            // Run the rewritten SQL (which references __pgq_result_N tables)
+            planner::session_execute(self, &rewritten_sql)
+        })();
 
-        // Clean up temp tables
+        // Always clean up temp tables, even on error
         for name in &temp_names {
             self.tables.remove(name);
         }
 
-        result
+        graph_result
     }
 
     /// Execute a multi-statement SQL script (statements separated by `;`).

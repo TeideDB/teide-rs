@@ -45,6 +45,8 @@ cargo bench --all-features
 - `src/sql/mod.rs` — `Session`, `ExecResult`, `execute_sql` entry point
 - `src/sql/planner.rs` — SQL AST → Teide Graph translation
 - `src/sql/expr.rs` — Expression tree walker, aggregate collection
+- `src/sql/pgq.rs` — Property graph catalog types, MATCH pattern AST, and GRAPH_TABLE planner
+- `src/sql/pgq_parser.rs` — Pre-parser intercepting PGQ syntax (CREATE/DROP PROPERTY GRAPH, GRAPH_TABLE) before sqlparser
 - `src/cli/` — REPL binary (feature-gated on `cli`)
 - `src/server/` — PgWire server binary (feature-gated on `server`)
 
@@ -62,7 +64,7 @@ All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`sca
 
 ### SQL Layer
 
-Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, and DELETE.
+Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry and a `HashMap<String, PropertyGraph>` for graph metadata. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, DELETE, CREATE/DROP PROPERTY GRAPH, and GRAPH_TABLE with MATCH patterns. PGQ syntax is intercepted by a custom pre-parser (`pgq_parser.rs`) before reaching sqlparser.
 
 ### Server Thread Model
 

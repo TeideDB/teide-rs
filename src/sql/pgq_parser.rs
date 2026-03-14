@@ -98,14 +98,6 @@ impl Tokens {
         Ok(())
     }
 
-    fn expect_upper(&mut self, expected: &str) -> Result<(), SqlError> {
-        self.expect(expected)
-    }
-
-    #[allow(dead_code)]
-    fn at_end(&self) -> bool {
-        self.pos >= self.tokens.len()
-    }
 }
 
 /// Tokenize SQL into words and punctuation, respecting parentheses and commas.
@@ -118,6 +110,7 @@ fn tokenize(sql: &str) -> Vec<String> {
         match ch {
             '\'' => {
                 // Keep single-quoted strings as one token (e.g. 'Alice')
+                // Handles SQL-style escaped quotes: 'O''Brien' -> 'O''Brien'
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -127,10 +120,18 @@ fn tokenize(sql: &str) -> Vec<String> {
                 while let Some(&c) = chars.peek() {
                     chars.next();
                     if c == '\'' {
-                        s.push('\'');
-                        break;
+                        // Check for escaped quote ('')
+                        if chars.peek() == Some(&'\'') {
+                            s.push('\'');
+                            s.push('\'');
+                            chars.next(); // consume second quote
+                        } else {
+                            s.push('\'');
+                            break;
+                        }
+                    } else {
+                        s.push(c);
                     }
-                    s.push(c);
                 }
                 tokens.push(s);
             }
@@ -169,21 +170,21 @@ fn tokenize(sql: &str) -> Vec<String> {
 
 fn parse_create_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     let mut t = Tokens::new(sql);
-    t.expect_upper("CREATE")?;
-    t.expect_upper("PROPERTY")?;
-    t.expect_upper("GRAPH")?;
+    t.expect("CREATE")?;
+    t.expect("PROPERTY")?;
+    t.expect("GRAPH")?;
     let name = t.next()?.to_lowercase();
 
-    t.expect_upper("VERTEX")?;
-    t.expect_upper("TABLES")?;
+    t.expect("VERTEX")?;
+    t.expect("TABLES")?;
     t.expect("(")?;
     let vertex_tables = parse_vertex_tables(&mut t)?;
     t.expect(")")?;
 
     let mut edge_tables = Vec::new();
     if t.peek().map(|s| s.to_uppercase()) == Some("EDGE".into()) {
-        t.expect_upper("EDGE")?;
-        t.expect_upper("TABLES")?;
+        t.expect("EDGE")?;
+        t.expect("TABLES")?;
         t.expect("(")?;
         edge_tables = parse_edge_tables(&mut t)?;
         t.expect(")")?;
@@ -221,24 +222,24 @@ fn parse_edge_tables(t: &mut Tokens) -> Result<Vec<ParsedEdgeTable>, SqlError> {
         let table_name = t.next()?.to_lowercase();
 
         // SOURCE KEY (<col>) REFERENCES <table> (<col>)
-        t.expect_upper("SOURCE")?;
-        t.expect_upper("KEY")?;
+        t.expect("SOURCE")?;
+        t.expect("KEY")?;
         t.expect("(")?;
         let src_col = t.next()?.to_lowercase();
         t.expect(")")?;
-        t.expect_upper("REFERENCES")?;
+        t.expect("REFERENCES")?;
         let src_ref_table = t.next()?.to_lowercase();
         t.expect("(")?;
         let src_ref_col = t.next()?.to_lowercase();
         t.expect(")")?;
 
         // DESTINATION KEY (<col>) REFERENCES <table> (<col>)
-        t.expect_upper("DESTINATION")?;
-        t.expect_upper("KEY")?;
+        t.expect("DESTINATION")?;
+        t.expect("KEY")?;
         t.expect("(")?;
         let dst_col = t.next()?.to_lowercase();
         t.expect(")")?;
-        t.expect_upper("REFERENCES")?;
+        t.expect("REFERENCES")?;
         let dst_ref_table = t.next()?.to_lowercase();
         t.expect("(")?;
         let dst_ref_col = t.next()?.to_lowercase();
@@ -354,7 +355,7 @@ fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
     let mut path_variable = None;
     let mut mode = PathMode::Walk;
 
-    t.expect_upper("MATCH")?;
+    t.expect("MATCH")?;
 
     // Check for: p = ANY SHORTEST or just pattern
     let checkpoint = t.pos;
@@ -364,7 +365,7 @@ fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
             t.next()?; // consume '='
             if t.peek().map(|s| s.to_uppercase()) == Some("ANY".into()) {
                 t.next()?; // consume ANY
-                t.expect_upper("SHORTEST")?;
+                t.expect("SHORTEST")?;
                 mode = PathMode::AnyShortest;
             }
         } else {
@@ -379,7 +380,7 @@ fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
     let patterns = parse_match_patterns(&mut t)?;
 
     // Parse COLUMNS clause
-    t.expect_upper("COLUMNS")?;
+    t.expect("COLUMNS")?;
     t.expect("(")?;
     let columns = parse_columns_clause(&mut t)?;
     t.expect(")")?;
@@ -641,13 +642,13 @@ fn parse_columns_clause(t: &mut Tokens) -> Result<Vec<ColumnEntry>, SqlError> {
 
 fn parse_drop_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     let mut t = Tokens::new(sql);
-    t.expect_upper("DROP")?;
-    t.expect_upper("PROPERTY")?;
-    t.expect_upper("GRAPH")?;
+    t.expect("DROP")?;
+    t.expect("PROPERTY")?;
+    t.expect("GRAPH")?;
     let mut if_exists = false;
     let name_or_if = t.next()?;
     let name = if name_or_if.to_uppercase() == "IF" {
-        t.expect_upper("EXISTS")?;
+        t.expect("EXISTS")?;
         if_exists = true;
         t.next()?.to_lowercase()
     } else {
