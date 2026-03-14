@@ -102,8 +102,8 @@ fn make_session() -> teide::sql::Session {
     }
 }
 
-fn run_init_script(session: &mut teide::sql::Session, path: &PathBuf) {
-    if let Err(e) = session.execute_script_file(path.as_path()) {
+fn run_init_script(session: &mut teide::sql::Session, path: &std::path::Path) {
+    if let Err(e) = session.execute_script_file(path) {
         eprintln!(
             "{}Error in init script {}: {e}{}",
             theme::ERROR,

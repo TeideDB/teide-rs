@@ -2065,17 +2065,17 @@ Run the complete test suite, verify no regressions, and update documentation.
 **Files:**
 - Modify: `docs/plans/graph-sql-proposal.html` (mark Phase 1+2 as implemented)
 
-- [ ] **Step 1: Run complete test suite**
+- [x] **Step 1: Run complete test suite**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All tests PASS including new slt_pgq and slt_pgq_paths
 
-- [ ] **Step 2: Run clippy**
+- [x] **Step 2: Run clippy**
 
 Run: `cargo clippy --all-features -- -D warnings 2>&1 | tail -10`
 Expected: No warnings
 
-- [ ] **Step 3: Verify REPL works with PGQ**
+- [x] **Step 3: Verify REPL works with PGQ**
 
 Run interactive test:
 ```bash
@@ -2088,7 +2088,7 @@ SELECT * FROM GRAPH_TABLE (g MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(
 ```
 Expected: Output shows Bob and Carol
 
-- [ ] **Step 4: Commit all remaining changes**
+- [x] **Step 4: Commit all remaining changes**
 
 ```bash
 git add -A

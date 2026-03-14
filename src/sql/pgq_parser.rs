@@ -425,15 +425,10 @@ fn parse_single_path(t: &mut Tokens) -> Result<PathPattern, SqlError> {
 
     nodes.push(parse_node_pattern(t)?);
 
-    loop {
-        match t.peek() {
-            Some("-") | Some("<") => {
-                let (edge, node) = parse_edge_and_node(t)?;
-                edges.push(edge);
-                nodes.push(node);
-            }
-            _ => break,
-        }
+    while let Some("-") | Some("<") = t.peek() {
+        let (edge, node) = parse_edge_and_node(t)?;
+        edges.push(edge);
+        nodes.push(node);
     }
 
     Ok(PathPattern { nodes, edges })

@@ -12,18 +12,22 @@ use super::{ExecResult, Session, SqlError};
 /// A vertex label mapping: label name -> session table name.
 pub(crate) struct VertexLabel {
     pub table_name: String,
+    #[allow(dead_code)]
     pub label: String,
 }
 
 /// An edge label mapping: label name -> edge table with source/dest references.
 pub(crate) struct EdgeLabel {
     pub table_name: String,
+    #[allow(dead_code)]
     pub label: String,
     pub src_col: String,
     pub src_ref_table: String,
+    #[allow(dead_code)]
     pub src_ref_col: String,
     pub dst_col: String,
     pub dst_ref_table: String,
+    #[allow(dead_code)]
     pub dst_ref_col: String,
 }
 
@@ -35,6 +39,7 @@ pub(crate) struct StoredRel {
 
 /// A property graph defined over session tables.
 pub(crate) struct PropertyGraph {
+    #[allow(dead_code)]
     pub name: String,
     pub vertex_labels: HashMap<String, VertexLabel>,
     pub edge_labels: HashMap<String, StoredRel>,
@@ -64,6 +69,7 @@ pub(crate) enum PathQuantifier {
 /// A node pattern: (var:Label WHERE condition)
 #[derive(Debug, Clone)]
 pub(crate) struct NodePattern {
+    #[allow(dead_code)]
     pub variable: Option<String>,
     pub label: Option<String>,
     pub filter: Option<String>, // raw SQL predicate text
@@ -72,6 +78,7 @@ pub(crate) struct NodePattern {
 /// An edge pattern: -[var:Label]-> with optional quantifier
 #[derive(Debug, Clone)]
 pub(crate) struct EdgePattern {
+    #[allow(dead_code)]
     pub variable: Option<String>,
     pub label: Option<String>,
     pub direction: MatchDirection,
@@ -95,6 +102,7 @@ pub(crate) enum PathMode {
 /// A parsed MATCH clause.
 #[derive(Debug, Clone)]
 pub(crate) struct MatchClause {
+    #[allow(dead_code)]
     pub path_variable: Option<String>,
     pub mode: PathMode,
     pub patterns: Vec<PathPattern>, // multiple patterns = comma-separated
@@ -454,6 +462,7 @@ fn apply_node_filter(
 
 /// Project COLUMNS from expand results.
 /// Maps column expressions like "b.name" to lookups in source/destination tables.
+#[allow(clippy::too_many_arguments)]
 fn project_columns(
     session: &Session,
     expand_result: &Table,
@@ -585,12 +594,7 @@ fn project_columns(
 /// Find a column index by name in a table.
 fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
     let ncols = table.ncols() as usize;
-    for i in 0..ncols {
-        if table.col_name_str(i).to_lowercase() == name {
-            return Some(i);
-        }
-    }
-    None
+    (0..ncols).find(|&i| table.col_name_str(i).to_lowercase() == name)
 }
 
 /// Get a cell value as a string for CSV output.
@@ -1009,7 +1013,7 @@ fn reconstruct_shortest_path(
     dst_id: i64,
     max_depth: i64,
     stored_rel: &StoredRel,
-    src_table: &Table,
+    _src_table: &Table,
     direction: u8,
 ) -> Result<Vec<i64>, SqlError> {
     use std::collections::{HashMap as HM, VecDeque};
@@ -1066,8 +1070,8 @@ fn reconstruct_shortest_path(
         }
         if let Some(neighbors) = adj.get(&node) {
             for &next in neighbors {
-                if !visited.contains_key(&next) {
-                    visited.insert(next, node);
+                if let std::collections::hash_map::Entry::Vacant(e) = visited.entry(next) {
+                    e.insert(node);
                     frontier.push_back((next, depth + 1));
                 }
             }

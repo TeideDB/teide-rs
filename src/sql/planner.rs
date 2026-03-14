@@ -363,7 +363,7 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
 /// Build an empty table with the same schema (column types) as the source table.
 fn build_empty_table(source: &Table, columns: &[String]) -> Result<Table, SqlError> {
-    let ncols = source.ncols() as i64;
+    let ncols = source.ncols();
     let mut builder = RawTableBuilder::new(ncols)?;
 
     for (i, name) in columns.iter().enumerate() {
