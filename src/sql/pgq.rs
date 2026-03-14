@@ -292,11 +292,7 @@ pub(crate) fn plan_graph_table(
             ))
         }
         (2, 1, PathMode::Walk) if is_var_length => {
-            Err(SqlError::Plan(
-                "Variable-length path queries are not yet supported. \
-                 Use single-hop (a)-[e]->(b) patterns."
-                    .into(),
-            ))
+            plan_var_length(session, graph, pattern, &expr.columns)
         }
         (2, 1, PathMode::Walk) => {
             plan_single_hop(session, graph, pattern, &expr.columns)
@@ -616,4 +612,195 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> String {
         return v.to_string();
     }
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Variable-length path planner
+// ---------------------------------------------------------------------------
+
+/// Plan a variable-length MATCH: (a)-[e]->{min,max}(b)
+fn plan_var_length(
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    columns: &[ColumnEntry],
+) -> Result<(Table, Vec<String>), SqlError> {
+    let src_node = &pattern.nodes[0];
+    let edge = &pattern.edges[0];
+    let dst_node = &pattern.nodes[1];
+
+    let edge_label = edge.label.as_deref().ok_or_else(|| {
+        SqlError::Plan("Edge pattern must specify a label".into())
+    })?;
+    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+    })?;
+
+    let src_label = resolve_node_label(src_node, &stored_rel.edge_label.src_ref_table, graph)?;
+    let src_table = &session.tables.get(&src_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
+    })?.table;
+
+    let dst_label = resolve_node_label(dst_node, &stored_rel.edge_label.dst_ref_table, graph)?;
+    let dst_table = &session.tables.get(&dst_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
+    })?.table;
+
+    let direction: u8 = match edge.direction {
+        MatchDirection::Forward => 0,
+        MatchDirection::Reverse => 1,
+        MatchDirection::Undirected => 2,
+    };
+
+    let (min_depth, max_depth) = match edge.quantifier {
+        PathQuantifier::Range { min, max } => (min, max),
+        PathQuantifier::Plus => (1, 255),
+        PathQuantifier::Star => (0, 255),
+        PathQuantifier::One => (1, 1),
+    };
+
+    let g = session.ctx.graph(src_table)?;
+    let src_ref_col = &stored_rel.edge_label.src_ref_col;
+    let src_ids = g.scan(src_ref_col)?;
+
+    let src_ids = if let Some(filter_text) = &src_node.filter {
+        apply_node_filter(&g, src_ids, filter_text, src_node.variable.as_deref())?
+    } else {
+        src_ids
+    };
+
+    let var_exp = g.var_expand(src_ids, &stored_rel.rel, direction, min_depth, max_depth, false)?;
+    let result = g.execute(var_exp)?;
+
+    // var_expand result has: _start, _end, _depth
+    // Project the requested COLUMNS using _start/_end to look up properties
+    project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table)
+}
+
+/// Project COLUMNS from var_expand results.
+/// var_expand output: _start, _end, _depth
+fn project_var_length_columns(
+    session: &Session,
+    var_result: &Table,
+    columns: &[ColumnEntry],
+    src_node: &NodePattern,
+    dst_node: &NodePattern,
+    src_table: &Table,
+    dst_table: &Table,
+) -> Result<(Table, Vec<String>), SqlError> {
+    let src_var = src_node.variable.as_deref().unwrap_or("__src");
+    let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+
+    let nrows = var_result.nrows() as usize;
+
+    let start_idx_col = find_col_idx(var_result, "_start")
+        .ok_or_else(|| SqlError::Plan("var_expand result missing _start column".into()))?;
+    let end_idx_col = find_col_idx(var_result, "_end")
+        .ok_or_else(|| SqlError::Plan("var_expand result missing _end column".into()))?;
+    let depth_idx_col = find_col_idx(var_result, "_depth");
+
+    let mut start_indices = Vec::with_capacity(nrows);
+    let mut end_indices = Vec::with_capacity(nrows);
+    for row in 0..nrows {
+        start_indices.push(var_result.get_i64(start_idx_col, row).unwrap_or(0) as usize);
+        end_indices.push(var_result.get_i64(end_idx_col, row).unwrap_or(0) as usize);
+    }
+
+    // Build column specs in COLUMNS clause order
+    let mut col_names = Vec::new();
+    struct ColSpec {
+        kind: VarColKind,
+        table_col_idx: usize, // index into src_table or dst_table (unused for Depth)
+    }
+    enum VarColKind {
+        Src,
+        Dst,
+        Depth,
+    }
+    let mut col_specs: Vec<ColSpec> = Vec::new();
+
+    for entry in columns {
+        let expr = &entry.expr;
+        let alias = entry.alias.as_deref();
+
+        if let Some(dot_pos) = expr.find('.') {
+            let var = expr[..dot_pos].trim().to_lowercase();
+            let col = expr[dot_pos + 1..].trim().to_lowercase();
+            let out_name = alias.unwrap_or(&col).to_string();
+
+            if var == src_var {
+                let col_idx = find_col_idx(src_table, &col)
+                    .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in source table")))?;
+                col_names.push(out_name);
+                col_specs.push(ColSpec { kind: VarColKind::Src, table_col_idx: col_idx });
+            } else if var == dst_var {
+                let col_idx = find_col_idx(dst_table, &col)
+                    .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in destination table")))?;
+                col_names.push(out_name);
+                col_specs.push(ColSpec { kind: VarColKind::Dst, table_col_idx: col_idx });
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in COLUMNS"
+                )));
+            }
+        } else {
+            let lower = expr.to_lowercase();
+            if lower.contains("path_length") || lower == "_depth" {
+                col_names.push(alias.unwrap_or("depth").to_string());
+                col_specs.push(ColSpec { kind: VarColKind::Depth, table_col_idx: 0 });
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "COLUMNS: unsupported expression '{expr}'"
+                )));
+            }
+        }
+    }
+
+    if col_specs.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Build CSV
+    let csv_col_names: Vec<String> = (0..col_names.len())
+        .map(|i| format!("__c{i}"))
+        .collect();
+
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+    for row in 0..nrows {
+        for (i, spec) in col_specs.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            match spec.kind {
+                VarColKind::Src => {
+                    csv.push_str(&get_cell_string(src_table, spec.table_col_idx, start_indices[row]));
+                }
+                VarColKind::Dst => {
+                    csv.push_str(&get_cell_string(dst_table, spec.table_col_idx, end_indices[row]));
+                }
+                VarColKind::Depth => {
+                    if let Some(d_col) = depth_idx_col {
+                        let d = var_result.get_i64(d_col, row).unwrap_or(0);
+                        csv.push_str(&d.to_string());
+                    } else {
+                        csv.push('0');
+                    }
+                }
+            }
+        }
+        csv.push('\n');
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!("__pgq_vl_{}.csv", std::process::id()));
+    std::fs::write(&tmp_path, csv.as_bytes())
+        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
+    let path_str = tmp_path.to_str().ok_or_else(|| {
+        SqlError::Plan("Temp file path not valid UTF-8".into())
+    })?;
+    let result = session.ctx.read_csv(path_str)?;
+    let _ = std::fs::remove_file(&tmp_path);
+    let result = result.with_column_names(&col_names)?;
+
+    Ok((result, col_names))
 }

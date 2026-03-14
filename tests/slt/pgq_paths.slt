@@ -1,0 +1,40 @@
+# SQL/PGQ: Variable-length paths and shortest path
+
+# Setup
+statement ok
+CREATE TABLE persons (id INTEGER, name VARCHAR, city VARCHAR)
+
+statement ok
+INSERT INTO persons VALUES (0, 'Alice', 'NYC'), (1, 'Bob', 'SF'), (2, 'Carol', 'NYC'), (3, 'Dave', 'LA'), (4, 'Eve', 'SF')
+
+statement ok
+CREATE TABLE knows_edges (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO knows_edges VALUES (0, 1), (0, 2), (1, 3), (2, 3), (3, 4)
+
+statement ok
+CREATE PROPERTY GRAPH social VERTEX TABLES (persons LABEL Person) EDGE TABLES (knows_edges SOURCE KEY (src) REFERENCES persons (id) DESTINATION KEY (dst) REFERENCES persons (id) LABEL Knows)
+
+# Variable-length: 1-2 hops from Alice
+query T
+SELECT * FROM GRAPH_TABLE (social MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->{1,2}(b:Person) COLUMNS (b.name)) ORDER BY b.name
+----
+Bob
+Carol
+Dave
+
+# Variable-length: exactly 2 hops from Alice (friends-of-friends)
+query T
+SELECT * FROM GRAPH_TABLE (social MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->{2,2}(b:Person) COLUMNS (b.name)) ORDER BY b.name
+----
+Dave
+
+# One-or-more hops from Alice (all reachable)
+query T
+SELECT * FROM GRAPH_TABLE (social MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person) COLUMNS (b.name)) ORDER BY b.name
+----
+Bob
+Carol
+Dave
+Eve

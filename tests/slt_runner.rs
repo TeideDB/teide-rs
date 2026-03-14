@@ -229,3 +229,8 @@ fn slt_temporal() {
 fn slt_pgq() {
     run_slt("tests/slt/pgq.slt");
 }
+
+#[test]
+fn slt_pgq_paths() {
+    run_slt("tests/slt/pgq_paths.slt");
+}

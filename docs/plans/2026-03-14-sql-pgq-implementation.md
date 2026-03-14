@@ -1645,7 +1645,7 @@ Add support for path quantifiers: `->{1,3}`, `->+`, `->*`.
 - Modify: `src/sql/pgq.rs` (add `plan_var_length` function)
 - Create: `tests/slt/pgq_paths.slt`
 
-- [ ] **Step 1: Add `plan_var_length` to `src/sql/pgq.rs`**
+- [x] **Step 1: Add `plan_var_length` to `src/sql/pgq.rs`**
 
 ```rust
 /// Plan a variable-length MATCH: (a)-[e]->{min,max}(b)
@@ -1776,7 +1776,7 @@ fn project_var_length_columns(
 }
 ```
 
-- [ ] **Step 2: Create `tests/slt/pgq_paths.slt`**
+- [x] **Step 2: Create `tests/slt/pgq_paths.slt`**
 
 ```
 # SQL/PGQ: Variable-length paths and shortest path
@@ -1821,7 +1821,7 @@ Dave
 Eve
 ```
 
-- [ ] **Step 3: Add SLT runner**
+- [x] **Step 3: Add SLT runner**
 
 Add to `tests/slt_runner.rs`:
 ```rust
@@ -1831,7 +1831,7 @@ fn slt_pgq_paths() {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test --all-features -- slt_pgq`
 Expected: PASS
@@ -1839,7 +1839,7 @@ Expected: PASS
 Run: `cargo test --all-features -- slt_pgq_paths`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/sql/pgq.rs tests/slt/pgq_paths.slt tests/slt_runner.rs
