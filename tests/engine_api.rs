@@ -1193,3 +1193,92 @@ fn read_csv_no_header() {
     assert_eq!(table.ncols(), 3);
     assert_eq!(table.get_i64(0, 0).unwrap(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Graph Algorithm Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graph_pagerank() {
+    let _guard = lock();
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let g = ctx.graph(&edges).unwrap();
+    let pr = g.pagerank(&rel, 20, 0.85).unwrap();
+    let result = g.execute(pr).unwrap();
+
+    // Should have 5 nodes with ranks
+    assert_eq!(result.nrows(), 5);
+    // All ranks should be positive
+    for i in 0..5 {
+        let rank = result.get_f64(1, i).unwrap();
+        assert!(rank > 0.0, "rank should be positive, got {rank} for node {i}");
+    }
+    // Node 0 has no in-edges so should have the lowest rank (only gets base rank)
+    let rank0 = result.get_f64(1, 0).unwrap();
+    for i in 1..5 {
+        let rank_i = result.get_f64(1, i).unwrap();
+        assert!(
+            rank_i >= rank0,
+            "node {i} should have rank >= node 0 (no in-edges), got {rank_i} vs {rank0}"
+        );
+    }
+}
+
+#[test]
+fn graph_connected_comp() {
+    let _guard = lock();
+    // Create two disconnected components: {0,1,2} and {3,4}
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst").unwrap();
+    writeln!(f, "0,1").unwrap();
+    writeln!(f, "1,2").unwrap();
+    writeln!(f, "3,4").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let g = ctx.graph(&edges).unwrap();
+    let cc = g.connected_comp(&rel).unwrap();
+    let result = g.execute(cc).unwrap();
+
+    assert_eq!(result.nrows(), 5);
+    // Nodes 0,1,2 should have same component; 3,4 should have same component
+    let c0 = result.get_i64(1, 0).unwrap();
+    let c1 = result.get_i64(1, 1).unwrap();
+    let c2 = result.get_i64(1, 2).unwrap();
+    let c3 = result.get_i64(1, 3).unwrap();
+    let c4 = result.get_i64(1, 4).unwrap();
+    assert_eq!(c0, c1, "nodes 0,1 should be same component");
+    assert_eq!(c1, c2, "nodes 1,2 should be same component");
+    assert_eq!(c3, c4, "nodes 3,4 should be same component");
+    assert_ne!(c0, c3, "components should be different");
+}
+
+#[test]
+fn graph_louvain() {
+    let _guard = lock();
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let g = ctx.graph(&edges).unwrap();
+    let lv = g.louvain(&rel, 100).unwrap();
+    let result = g.execute(lv).unwrap();
+
+    assert_eq!(result.nrows(), 5);
+    // Each node should have a non-negative community ID
+    for i in 0..5 {
+        let c = result.get_i64(1, i).unwrap();
+        assert!(c >= 0, "community ID should be non-negative");
+    }
+}
