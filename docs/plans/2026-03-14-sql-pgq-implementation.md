@@ -728,7 +728,7 @@ Parse `GRAPH_TABLE(graph_name MATCH pattern COLUMNS (...))` in FROM clauses. Sin
 - Modify: `src/sql/pgq_parser.rs` (add GRAPH_TABLE rewriting + MATCH parser)
 - Modify: `src/sql/pgq.rs` (add MATCH AST types)
 
-- [ ] **Step 1: Add MATCH pattern AST types to `src/sql/pgq.rs`**
+- [x] **Step 1: Add MATCH pattern AST types to `src/sql/pgq.rs`**
 
 Append to `src/sql/pgq.rs`:
 
@@ -809,7 +809,7 @@ pub(crate) struct GraphTableExpr {
 }
 ```
 
-- [ ] **Step 2: Add GRAPH_TABLE pre-parser to `src/sql/pgq_parser.rs`**
+- [x] **Step 2: Add GRAPH_TABLE pre-parser to `src/sql/pgq_parser.rs`**
 
 Append to `src/sql/pgq_parser.rs`:
 
@@ -1213,12 +1213,12 @@ fn parse_columns_clause(t: &mut Tokens) -> Result<Vec<ColumnEntry>, SqlError> {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/sql/pgq_parser.rs src/sql/pgq.rs

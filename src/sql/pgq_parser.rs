@@ -116,7 +116,7 @@ fn tokenize(sql: &str) -> Vec<String> {
 
     while let Some(&ch) = chars.peek() {
         match ch {
-            '(' | ')' | ',' | ';' => {
+            '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '.' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -251,6 +251,375 @@ fn parse_edge_tables(t: &mut Tokens) -> Result<Vec<ParsedEdgeTable>, SqlError> {
         }
     }
     Ok(tables)
+}
+
+// ---------------------------------------------------------------------------
+// GRAPH_TABLE rewriting
+// ---------------------------------------------------------------------------
+
+use super::pgq::{
+    ColumnEntry, EdgePattern, GraphTableExpr, MatchClause, MatchDirection,
+    NodePattern, PathMode, PathPattern, PathQuantifier,
+};
+
+/// Scan SQL for GRAPH_TABLE(...) in FROM clauses and extract them.
+/// Returns a list of extracted GraphTableExpr and the rewritten SQL
+/// (with GRAPH_TABLE replaced by a placeholder like `__pgq_result_0`).
+pub(crate) fn extract_graph_tables(
+    sql: &str,
+) -> Result<(String, Vec<GraphTableExpr>), SqlError> {
+    let upper = sql.to_uppercase();
+    let mut result = String::with_capacity(sql.len());
+    let mut exprs = Vec::new();
+    let mut pos = 0;
+    let bytes = sql.as_bytes();
+
+    while pos < bytes.len() {
+        if let Some(gt_pos) = upper[pos..].find("GRAPH_TABLE") {
+            let abs_pos = pos + gt_pos;
+            result.push_str(&sql[pos..abs_pos]);
+
+            let after_gt = abs_pos + "GRAPH_TABLE".len();
+            let paren_start = sql[after_gt..]
+                .find('(')
+                .ok_or_else(|| SqlError::Parse("Expected '(' after GRAPH_TABLE".into()))?
+                + after_gt;
+
+            let inner_end = find_matching_paren(sql, paren_start)?;
+            let inner = &sql[paren_start + 1..inner_end];
+
+            let expr = parse_graph_table_inner(inner)?;
+            let idx = exprs.len();
+            exprs.push(expr);
+
+            result.push_str(&format!("__pgq_result_{idx}"));
+
+            pos = inner_end + 1;
+        } else {
+            result.push_str(&sql[pos..]);
+            break;
+        }
+    }
+
+    Ok((result, exprs))
+}
+
+/// Find the matching closing parenthesis for an opening one at `start`.
+fn find_matching_paren(sql: &str, start: usize) -> Result<usize, SqlError> {
+    let mut depth = 0;
+    let mut in_string = false;
+    for (i, ch) in sql[start..].char_indices() {
+        match ch {
+            '\'' if !in_string => in_string = true,
+            '\'' if in_string => in_string = false,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(start + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(SqlError::Parse("Unmatched parenthesis in GRAPH_TABLE".into()))
+}
+
+/// Parse the content inside GRAPH_TABLE(...).
+/// Expected: <graph_name> MATCH <pattern> COLUMNS (<col_list>)
+fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
+    let mut t = Tokens::new(inner);
+
+    let graph_name = t.next()?.to_lowercase();
+
+    // Parse optional path_var = ANY SHORTEST before MATCH
+    let mut path_variable = None;
+    let mut mode = PathMode::Walk;
+
+    t.expect_upper("MATCH")?;
+
+    // Check for: p = ANY SHORTEST or just pattern
+    let checkpoint = t.pos;
+    if let Ok(maybe_var) = t.next() {
+        if t.peek() == Some("=") {
+            path_variable = Some(maybe_var.to_lowercase());
+            t.next()?; // consume '='
+            if t.peek().map(|s| s.to_uppercase()) == Some("ANY".into()) {
+                t.next()?; // consume ANY
+                t.expect_upper("SHORTEST")?;
+                mode = PathMode::AnyShortest;
+            }
+        } else {
+            // Not a var assignment, rewind
+            t.pos = checkpoint;
+        }
+    } else {
+        t.pos = checkpoint;
+    }
+
+    // Parse patterns (comma-separated path patterns)
+    let patterns = parse_match_patterns(&mut t)?;
+
+    // Parse COLUMNS clause
+    t.expect_upper("COLUMNS")?;
+    t.expect("(")?;
+    let columns = parse_columns_clause(&mut t)?;
+    t.expect(")")?;
+
+    Ok(GraphTableExpr {
+        graph_name,
+        match_clause: MatchClause {
+            path_variable,
+            mode,
+            patterns,
+        },
+        columns,
+    })
+}
+
+/// Parse comma-separated path patterns.
+fn parse_match_patterns(t: &mut Tokens) -> Result<Vec<PathPattern>, SqlError> {
+    let mut patterns = Vec::new();
+    patterns.push(parse_single_path(t)?);
+
+    while t.peek() == Some(",") {
+        let saved = t.pos;
+        t.next()?; // consume comma
+        if t.peek().map(|s| s.to_uppercase()) == Some("COLUMNS".into()) {
+            t.pos = saved;
+            break;
+        }
+        if t.peek() == Some("(") {
+            patterns.push(parse_single_path(t)?);
+        } else {
+            t.pos = saved;
+            break;
+        }
+    }
+
+    Ok(patterns)
+}
+
+/// Parse a single path: (node)-[edge]->(node)...
+fn parse_single_path(t: &mut Tokens) -> Result<PathPattern, SqlError> {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    nodes.push(parse_node_pattern(t)?);
+
+    loop {
+        match t.peek() {
+            Some("-") | Some("<") => {
+                let (edge, node) = parse_edge_and_node(t)?;
+                edges.push(edge);
+                nodes.push(node);
+            }
+            _ => break,
+        }
+    }
+
+    Ok(PathPattern { nodes, edges })
+}
+
+/// Parse a node pattern: (var:Label WHERE condition)
+fn parse_node_pattern(t: &mut Tokens) -> Result<NodePattern, SqlError> {
+    t.expect("(")?;
+
+    let mut variable = None;
+    let mut label = None;
+    let mut filter = None;
+
+    if t.peek() != Some(")") {
+        let first = t.next()?;
+        if first == ":" {
+            // :Label (no variable)
+            label = Some(t.next()?.to_lowercase());
+        } else if t.peek() == Some(":") {
+            // var:Label
+            variable = Some(first.to_lowercase());
+            t.next()?; // consume ':'
+            if t.peek() != Some(")")
+                && t.peek().map(|s| s.to_uppercase()) != Some("WHERE".into())
+            {
+                label = Some(t.next()?.to_lowercase());
+            }
+        } else {
+            // Just a variable name
+            variable = Some(first.to_lowercase());
+        }
+
+        // Check for WHERE
+        if t.peek().map(|s| s.to_uppercase()) == Some("WHERE".into()) {
+            t.next()?; // consume WHERE
+            let mut filter_tokens = Vec::new();
+            let mut depth = 0;
+            loop {
+                match t.peek() {
+                    Some(")") if depth == 0 => break,
+                    Some("(") => {
+                        depth += 1;
+                        filter_tokens.push(t.next()?);
+                    }
+                    Some(")") => {
+                        depth -= 1;
+                        filter_tokens.push(t.next()?);
+                    }
+                    Some(_) => filter_tokens.push(t.next()?),
+                    None => {
+                        return Err(SqlError::Parse(
+                            "Unexpected end in node pattern".into(),
+                        ))
+                    }
+                }
+            }
+            if !filter_tokens.is_empty() {
+                filter = Some(filter_tokens.join(" "));
+            }
+        }
+    }
+
+    t.expect(")")?;
+
+    Ok(NodePattern {
+        variable,
+        label,
+        filter,
+    })
+}
+
+/// Parse an edge pattern and the following node: -[e:Label]->(node)
+fn parse_edge_and_node(
+    t: &mut Tokens,
+) -> Result<(EdgePattern, NodePattern), SqlError> {
+    let first = t.next()?;
+    let starts_reverse = first == "<";
+    if starts_reverse {
+        t.expect("-")?;
+    }
+
+    let mut variable = None;
+    let mut label = None;
+    let mut quantifier = PathQuantifier::One;
+
+    if t.peek() == Some("[") {
+        t.next()?; // consume '['
+
+        if t.peek() != Some("]") {
+            let first_tok = t.next()?;
+            if first_tok == ":" {
+                label = Some(t.next()?.to_lowercase());
+            } else if t.peek() == Some(":") {
+                variable = Some(first_tok.to_lowercase());
+                t.next()?; // consume ':'
+                if t.peek() != Some("]") {
+                    label = Some(t.next()?.to_lowercase());
+                }
+            } else {
+                variable = Some(first_tok.to_lowercase());
+            }
+        }
+
+        t.expect("]")?;
+    }
+
+    // Parse direction suffix: -> or -
+    t.expect("-")?;
+    let direction = if t.peek() == Some(">") {
+        t.next()?; // consume '>'
+        if starts_reverse {
+            return Err(SqlError::Parse("Invalid edge direction: <-..->".into()));
+        }
+        MatchDirection::Forward
+    } else if starts_reverse {
+        MatchDirection::Reverse
+    } else {
+        MatchDirection::Undirected
+    };
+
+    // Parse optional quantifier: +, *, {min,max}
+    match t.peek() {
+        Some("+") => {
+            t.next()?;
+            quantifier = PathQuantifier::Plus;
+        }
+        Some("*") => {
+            t.next()?;
+            quantifier = PathQuantifier::Star;
+        }
+        Some("{") => {
+            t.next()?; // consume '{'
+            let min_str = t.next()?;
+            let min: u8 = min_str
+                .parse()
+                .map_err(|_| SqlError::Parse(format!("Invalid min depth: {min_str}")))?;
+            t.expect(",")?;
+            let max_str = t.next()?;
+            let max: u8 = max_str
+                .parse()
+                .map_err(|_| SqlError::Parse(format!("Invalid max depth: {max_str}")))?;
+            t.expect("}")?;
+            quantifier = PathQuantifier::Range { min, max };
+        }
+        _ => {}
+    }
+
+    let node = parse_node_pattern(t)?;
+
+    Ok((
+        EdgePattern {
+            variable,
+            label,
+            direction,
+            quantifier,
+        },
+        node,
+    ))
+}
+
+/// Parse COLUMNS clause entries: expr [AS alias], ...
+fn parse_columns_clause(t: &mut Tokens) -> Result<Vec<ColumnEntry>, SqlError> {
+    let mut entries = Vec::new();
+    loop {
+        if t.peek() == Some(")") {
+            break;
+        }
+
+        let mut expr_tokens = Vec::new();
+        let mut depth = 0;
+        loop {
+            match t.peek() {
+                Some(")") if depth == 0 => break,
+                Some(",") if depth == 0 => break,
+                Some(tok) if tok.to_uppercase() == "AS" && depth == 0 => break,
+                Some("(") => {
+                    depth += 1;
+                    expr_tokens.push(t.next()?);
+                }
+                Some(")") => {
+                    depth -= 1;
+                    expr_tokens.push(t.next()?);
+                }
+                Some(_) => expr_tokens.push(t.next()?),
+                None => return Err(SqlError::Parse("Unexpected end in COLUMNS".into())),
+            }
+        }
+
+        let expr = expr_tokens.join(" ");
+        let mut alias = None;
+
+        if t.peek().map(|s| s.to_uppercase()) == Some("AS".into()) {
+            t.next()?; // consume AS
+            alias = Some(t.next()?.to_lowercase());
+        }
+
+        entries.push(ColumnEntry { expr, alias });
+
+        if t.peek() == Some(",") {
+            t.next()?; // consume comma
+        }
+    }
+
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------

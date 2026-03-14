@@ -41,6 +41,81 @@ pub(crate) struct PropertyGraph {
 }
 
 // ---------------------------------------------------------------------------
+// MATCH pattern AST
+// ---------------------------------------------------------------------------
+
+/// Direction of an edge in a MATCH pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchDirection {
+    Forward,    // ->
+    Reverse,    // <-
+    Undirected, // - (either direction)
+}
+
+/// Quantifier on an edge pattern.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PathQuantifier {
+    One,                        // (no quantifier) = exactly 1 hop
+    Range { min: u8, max: u8 }, // {min,max}
+    Plus,                       // + (1 or more)
+    Star,                       // * (0 or more)
+}
+
+/// A node pattern: (var:Label WHERE condition)
+#[derive(Debug, Clone)]
+pub(crate) struct NodePattern {
+    pub variable: Option<String>,
+    pub label: Option<String>,
+    pub filter: Option<String>, // raw SQL predicate text
+}
+
+/// An edge pattern: -[var:Label]-> with optional quantifier
+#[derive(Debug, Clone)]
+pub(crate) struct EdgePattern {
+    pub variable: Option<String>,
+    pub label: Option<String>,
+    pub direction: MatchDirection,
+    pub quantifier: PathQuantifier,
+}
+
+/// A single path pattern: node-edge-node-edge-...-node
+#[derive(Debug, Clone)]
+pub(crate) struct PathPattern {
+    pub nodes: Vec<NodePattern>,
+    pub edges: Vec<EdgePattern>,
+}
+
+/// Whether this is a shortest-path query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathMode {
+    Walk,        // default: all paths
+    AnyShortest, // ANY SHORTEST
+}
+
+/// A parsed MATCH clause.
+#[derive(Debug, Clone)]
+pub(crate) struct MatchClause {
+    pub path_variable: Option<String>,
+    pub mode: PathMode,
+    pub patterns: Vec<PathPattern>, // multiple patterns = comma-separated
+}
+
+/// A COLUMNS clause entry: expression AS alias.
+#[derive(Debug, Clone)]
+pub(crate) struct ColumnEntry {
+    pub expr: String, // raw SQL expression (e.g. "a.name", "COUNT(b.id)")
+    pub alias: Option<String>,
+}
+
+/// A fully parsed GRAPH_TABLE invocation.
+#[derive(Debug, Clone)]
+pub(crate) struct GraphTableExpr {
+    pub graph_name: String,
+    pub match_clause: MatchClause,
+    pub columns: Vec<ColumnEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // Build a PropertyGraph from parsed DDL
 // ---------------------------------------------------------------------------
 
