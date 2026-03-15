@@ -258,7 +258,7 @@ Label propagation: each node starts with its own ID as label. Each iteration: fo
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [ ] **Step 1: Add builder function to `graph.c`**
+- [x] **Step 1: Add builder function to `graph.c`**
 
 ```c
 td_op_t* td_connected_comp(td_graph_t* g, td_rel_t* rel) {
@@ -279,7 +279,7 @@ td_op_t* td_connected_comp(td_graph_t* g, td_rel_t* rel) {
 }
 ```
 
-- [ ] **Step 2: Add kernel to `exec.c`**
+- [x] **Step 2: Add kernel to `exec.c`**
 
 ```c
 /*
@@ -363,7 +363,7 @@ static td_t* exec_connected_comp(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [ ] **Step 3: Add dispatch and dump**
+- [x] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -377,12 +377,12 @@ In `dump.c`:
 case OP_CONNECTED_COMP: return "CONNECTED_COMP";
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vendor/teide/
