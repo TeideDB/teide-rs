@@ -226,7 +226,7 @@ Also support: one embedding column vs one constant vector (for query-time "find 
 - Modify: `vendor/teide/src/ops/exec.c` (kernels)
 - Modify: `vendor/teide/src/ops/dump.c` (names)
 
-- [ ] **Step 1: Add opcodes and declarations to `td.h`**
+- [x] **Step 1: Add opcodes and declarations to `td.h`**
 
 ```c
 #define OP_COSINE_SIM      88   /* cosine similarity between embeddings   */
@@ -244,7 +244,7 @@ td_op_t* td_knn(td_graph_t* g, td_op_t* emb_col,
                  const float* query_vec, int32_t dim, int64_t k);
 ```
 
-- [ ] **Step 2: Extend `td_op_ext_t` for vector ops**
+- [x] **Step 2: Extend `td_op_ext_t` for vector ops**
 
 Add a new union member in `td_op_ext_t`:
 ```c
@@ -255,7 +255,7 @@ struct {  /* OP_COSINE_SIM / OP_EUCLIDEAN_DIST / OP_KNN */
 } vector;
 ```
 
-- [ ] **Step 3: Add builder functions to `graph.c`**
+- [x] **Step 3: Add builder functions to `graph.c`**
 
 ```c
 td_op_t* td_cosine_sim(td_graph_t* g, td_op_t* emb_col,
@@ -301,7 +301,7 @@ td_op_t* td_euclidean_dist(td_graph_t* g, td_op_t* emb_col,
 }
 ```
 
-- [ ] **Step 4: Add cosine similarity kernel to `exec.c`**
+- [x] **Step 4: Add cosine similarity kernel to `exec.c`**
 
 ```c
 /*
@@ -355,7 +355,7 @@ static td_t* exec_cosine_sim(td_graph_t* g, td_op_t* op, td_t* emb_vec) {
 }
 ```
 
-- [ ] **Step 5: Add euclidean distance kernel to `exec.c`**
+- [x] **Step 5: Add euclidean distance kernel to `exec.c`**
 
 ```c
 /*
@@ -396,7 +396,7 @@ static td_t* exec_euclidean_dist(td_graph_t* g, td_op_t* op, td_t* emb_vec) {
 }
 ```
 
-- [ ] **Step 6: Add dispatch cases and dump names**
+- [x] **Step 6: Add dispatch cases and dump names**
 
 In `exec_node()`:
 ```c
@@ -422,12 +422,12 @@ case OP_COSINE_SIM:     return "COSINE_SIM";
 case OP_EUCLIDEAN_DIST: return "EUCLIDEAN_DIST";
 ```
 
-- [ ] **Step 7: Verify it compiles**
+- [x] **Step 7: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -f vendor/teide/
