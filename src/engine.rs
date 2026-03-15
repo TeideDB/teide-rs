@@ -715,6 +715,32 @@ impl Table {
         }
     }
 
+    /// Create a new embedding column for the given number of rows and dimension.
+    /// Returns a raw `td_t` pointer that can be used with `Graph::const_vec`.
+    ///
+    /// The returned pointer is owned by the caller and must eventually be
+    /// released via `td_release` (or passed to a graph op that takes ownership).
+    pub fn create_embedding_column(
+        _ctx: &Context,
+        nrows: i64,
+        dim: i32,
+        data: &[f32],
+    ) -> Result<*mut ffi::td_t> {
+        if data.len() != (nrows * dim as i64) as usize {
+            return Err(Error::Length);
+        }
+        let col = unsafe { ffi::td_embedding_new(nrows, dim) };
+        let col = check_ptr(col)?;
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(
+                ffi::td_data(col) as *mut f32,
+                data.len(),
+            );
+            dst.copy_from_slice(data);
+        }
+        Ok(col)
+    }
+
     /// Write this table to a CSV file.
     pub fn write_csv(&self, path: &str) -> Result<()> {
         let c_path = CString::new(path).map_err(|_| Error::InvalidInput)?;

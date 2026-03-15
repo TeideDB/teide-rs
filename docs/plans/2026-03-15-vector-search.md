@@ -121,7 +121,7 @@ For dimensions > 255, we use a two-byte encoding: `attrs = dim & 0xFF`, and stor
 - Modify: `vendor/teide/src/vec/vec.c` (embedding vector creation)
 - Modify: `src/engine.rs` (Rust API for creating embedding columns)
 
-- [ ] **Step 1: Add embedding helper declarations to `td.h`**
+- [x] **Step 1: Add embedding helper declarations to `td.h`**
 
 ```c
 /* ---------- Embedding column helpers ---------- */
@@ -151,7 +151,7 @@ static inline int64_t td_embedding_nrows(td_t* col, int32_t dim) {
 }
 ```
 
-- [ ] **Step 2: Implement `td_embedding_new` in `vec.c`**
+- [x] **Step 2: Implement `td_embedding_new` in `vec.c`**
 
 ```c
 td_t* td_embedding_new(int64_t nrows, int32_t dim) {
@@ -163,7 +163,7 @@ td_t* td_embedding_new(int64_t nrows, int32_t dim) {
 }
 ```
 
-- [ ] **Step 3: Add Rust wrapper in `engine.rs`**
+- [x] **Step 3: Add Rust wrapper in `engine.rs`**
 
 Add FFI declaration in `src/ffi.rs`:
 ```rust
@@ -200,12 +200,12 @@ Add to `impl Table` in `src/engine.rs`:
     }
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -f vendor/teide/ src/ffi.rs src/engine.rs

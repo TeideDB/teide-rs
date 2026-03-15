@@ -976,6 +976,9 @@ extern "C" {
     pub fn td_sym_save(path: *const c_char) -> td_err_t;
     pub fn td_sym_load(path: *const c_char) -> td_err_t;
 
+    // --- Embedding / Vector ops ---
+    pub fn td_embedding_new(nrows: i64, dim: i32) -> *mut td_t;
+
     // --- CSV API ---
     pub fn td_read_csv(path: *const c_char) -> *mut td_t;
     pub fn td_read_csv_opts(
