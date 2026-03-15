@@ -402,7 +402,7 @@ Currently `td_rel_from_edges()` builds CSR indexes but sets `csr.props = NULL`. 
 - Modify: `src/ffi.rs` (FFI binding)
 - Modify: `src/engine.rs` (safe wrapper on `Rel`)
 
-- [ ] **Step 1: Add `td_rel_set_props` to C engine**
+- [x] **Step 1: Add `td_rel_set_props` to C engine**
 
 In `vendor/teide/src/store/csr.c`:
 ```c
@@ -428,7 +428,7 @@ In `vendor/teide/include/teide/td.h`, add declaration:
 void td_rel_set_props(td_rel_t* rel, td_t* props);
 ```
 
-- [ ] **Step 2: Add FFI binding and Rust wrapper**
+- [x] **Step 2: Add FFI binding and Rust wrapper**
 
 In `src/ffi.rs`, add in the extern block:
 ```rust
@@ -447,12 +447,12 @@ In `src/engine.rs`, add to `impl Rel`:
     }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add vendor/teide/ src/ffi.rs src/engine.rs

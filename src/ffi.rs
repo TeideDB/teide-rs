@@ -950,6 +950,7 @@ extern "C" {
     pub fn td_rel_save(rel: *mut td_rel_t, dir: *const c_char) -> td_err_t;
     pub fn td_rel_load(dir: *const c_char) -> *mut td_rel_t;
     pub fn td_rel_mmap(dir: *const c_char) -> *mut td_rel_t;
+    pub fn td_rel_set_props(rel: *mut td_rel_t, props: *mut td_t);
     pub fn td_rel_free(rel: *mut td_rel_t);
 
     // --- Optimizer API ---

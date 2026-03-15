@@ -1887,6 +1887,15 @@ impl Rel {
         Ok(())
     }
 
+    /// Attach an edge property table to the relationship.
+    /// The property table's rows correspond to the original edge table rows.
+    /// The CSR rowmap arrays map CSR positions back to property rows.
+    pub fn set_props(&self, props: &Table) {
+        unsafe {
+            ffi::td_rel_set_props(self.ptr, props.raw);
+        }
+    }
+
     /// Raw pointer for FFI interop.
     pub fn as_raw(&self) -> *mut ffi::td_rel_t {
         self.ptr
