@@ -27,7 +27,7 @@ No new files. No API changes. No Rust changes.
 **Files:**
 - Modify: `vendor/teide/src/ops/exec.c`
 
-- [ ] **Step 1: Refactor `exec_pagerank` to use arena**
+- [x] **Step 1: Refactor `exec_pagerank` to use arena**
 
 Replace individual `scratch_alloc`/`scratch_free` with arena:
 
@@ -72,11 +72,11 @@ static td_t* exec_pagerank(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [ ] **Step 2: Refactor `exec_connected_comp` to use arena**
+- [x] **Step 2: Refactor `exec_connected_comp` to use arena**
 
 Same pattern — replace `scratch_alloc(label)` + `scratch_free(label)` with arena push + reset.
 
-- [ ] **Step 3: Refactor `exec_dijkstra` to use arena**
+- [x] **Step 3: Refactor `exec_dijkstra` to use arena**
 
 Replace 5 individual `scratch_alloc`/`scratch_free` calls (dist, visited, depth, prev, heap) with arena:
 
@@ -102,21 +102,21 @@ Replace 5 individual `scratch_alloc`/`scratch_free` calls (dist, visited, depth,
 
 This also simplifies error handling — no need to track which buffers to free individually.
 
-- [ ] **Step 4: Refactor `exec_louvain` to use arena**
+- [x] **Step 4: Refactor `exec_louvain` to use arena**
 
 Replace 6 individual scratch buffers (community, degree, comm_tot, comm_int, k_i_in, remap) with arena.
 
-- [ ] **Step 5: Verify it compiles**
+- [x] **Step 5: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS (behavior unchanged, only allocation strategy differs)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -f vendor/teide/src/ops/exec.c
