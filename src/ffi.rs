@@ -36,6 +36,7 @@ pub const TD_I16: i8 = 4;
 pub const TD_I32: i8 = 5;
 pub const TD_I64: i8 = 6;
 pub const TD_F64: i8 = 7;
+pub const TD_F32: i8 = 8;
 pub const TD_DATE: i8 = 9;
 pub const TD_TIME: i8 = 10;
 pub const TD_TIMESTAMP: i8 = 11;

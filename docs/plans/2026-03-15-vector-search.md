@@ -57,7 +57,7 @@ Add the F32 type to the C engine's type system.
 - Modify: `vendor/teide/src/core/types.c`
 - Modify: `src/ffi.rs`
 
-- [ ] **Step 1: Add TD_F32 type constant to `td.h`**
+- [x] **Step 1: Add TD_F32 type constant to `td.h`**
 
 After `TD_F64 = 7` (line ~110):
 ```c
@@ -80,7 +80,7 @@ Slot 8 is free (no existing type). But `TD_ATOM_STR = -8` already uses the negat
 #define TD_F32          8    /* 32-bit float vector (also used for embeddings) */
 ```
 
-- [ ] **Step 2: Add F32 element size to `types.c`**
+- [x] **Step 2: Add F32 element size to `types.c`**
 
 In the `td_type_sizes` array, slot 8 is currently 0 or unset. Set it:
 ```c
@@ -89,19 +89,19 @@ In the `td_type_sizes` array, slot 8 is currently 0 or unset. Set it:
 
 Also update `TD_TYPE_COUNT` if needed — current value is 21, which covers indices 0-20. Index 8 is within range, so no change needed.
 
-- [ ] **Step 3: Add Rust FFI constant**
+- [x] **Step 3: Add Rust FFI constant**
 
 In `src/ffi.rs`, after `TD_F64`:
 ```rust
 pub const TD_F32: i8 = 8;
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -f vendor/teide/include/teide/td.h vendor/teide/src/core/types.c src/ffi.rs
