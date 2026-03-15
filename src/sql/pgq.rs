@@ -285,23 +285,33 @@ pub(crate) fn build_property_graph(
             ))
         })?;
         for row in 0..n_edges {
-            if let Some(v) = edge_stored.table.get_i64(src_col_idx, row) {
-                if v < 0 || v >= n_src {
-                    return Err(SqlError::Plan(format!(
-                        "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
-                         into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
-                        et.table_name, et.src_col, row, v, et.src_ref_table, n_src
-                    )));
-                }
+            let v = edge_stored.table.get_i64(src_col_idx, row).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Edge table '{}' column '{}' row {}: value is NULL. \
+                     Edge src/dst values must be non-NULL 0-based row indices.",
+                    et.table_name, et.src_col, row
+                ))
+            })?;
+            if v < 0 || v >= n_src {
+                return Err(SqlError::Plan(format!(
+                    "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
+                     into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
+                    et.table_name, et.src_col, row, v, et.src_ref_table, n_src
+                )));
             }
-            if let Some(v) = edge_stored.table.get_i64(dst_col_idx, row) {
-                if v < 0 || v >= n_dst {
-                    return Err(SqlError::Plan(format!(
-                        "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
-                         into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
-                        et.table_name, et.dst_col, row, v, et.dst_ref_table, n_dst
-                    )));
-                }
+            let v = edge_stored.table.get_i64(dst_col_idx, row).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Edge table '{}' column '{}' row {}: value is NULL. \
+                     Edge src/dst values must be non-NULL 0-based row indices.",
+                    et.table_name, et.dst_col, row
+                ))
+            })?;
+            if v < 0 || v >= n_dst {
+                return Err(SqlError::Plan(format!(
+                    "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
+                     into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
+                    et.table_name, et.dst_col, row, v, et.dst_ref_table, n_dst
+                )));
             }
         }
 
@@ -1319,8 +1329,14 @@ fn reconstruct_shortest_path(
     let n_edges = checked_nrows(&edge_stored.table)?;
     let mut adj: HM<i64, Vec<i64>> = HM::new();
     for row in 0..n_edges {
-        let s = edge_stored.table.get_i64(src_col_idx, row).unwrap_or(-1);
-        let d = edge_stored.table.get_i64(dst_col_idx, row).unwrap_or(-1);
+        let s = match edge_stored.table.get_i64(src_col_idx, row) {
+            Some(v) => v,
+            None => continue, // skip edges with NULL endpoints
+        };
+        let d = match edge_stored.table.get_i64(dst_col_idx, row) {
+            Some(v) => v,
+            None => continue,
+        };
         match direction {
             0 => { adj.entry(s).or_default().push(d); } // forward
             1 => { adj.entry(d).or_default().push(s); } // reverse
