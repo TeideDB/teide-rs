@@ -239,3 +239,8 @@ fn slt_pgq_paths() {
 fn slt_pgq_algorithms() {
     run_slt("tests/slt/pgq_algorithms.slt");
 }
+
+#[test]
+fn slt_vector() {
+    run_slt("tests/slt/vector.slt");
+}

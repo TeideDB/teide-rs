@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, DateTimeField, DuplicateTreatment, Expr, Function,
+    Array, BinaryOperator, CastKind, DataType, DateTimeField, DuplicateTreatment, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArguments, SelectItem, UnaryOperator, Value,
     WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
@@ -661,7 +661,60 @@ fn plan_scalar_function(
             }
         }
 
+        // Vector similarity functions
+        "cosine_similarity" => {
+            check_arg_count(name, &args, 2)?;
+            let emb_col = plan_expr(g, &args[0], schema)?;
+            let query_vec = parse_array_literal(&args[1])?;
+            Ok(g.cosine_sim_owned(emb_col, query_vec)?)
+        }
+        "euclidean_distance" => {
+            check_arg_count(name, &args, 2)?;
+            let emb_col = plan_expr(g, &args[0], schema)?;
+            let query_vec = parse_array_literal(&args[1])?;
+            Ok(g.euclidean_dist_owned(emb_col, query_vec)?)
+        }
+
         _ => Err(SqlError::Plan(format!("Unsupported function: {name}"))),
+    }
+}
+
+/// Parse an ARRAY[...] literal into a Vec<f32>.
+fn parse_array_literal(expr: &Expr) -> Result<Vec<f32>, SqlError> {
+    match expr {
+        Expr::Array(Array { elem, .. }) => {
+            let mut values = Vec::with_capacity(elem.len());
+            for e in elem {
+                match e {
+                    Expr::Value(Value::Number(n, _)) => {
+                        let f: f32 = n.parse().map_err(|_| {
+                            SqlError::Plan(format!("Invalid array element: {n}"))
+                        })?;
+                        values.push(f);
+                    }
+                    Expr::UnaryOp {
+                        op: UnaryOperator::Minus,
+                        expr: inner,
+                    } => {
+                        if let Expr::Value(Value::Number(n, _)) = inner.as_ref() {
+                            let f: f32 = n.parse().map_err(|_| {
+                                SqlError::Plan(format!("Invalid array element: -{n}"))
+                            })?;
+                            values.push(-f);
+                        } else {
+                            return Err(SqlError::Plan("Invalid array element".into()));
+                        }
+                    }
+                    _ => {
+                        return Err(SqlError::Plan(format!(
+                            "Array elements must be numbers, got: {e}"
+                        )))
+                    }
+                }
+            }
+            Ok(values)
+        }
+        _ => Err(SqlError::Plan("Expected ARRAY[...] literal".into())),
     }
 }
 

@@ -1,0 +1,24 @@
+# Vector similarity functions
+
+# Setup: create a table
+statement ok
+CREATE TABLE docs (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO docs VALUES (0, 'math'), (1, 'science'), (2, 'art')
+
+# Test: COSINE_SIMILARITY rejects wrong number of arguments
+statement error
+SELECT COSINE_SIMILARITY() FROM docs
+
+# Test: EUCLIDEAN_DISTANCE rejects wrong number of arguments
+statement error
+SELECT EUCLIDEAN_DISTANCE() FROM docs
+
+# Test: COSINE_SIMILARITY rejects non-array second argument
+statement error
+SELECT COSINE_SIMILARITY(id, 42) FROM docs
+
+# Test: EUCLIDEAN_DISTANCE rejects non-array second argument
+statement error
+SELECT EUCLIDEAN_DISTANCE(id, 42) FROM docs

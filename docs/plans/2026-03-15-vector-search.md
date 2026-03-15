@@ -862,7 +862,7 @@ Expose vector similarity as SQL scalar functions and KNN as a table function.
 - Create: `tests/slt/vector.slt`
 - Modify: `tests/slt_runner.rs`
 
-- [ ] **Step 1: Add SQL function handling**
+- [x] **Step 1: Add SQL function handling**
 
 The SQL syntax for vector search:
 
@@ -919,7 +919,7 @@ fn parse_array_literal(expr: &Expr) -> Result<Vec<f32>, SqlError> {
 }
 ```
 
-- [ ] **Step 2: Create SLT tests**
+- [x] **Step 2: Create SLT tests**
 
 Create `tests/slt/vector.slt`:
 
@@ -946,7 +946,7 @@ statement error
 SELECT EUCLIDEAN_DISTANCE() FROM docs
 ```
 
-- [ ] **Step 3: Add SLT runner**
+- [x] **Step 3: Add SLT runner**
 
 ```rust
 #[test]
@@ -955,12 +955,12 @@ fn slt_vector() {
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/sql/planner.rs src/sql/expr.rs tests/slt/vector.slt tests/slt_runner.rs

@@ -1830,6 +1830,21 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Like `cosine_sim`, but takes ownership of the query vector and pins it
+    /// so that it remains valid until this `Graph` is dropped/executed.
+    pub fn cosine_sim_owned(
+        &mut self,
+        emb_col: Column,
+        query_vec: Vec<f32>,
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        let ptr = query_vec.as_ptr();
+        self._pinned.push(Box::new(query_vec));
+        Self::check_op(unsafe {
+            ffi::td_cosine_sim(self.raw, emb_col.raw, ptr, dim)
+        })
+    }
+
     /// Compute euclidean distance between an embedding column and a query vector.
     /// Returns an F64 column with one distance value per row.
     ///
@@ -1843,6 +1858,20 @@ impl<'a> Graph<'a> {
         let dim = query_vec.len() as i32;
         Self::check_op(unsafe {
             ffi::td_euclidean_dist(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
+        })
+    }
+
+    /// Like `euclidean_dist`, but takes ownership of the query vector and pins it.
+    pub fn euclidean_dist_owned(
+        &mut self,
+        emb_col: Column,
+        query_vec: Vec<f32>,
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        let ptr = query_vec.as_ptr();
+        self._pinned.push(Box::new(query_vec));
+        Self::check_op(unsafe {
+            ffi::td_euclidean_dist(self.raw, emb_col.raw, ptr, dim)
         })
     }
 
@@ -1861,6 +1890,21 @@ impl<'a> Graph<'a> {
         let dim = query_vec.len() as i32;
         Self::check_op(unsafe {
             ffi::td_knn(self.raw, emb_col.raw, query_vec.as_ptr(), dim, k)
+        })
+    }
+
+    /// Like `knn`, but takes ownership of the query vector and pins it.
+    pub fn knn_owned(
+        &mut self,
+        emb_col: Column,
+        query_vec: Vec<f32>,
+        k: i64,
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        let ptr = query_vec.as_ptr();
+        self._pinned.push(Box::new(query_vec));
+        Self::check_op(unsafe {
+            ffi::td_knn(self.raw, emb_col.raw, ptr, dim, k)
         })
     }
 }
