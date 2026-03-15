@@ -1031,7 +1031,7 @@ Test each algorithm through the Rust API to verify the C kernels work correctly.
 **Files:**
 - Modify: `tests/engine_api.rs`
 
-- [ ] **Step 1: Add PageRank test**
+- [x] **Step 1: Add PageRank test**
 
 ```rust
 #[test]
@@ -1061,7 +1061,7 @@ fn graph_pagerank() {
 }
 ```
 
-- [ ] **Step 2: Add Connected Components test**
+- [x] **Step 2: Add Connected Components test**
 
 ```rust
 #[test]
@@ -1098,7 +1098,7 @@ fn graph_connected_comp() {
 }
 ```
 
-- [ ] **Step 3: Add Dijkstra test**
+- [x] **Step 3: Add Dijkstra test**
 
 ```rust
 #[test]
@@ -1147,7 +1147,7 @@ fn graph_dijkstra() {
 }
 ```
 
-- [ ] **Step 4: Add Louvain test (note: step renumbered from original)**
+- [x] **Step 4: Add Louvain test (note: step renumbered from original)**
 
 ```rust
 #[test]
@@ -1172,12 +1172,12 @@ fn graph_louvain() {
 }
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test --all-features -- graph_pagerank graph_connected_comp graph_dijkstra graph_louvain`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/engine_api.rs

@@ -1263,6 +1263,54 @@ fn graph_connected_comp() {
 }
 
 #[test]
+fn graph_dijkstra() {
+    let _guard = lock();
+    // Create a weighted edge table: src, dst, weight
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst,weight").unwrap();
+    writeln!(f, "0,1,1.0").unwrap();
+    writeln!(f, "0,2,4.0").unwrap();
+    writeln!(f, "1,3,2.0").unwrap();
+    writeln!(f, "2,3,1.0").unwrap();
+    writeln!(f, "3,4,3.0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+    // Attach edge properties (the edge table itself) so Dijkstra can read weights
+    rel.set_props(&edges);
+
+    let g = ctx.graph(&edges).unwrap();
+    let src = g.const_i64(0).unwrap();
+    let dst = g.const_i64(4).unwrap();
+    let dj = g.dijkstra(src, Some(dst), &rel, "weight", 255).unwrap();
+    let result = g.execute(dj).unwrap();
+
+    // Should find path 0→1→3→4 with total weight 1+2+3=6.0
+    // Or 0→2→3→4 with weight 4+1+3=8.0
+    // Dijkstra should return the shorter: 6.0
+    assert!(result.nrows() > 0, "should find a path");
+
+    // Check that node 4 is reachable with distance 6.0
+    let nrows = result.nrows() as usize;
+    let mut found_dst = false;
+    for i in 0..nrows {
+        let node = result.get_i64(0, i).unwrap();
+        if node == 4 {
+            let dist = result.get_f64(1, i).unwrap();
+            assert!(
+                (dist - 6.0).abs() < 0.001,
+                "shortest distance to 4 should be 6.0, got {dist}"
+            );
+            found_dst = true;
+        }
+    }
+    assert!(found_dst, "destination node 4 should be in results");
+}
+
+#[test]
 fn graph_louvain() {
     let _guard = lock();
     let (_file, path) = create_edge_csv();
