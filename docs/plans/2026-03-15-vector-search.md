@@ -447,7 +447,7 @@ Given an embedding column and a query vector, return the K most similar rows. Us
 - Modify: `vendor/teide/src/ops/exec.c` (kernel)
 - Modify: `vendor/teide/src/ops/dump.c` (name)
 
-- [ ] **Step 1: Add KNN builder to `graph.c`**
+- [x] **Step 1: Add KNN builder to `graph.c`**
 
 ```c
 td_op_t* td_knn(td_graph_t* g, td_op_t* emb_col,
@@ -473,7 +473,7 @@ td_op_t* td_knn(td_graph_t* g, td_op_t* emb_col,
 }
 ```
 
-- [ ] **Step 2: Add KNN kernel to `exec.c`**
+- [x] **Step 2: Add KNN kernel to `exec.c`**
 
 ```c
 /* Max-heap entry for KNN (track worst of top-K) */
@@ -608,7 +608,7 @@ static td_t* exec_knn(td_graph_t* g, td_op_t* op, td_t* emb_vec) {
 }
 ```
 
-- [ ] **Step 3: Add dispatch and dump**
+- [x] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -626,12 +626,12 @@ In `dump.c`:
 case OP_KNN: return "KNN";
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -f vendor/teide/
