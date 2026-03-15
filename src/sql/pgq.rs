@@ -222,6 +222,11 @@ pub(crate) fn build_property_graph(
             .as_deref()
             .unwrap_or(&vt.table_name)
             .to_lowercase();
+        if vertex_labels.contains_key(&label) {
+            return Err(SqlError::Plan(format!(
+                "Duplicate vertex label '{label}' in property graph"
+            )));
+        }
         vertex_labels.insert(
             label.clone(),
             VertexLabel {
@@ -347,6 +352,11 @@ pub(crate) fn build_property_graph(
             dst_ref_col: et.dst_ref_col.clone(),
         };
 
+        if edge_labels.contains_key(&label) {
+            return Err(SqlError::Plan(format!(
+                "Duplicate edge label '{label}' in property graph"
+            )));
+        }
         edge_labels.insert(label, StoredRel { rel, edge_label });
     }
 
