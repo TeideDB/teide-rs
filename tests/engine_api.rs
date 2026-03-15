@@ -1347,7 +1347,7 @@ fn vector_cosine_similarity() {
         0.0, 1.0, 0.0, 0.0, // row 1: unit vector along y
         1.0, 1.0, 0.0, 0.0, // row 2: 45 degrees between x and y
     ];
-    let emb_col = Table::create_embedding_column(3, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(&ctx,3, dim, &embeddings).unwrap();
 
     // Query: unit vector along x
     let query = vec![1.0f32, 0.0, 0.0, 0.0];
@@ -1397,7 +1397,7 @@ fn vector_euclidean_distance() {
         0.0, 1.0, 0.0, // row 1
         2.0, 0.0, 0.0, // row 2
     ];
-    let emb_col = Table::create_embedding_column(3, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(&ctx,3, dim, &embeddings).unwrap();
 
     let query = vec![1.0f32, 0.0, 0.0];
 
@@ -1446,7 +1446,7 @@ fn vector_knn() {
         0.0, 0.0, 1.0, // row 3: orthogonal
         0.8, 0.2, 0.0, // row 4: similar to row 0
     ];
-    let emb_col = Table::create_embedding_column(5, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(&ctx,5, dim, &embeddings).unwrap();
 
     let query = vec![1.0f32, 0.0, 0.0];
 

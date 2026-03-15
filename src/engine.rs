@@ -721,6 +721,7 @@ impl Table {
     /// The returned pointer is owned by the caller and must eventually be
     /// released via `td_release` (or passed to a graph op that takes ownership).
     pub fn create_embedding_column(
+        _ctx: &Context,
         nrows: i64,
         dim: i32,
         data: &[f32],
@@ -1822,10 +1823,6 @@ impl<'a> Graph<'a> {
     /// Returns an F64 column with one similarity value per row.
     ///
     /// # Safety
-    /// The `query_vec` slice must remain valid until `execute()` is called,
-    /// because the C engine stores a raw pointer to it.
-    ///
-    /// # Safety
     /// The caller must ensure `query_vec` outlives the next `execute()` call.
     /// Prefer `cosine_sim_owned` for a safe alternative.
     pub unsafe fn cosine_sim(
@@ -1833,7 +1830,10 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: &[f32],
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         Self::check_op(unsafe {
             ffi::td_cosine_sim(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
@@ -1846,7 +1846,10 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: Vec<f32>,
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {
@@ -1865,7 +1868,10 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: &[f32],
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         Self::check_op(unsafe {
             ffi::td_euclidean_dist(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
@@ -1877,7 +1883,10 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: Vec<f32>,
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {
@@ -1898,7 +1907,13 @@ impl<'a> Graph<'a> {
         query_vec: &[f32],
         k: i64,
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        if k <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         Self::check_op(unsafe {
             ffi::td_knn(self.raw, emb_col.raw, query_vec.as_ptr(), dim, k)
         })
@@ -1911,7 +1926,13 @@ impl<'a> Graph<'a> {
         query_vec: Vec<f32>,
         k: i64,
     ) -> Result<Column> {
-        let dim = query_vec.len() as i32;
+        if k <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {
