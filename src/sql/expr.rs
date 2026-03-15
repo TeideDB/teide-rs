@@ -707,7 +707,12 @@ fn check_vector_dim(
     let col_name = extract_col_name(expr);
     if let Some(col_name) = col_name {
         if let Some(&expected) = g.column_embedding_dims.get(&col_name) {
-            let actual = query_vec.len() as i32;
+            let actual = i32::try_from(query_vec.len()).map_err(|_| {
+                SqlError::Plan(format!(
+                    "{func_name}: query vector too large ({} elements)",
+                    query_vec.len()
+                ))
+            })?;
             if actual != expected {
                 return Err(SqlError::Plan(format!(
                     "{func_name}: query vector dimension {actual} does not match \
