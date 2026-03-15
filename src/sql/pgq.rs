@@ -1507,6 +1507,16 @@ fn plan_algorithm_query(
 ) -> Result<(Table, Vec<String>), SqlError> {
     let node = &pattern.nodes[0];
 
+    // WHERE filters are not supported on algorithm queries -- algorithms operate
+    // on the entire graph.  Reject early rather than silently ignoring the filter.
+    if node.filter.is_some() {
+        return Err(SqlError::Plan(
+            "WHERE filters are not supported in algorithm MATCH patterns; \
+             use a WHERE clause in the outer SELECT to filter results"
+                .into(),
+        ));
+    }
+
     // Resolve vertex label for the node
     let vertex_label = if let Some(label) = &node.label {
         graph.vertex_labels.get(label).ok_or_else(|| {
