@@ -41,7 +41,7 @@ cargo bench --all-features
 ### Crate Structure
 
 - `src/ffi.rs` — Raw FFI bindings (hand-written from `vendor/teide/include/teide/td.h`)
-- `src/engine.rs` — Safe Rust wrappers: `Context`, `Table`, `Graph`, `Column`, `Error`
+- `src/engine.rs` — Safe Rust wrappers: `Context`, `Table`, `Graph`, `Column`, `Rel`, `Error`
 - `src/sql/mod.rs` — `Session`, `ExecResult`, `execute_sql` entry point
 - `src/sql/planner.rs` — SQL AST → Teide Graph translation
 - `src/sql/expr.rs` — Expression tree walker, aggregate collection
@@ -49,6 +49,8 @@ cargo bench --all-features
 - `src/sql/pgq_parser.rs` — Pre-parser intercepting PGQ syntax (CREATE/DROP PROPERTY GRAPH, GRAPH_TABLE) before sqlparser
 - `src/cli/` — REPL binary (feature-gated on `cli`)
 - `src/server/` — PgWire server binary (feature-gated on `server`)
+- `tests/engine_api.rs` — Rust API integration tests for engine, graph, and algorithm ops
+- `tests/slt/*.slt` — SQL logic tests (SLT format) run by `tests/slt_runner.rs`
 
 ### C Engine Singleton
 
@@ -64,7 +66,7 @@ All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`sca
 
 ### SQL Layer
 
-Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry and a `HashMap<String, PropertyGraph>` for graph metadata. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, DELETE, CREATE/DROP PROPERTY GRAPH, and GRAPH_TABLE with MATCH patterns. PGQ syntax is intercepted by a custom pre-parser (`pgq_parser.rs`) before reaching sqlparser.
+Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry and a `HashMap<String, PropertyGraph>` for graph metadata. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, DELETE, CREATE/DROP PROPERTY GRAPH, and GRAPH_TABLE with MATCH patterns. PGQ syntax is intercepted by a custom pre-parser (`pgq_parser.rs`) before reaching sqlparser. GRAPH_TABLE COLUMNS supports algorithm functions: `PAGERANK()`, `COMPONENT()` (alias: `CONNECTED_COMPONENT`), and `COMMUNITY()` (alias: `LOUVAIN`).
 
 ### Server Thread Model
 

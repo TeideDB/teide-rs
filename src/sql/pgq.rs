@@ -752,7 +752,7 @@ fn project_columns(
             }
             let table_row = if spec.is_src { src_indices[row] } else { dst_indices[row] };
             let table = if spec.is_src { src_table } else { dst_table };
-            csv.push_str(&get_cell_string(table, spec.table_col_idx, table_row));
+            csv.push_str(&get_cell_string(table, spec.table_col_idx, table_row)?);
         }
         csv.push('\n');
     }
@@ -805,21 +805,22 @@ pub(super) fn validate_key_column_is_rowid(
 
 /// Get a cell value as a string for CSV output.
 /// String values are quoted and escaped for CSV safety.
-fn get_cell_string(table: &Table, col: usize, row: usize) -> String {
+fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlError> {
     // Try string first (SYM columns)
     if let Some(s) = table.get_str(col, row) {
-        return csv_quote(&s);
+        return Ok(csv_quote(&s));
     }
     // Try i64 (also covers BOOL which is stored as 0/1 i64)
     if let Some(v) = table.get_i64(col, row) {
-        return v.to_string();
+        return Ok(v.to_string());
     }
     // Try f64
     if let Some(v) = table.get_f64(col, row) {
-        return v.to_string();
+        return Ok(v.to_string());
     }
-    // Unknown type - return empty (DATE/TIME/TIMESTAMP not yet supported in CSV round-trip)
-    String::new()
+    Err(SqlError::Plan(format!(
+        "Unsupported column type at col {col}, row {row} (DATE/TIME/TIMESTAMP not supported in GRAPH_TABLE)"
+    )))
 }
 
 /// Quote a string value for CSV: wrap in double quotes if it contains
@@ -1031,10 +1032,10 @@ fn project_var_length_columns(
             }
             match spec.kind {
                 VarColKind::Src => {
-                    csv.push_str(&get_cell_string(src_table, spec.table_col_idx, start_indices[row]));
+                    csv.push_str(&get_cell_string(src_table, spec.table_col_idx, start_indices[row])?);
                 }
                 VarColKind::Dst => {
-                    csv.push_str(&get_cell_string(dst_table, spec.table_col_idx, end_indices[row]));
+                    csv.push_str(&get_cell_string(dst_table, spec.table_col_idx, end_indices[row])?);
                 }
                 VarColKind::Depth => {
                     if let Some(d_col) = depth_idx_col {
@@ -1673,10 +1674,10 @@ fn plan_algorithm_query(
             match spec {
                 AlgoColKind::AlgoResult { algo_col_idx } => {
                     let result_table = algo_result.as_ref().unwrap();
-                    csv.push_str(&get_cell_string(result_table, *algo_col_idx, row));
+                    csv.push_str(&get_cell_string(result_table, *algo_col_idx, row)?);
                 }
                 AlgoColKind::Property { table_col_idx } => {
-                    csv.push_str(&get_cell_string(&vertex_stored.table, *table_col_idx, row));
+                    csv.push_str(&get_cell_string(&vertex_stored.table, *table_col_idx, row)?);
                 }
             }
         }

@@ -80,11 +80,25 @@ fn strip_leading_comments(sql: &str) -> &str {
                 None => return "", // entire string is a comment
             }
         } else if s.starts_with("/*") {
-            // Block comment: find matching */ (search from position 2 to skip the opening /*)
-            match s[2..].find("*/") {
-                Some(pos) => s = s[2 + pos + 2..].trim_start(),
-                None => return "", // unterminated block comment
+            // Block comment: handle nested /* */ to match tokenizer behavior
+            let mut depth = 1u32;
+            let mut i = 2;
+            let bytes = s.as_bytes();
+            while i + 1 < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
+            if depth > 0 {
+                return ""; // unterminated block comment
+            }
+            s = s[i..].trim_start();
         } else {
             break;
         }

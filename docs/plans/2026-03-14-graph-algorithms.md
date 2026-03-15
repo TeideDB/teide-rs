@@ -1190,6 +1190,8 @@ git commit -m "test: add Rust API tests for PageRank, connected components, Dijk
 
 Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()`, and `SHORTEST_DISTANCE()`.
 
+> **Note:** `SHORTEST_DISTANCE()` SQL exposure was deferred. Dijkstra requires source/destination node IDs and a weight column name as extra arguments, which doesn't fit the current 2-argument algorithm function syntax (`FUNC(graph, node_var)`). The Dijkstra algorithm is available via the Rust API (`Graph::dijkstra()`) only. Implementing the SQL surface requires extending `parse_algo_function` to support variable argument counts and calling `Rel::set_props()` to attach edge properties before execution.
+
 **Files:**
 - Modify: `src/sql/pgq.rs`
 - Create: `tests/slt/pgq_algorithms.slt`
