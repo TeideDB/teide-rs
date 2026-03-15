@@ -56,7 +56,7 @@ Iterative PageRank over CSR adjacency. Each iteration: for every node, sum `rank
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [ ] **Step 1: Add opcode constant and declaration to `td.h`**
+- [x] **Step 1: Add opcode constant and declaration to `td.h`**
 
 After the existing graph opcodes (line ~405 in td.h):
 ```c
@@ -79,7 +79,7 @@ td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel,
                      uint16_t max_iter);
 ```
 
-- [ ] **Step 2: Extend `td_op_ext_t` graph union for algorithm params**
+- [x] **Step 2: Extend `td_op_ext_t` graph union for algorithm params**
 
 In td.h, extend the graph union in `td_op_ext_t` (around line 501-509):
 ```c
@@ -98,7 +98,7 @@ struct {
 } graph;
 ```
 
-- [ ] **Step 3: Add PageRank builder function to `graph.c`**
+- [x] **Step 3: Add PageRank builder function to `graph.c`**
 
 ```c
 td_op_t* td_pagerank(td_graph_t* g, td_rel_t* rel,
@@ -122,7 +122,7 @@ td_op_t* td_pagerank(td_graph_t* g, td_rel_t* rel,
 }
 ```
 
-- [ ] **Step 4: Add PageRank kernel to `exec.c`**
+- [x] **Step 4: Add PageRank kernel to `exec.c`**
 
 ```c
 /*
@@ -217,7 +217,7 @@ static td_t* exec_pagerank(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [ ] **Step 5: Add dispatch case in `exec_node()`**
+- [x] **Step 5: Add dispatch case in `exec_node()`**
 
 In the switch statement in `exec_node()`:
 ```c
@@ -227,18 +227,18 @@ case OP_PAGERANK: {
 }
 ```
 
-- [ ] **Step 6: Add opcode name to `dump.c`**
+- [x] **Step 6: Add opcode name to `dump.c`**
 
 ```c
 case OP_PAGERANK:       return "PAGERANK";
 ```
 
-- [ ] **Step 7: Verify C engine compiles**
+- [x] **Step 7: Verify C engine compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS (build.rs compiles the C source)
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add vendor/teide/
