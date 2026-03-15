@@ -751,7 +751,7 @@ git commit -m "feat: add FFI bindings and safe wrappers for vector similarity an
 **Files:**
 - Modify: `tests/engine_api.rs`
 
-- [ ] **Step 1: Add embedding creation and cosine similarity test**
+- [x] **Step 1: Add embedding creation and cosine similarity test**
 
 ```rust
 #[test]
@@ -798,7 +798,7 @@ fn vector_cosine_similarity() {
 }
 ```
 
-- [ ] **Step 2: Add KNN test**
+- [x] **Step 2: Add KNN test**
 
 ```rust
 #[test]
@@ -838,12 +838,12 @@ fn vector_knn() {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test --all-features -- vector_cosine_similarity vector_knn`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/engine_api.rs

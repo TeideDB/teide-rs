@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::sync::Mutex;
 
-use teide::{extract_field, AggOp, Context, Rel, Table};
+use teide::{extract_field, ffi, AggOp, Context, Rel, Table};
 
 // The C engine uses global state — serialize all tests.
 static ENGINE_LOCK: Mutex<()> = Mutex::new(());
@@ -1329,4 +1329,146 @@ fn graph_louvain() {
         let c = result.get_i64(1, i).unwrap();
         assert!(c >= 0, "community ID should be non-negative");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vector Similarity Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vector_cosine_similarity() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    // Create a 3-row, 4-dimensional embedding column
+    let dim: i32 = 4;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // row 0: unit vector along x
+        0.0, 1.0, 0.0, 0.0, // row 1: unit vector along y
+        1.0, 1.0, 0.0, 0.0, // row 2: 45 degrees between x and y
+    ];
+    let emb_col = Table::create_embedding_column(&ctx, 3, dim, &embeddings).unwrap();
+
+    // Query: unit vector along x
+    let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+    // Create a dummy table to build a Graph
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    for i in 0..3 {
+        writeln!(csv_f, "{i}").unwrap();
+    }
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let sim = g.cosine_sim(emb_node, &query).unwrap();
+    // cosine_sim returns a raw F64 vector, use execute_raw
+    let result = g.execute_raw(sim).unwrap();
+
+    let len = unsafe { ffi::td_len(result) } as usize;
+    assert_eq!(len, 3);
+    let data = unsafe { std::slice::from_raw_parts(ffi::td_data(result) as *const f64, len) };
+
+    let s0 = data[0]; // row 0: cos(0) = 1.0
+    let s1 = data[1]; // row 1: cos(90) = 0.0
+    let s2 = data[2]; // row 2: cos(45) ~ 0.707
+
+    assert!((s0 - 1.0).abs() < 0.001, "row 0 should be 1.0, got {s0}");
+    assert!(s1.abs() < 0.001, "row 1 should be 0.0, got {s1}");
+    assert!(
+        (s2 - 0.7071).abs() < 0.01,
+        "row 2 should be ~0.707, got {s2}"
+    );
+
+    unsafe { ffi::td_release(result) };
+}
+
+#[test]
+fn vector_euclidean_distance() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 3;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, // row 0
+        0.0, 1.0, 0.0, // row 1
+        2.0, 0.0, 0.0, // row 2
+    ];
+    let emb_col = Table::create_embedding_column(&ctx, 3, dim, &embeddings).unwrap();
+
+    let query = vec![1.0f32, 0.0, 0.0];
+
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    for i in 0..3 {
+        writeln!(csv_f, "{i}").unwrap();
+    }
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let dist = g.euclidean_dist(emb_node, &query).unwrap();
+    let result = g.execute_raw(dist).unwrap();
+
+    let len = unsafe { ffi::td_len(result) } as usize;
+    assert_eq!(len, 3);
+    let data = unsafe { std::slice::from_raw_parts(ffi::td_data(result) as *const f64, len) };
+
+    let d0 = data[0]; // row 0: distance 0.0 (same point)
+    let d1 = data[1]; // row 1: distance sqrt(2) ~ 1.414
+    let d2 = data[2]; // row 2: distance 1.0
+
+    assert!(d0.abs() < 0.001, "row 0 should be 0.0, got {d0}");
+    assert!(
+        (d1 - std::f64::consts::SQRT_2).abs() < 0.01,
+        "row 1 should be ~1.414, got {d1}"
+    );
+    assert!((d2 - 1.0).abs() < 0.001, "row 2 should be 1.0, got {d2}");
+
+    unsafe { ffi::td_release(result) };
+}
+
+#[test]
+fn vector_knn() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 3;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, // row 0
+        0.9, 0.1, 0.0, // row 1: very similar to row 0
+        0.0, 1.0, 0.0, // row 2: orthogonal
+        0.0, 0.0, 1.0, // row 3: orthogonal
+        0.8, 0.2, 0.0, // row 4: similar to row 0
+    ];
+    let emb_col = Table::create_embedding_column(&ctx, 5, dim, &embeddings).unwrap();
+
+    let query = vec![1.0f32, 0.0, 0.0];
+
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    for i in 0..5 {
+        writeln!(csv_f, "{i}").unwrap();
+    }
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let knn_result = g.knn(emb_node, &query, 3).unwrap();
+    let result = g.execute(knn_result).unwrap();
+
+    // Should return 3 rows, sorted by similarity descending
+    assert_eq!(result.nrows(), 3);
+    // Top-1 should be row 0 (exact match, sim=1.0)
+    let top_rowid = result.get_i64(0, 0).unwrap();
+    assert_eq!(top_rowid, 0, "top result should be row 0");
+    let top_sim = result.get_f64(1, 0).unwrap();
+    assert!(
+        (top_sim - 1.0).abs() < 0.001,
+        "top similarity should be 1.0, got {top_sim}"
+    );
 }
