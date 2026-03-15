@@ -90,6 +90,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                     StoredTable {
                         table,
                         columns: result.columns,
+                        embedding_dims: result.embedding_dims,
                     },
                 );
                 if create.or_replace {
@@ -113,7 +114,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                 let ncols = columns.len();
                 let old_table = session
                     .tables
-                    .insert(table_name.clone(), StoredTable { table, columns });
+                    .insert(table_name.clone(), StoredTable { table, columns, embedding_dims: HashMap::new() });
                 if create.or_replace {
                     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
                         if let Some(old) = old_table {
@@ -306,11 +307,13 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
     // Rename columns to match target schema
     let merged = merged.with_column_names(&target_cols)?;
 
+    let prev_embedding_dims = stored.embedding_dims.clone();
     let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
             table: merged,
             columns: target_cols,
+            embedding_dims: prev_embedding_dims,
         },
     );
 
@@ -363,6 +366,7 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
             .collect();
 
         let mut g = session.ctx.graph(&stored.table)?;
+        g.column_embedding_dims = stored.embedding_dims.clone();
         let table_node = g.const_table(&stored.table)?;
         let pred = plan_expr(&mut g, selection, &schema)?;
         let not_pred = g.not(pred)?;
@@ -378,11 +382,13 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
     let new_table = new_table.with_column_names(&columns)?;
 
+    let prev_embedding_dims = stored.embedding_dims.clone();
     let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
             table: new_table,
             columns,
+            embedding_dims: prev_embedding_dims,
         },
     );
 
@@ -441,6 +447,7 @@ fn plan_update(
 
     let original_nrows = stored.table.nrows();
     let columns = stored.columns.clone();
+    let prev_embedding_dims = stored.embedding_dims.clone();
 
     let schema: HashMap<String, usize> = columns
         .iter()
@@ -472,6 +479,7 @@ fn plan_update(
             let count = {
                 let stored = session.tables.get(&table_name).unwrap();
                 let mut g2 = session.ctx.graph(&stored.table)?;
+                g2.column_embedding_dims = stored.embedding_dims.clone();
                 let t2 = g2.const_table(&stored.table)?;
                 let pred2 = plan_expr(&mut g2, where_expr, &schema)?;
                 let filtered = g2.filter(t2, pred2)?;
@@ -487,6 +495,7 @@ fn plan_update(
     let result = {
         let stored = session.tables.get(&table_name).unwrap();
         let mut g = session.ctx.graph(&stored.table)?;
+        g.column_embedding_dims = stored.embedding_dims.clone();
         let mut out_cols: Vec<Column> = Vec::with_capacity(columns.len());
 
         // Evaluate the WHERE predicate once (Column is Copy, so we reuse it).
@@ -535,6 +544,7 @@ fn plan_update(
         StoredTable {
             table: result,
             columns,
+            embedding_dims: prev_embedding_dims,
         },
     );
 
@@ -902,6 +912,7 @@ fn plan_query(
                 StoredTable {
                     table,
                     columns: result.columns,
+                    embedding_dims: result.embedding_dims,
                 },
             );
         }
@@ -974,6 +985,23 @@ fn plan_query(
                 result
             };
 
+            // Intersect embedding dims positionally: set operations are
+            // positional, so match left/right columns by index, not name.
+            let merged_dims: HashMap<String, i32> = left_result
+                .columns
+                .iter()
+                .zip(right_result.columns.iter())
+                .filter_map(|(left_name, right_name)| {
+                    let left_dim = left_result.embedding_dims.get(left_name)?;
+                    let right_dim = right_result.embedding_dims.get(right_name)?;
+                    if left_dim == right_dim {
+                        Some((left_name.clone(), *left_dim))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             // Apply ORDER BY and LIMIT from the outer query
             return apply_post_processing(
                 ctx,
@@ -981,6 +1009,7 @@ fn plan_query(
                 result,
                 left_result.columns,
                 effective_tables,
+                merged_dims,
             );
         }
         SetExpr::SetOperation {
@@ -1046,12 +1075,30 @@ fn plan_query(
                 result
             };
 
+            // Intersect embedding dims positionally: set operations are
+            // positional, so match left/right columns by index, not name.
+            let merged_dims: HashMap<String, i32> = left_result
+                .columns
+                .iter()
+                .zip(right_result.columns.iter())
+                .filter_map(|(left_name, right_name)| {
+                    let left_dim = left_result.embedding_dims.get(left_name)?;
+                    let right_dim = right_result.embedding_dims.get(right_name)?;
+                    if left_dim == right_dim {
+                        Some((left_name.clone(), *left_dim))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             return apply_post_processing(
                 ctx,
                 query,
                 result,
                 left_result.columns,
                 effective_tables,
+                merged_dims,
             );
         }
         _ => {
@@ -1068,7 +1115,7 @@ fn plan_query(
     // When FROM is a single subquery with window functions or GROUP BY,
     // equality predicates on PARTITION BY / GROUP BY keys are injected into the
     // subquery's WHERE before materialization — avoids processing all rows.
-    let (table, schema, effective_where): (Table, HashMap<String, usize>, Option<Expr>) = if select
+    let (table, schema, from_embedding_dims, effective_where): (Table, HashMap<String, usize>, HashMap<String, i32>, Option<Expr>) = if select
         .from
         .len()
         == 1
@@ -1098,22 +1145,22 @@ fn plan_query(
                     let result = plan_query(ctx, &modified, effective_tables)?;
                     let tbl = result.table.with_column_names(&result.columns)?;
                     let sch = build_result_schema(&tbl, &result.columns);
-                    (tbl, sch, join_conjunction(keep))
+                    (tbl, sch, result.embedding_dims, join_conjunction(keep))
                 } else {
-                    let (tbl, sch) = resolve_from(ctx, &select.from, effective_tables)?;
-                    (tbl, sch, select.selection.clone())
+                    let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+                    (tbl, sch, emb, select.selection.clone())
                 }
             } else {
-                let (tbl, sch) = resolve_from(ctx, &select.from, effective_tables)?;
-                (tbl, sch, select.selection.clone())
+                let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+                (tbl, sch, emb, select.selection.clone())
             }
         } else {
-            let (tbl, sch) = resolve_from(ctx, &select.from, effective_tables)?;
-            (tbl, sch, select.selection.clone())
+            let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+            (tbl, sch, emb, select.selection.clone())
         }
     } else {
-        let (tbl, sch) = resolve_from(ctx, &select.from, effective_tables)?;
-        (tbl, sch, select.selection.clone())
+        let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+        (tbl, sch, emb, select.selection.clone())
     };
 
     // Build SELECT alias → expression map (for GROUP BY on aliases)
@@ -1181,6 +1228,7 @@ fn plan_query(
             };
             {
                 let mut g = ctx.graph(&table)?;
+                g.column_embedding_dims = from_embedding_dims.clone();
                 let table_node = g.const_table(&table)?;
                 let pred = plan_expr(&mut g, &resolved, &schema)?;
                 let filtered = g.filter(table_node, pred)?;
@@ -1204,7 +1252,7 @@ fn plan_query(
 
     // Stage 1.5: Window functions (before GROUP BY)
     let (working_table, schema, select_items) = if has_windows {
-        let (wt, ws, wi) = plan_window_stage(ctx, &working_table, select_items, &schema)?;
+        let (wt, ws, wi) = plan_window_stage(ctx, &working_table, select_items, &schema, &from_embedding_dims)?;
         (wt, ws, std::borrow::Cow::Owned(wi))
     } else {
         (
@@ -1240,6 +1288,7 @@ fn plan_query(
             selection,
             group_limit,
             select.having.as_ref(),
+            &from_embedding_dims.clone(),
         )?
     } else if is_distinct {
         // DISTINCT without GROUP BY: use GROUP BY on all selected columns
@@ -1257,12 +1306,14 @@ fn plan_query(
         if can_passthrough {
             (working_table, aliases)
         } else {
+            let emb_dims = from_embedding_dims.clone();
             plan_expr_select(
                 ctx,
                 &working_table,
                 select_items,
                 &schema,
                 &hidden_order_cols,
+                &emb_dims,
             )?
         }
     };
@@ -1272,6 +1323,7 @@ fn plan_query(
             .map(|i| result_table.col_name_str(i).to_string())
             .collect();
         let mut g = ctx.graph(&result_table)?;
+        g.column_embedding_dims = from_embedding_dims.clone();
         let table_node = g.const_table(&result_table)?;
         let sort_node = plan_order_by(
             &mut g,
@@ -1330,9 +1382,62 @@ fn plan_query(
     let result_table = trim_to_visible_columns(ctx, result_table, &result_aliases)?;
 
     validate_result_table(&result_table)?;
+    // Propagate embedding dimensions for columns that appear in the result.
+    // This allows CTEs and derived tables to inherit dimension metadata.
+    // Only propagate for columns that are direct passthroughs of source
+    // embedding columns — computed expressions (e.g. `SELECT 0.0 AS embedding`)
+    // must NOT inherit embedding metadata even if the alias matches.
+    let source_dims = from_embedding_dims.clone();
+    // Map result alias -> source column name for all direct column references.
+    let alias_to_source: HashMap<String, String> = select_items
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::ExprWithAlias { expr, alias } => {
+                source_col_name(expr).map(|src| (alias.value.to_lowercase(), src))
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                source_col_name(expr).map(|src| (src.clone(), src))
+            }
+            _ => None,
+        })
+        .collect();
+    let has_wildcard = select_items.iter().any(|item| {
+        matches!(
+            item,
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+        )
+    });
+    // Collect aliases that are explicitly bound to non-column-reference
+    // expressions (e.g. `0.0 AS embedding`). These must NOT inherit source
+    // embedding metadata even when a wildcard is present.
+    let computed_aliases: HashSet<String> = select_items
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::ExprWithAlias { expr, alias } if source_col_name(expr).is_none() => {
+                Some(alias.value.to_lowercase())
+            }
+            _ => None,
+        })
+        .collect();
+    let result_embedding_dims: HashMap<String, i32> = result_aliases
+        .iter()
+        .filter_map(|col| {
+            if let Some(src) = alias_to_source.get(col) {
+                // Explicit column reference (named or aliased) — propagate.
+                source_dims.get(src).map(|&dim| (col.clone(), dim))
+            } else if has_wildcard && !computed_aliases.contains(col) {
+                // Wildcard-expanded columns keep their source embedding dims,
+                // but only if not shadowed by a computed expression alias.
+                source_dims.get(col).map(|&dim| (col.clone(), dim))
+            } else {
+                None
+            }
+        })
+        .collect();
     Ok(SqlResult {
         table: result_table,
         columns: result_aliases,
+        embedding_dims: result_embedding_dims,
     })
 }
 
@@ -1503,50 +1608,57 @@ fn extract_col_name(expr: &Expr) -> Result<String, SqlError> {
     }
 }
 
-/// Resolve the FROM clause into a working table + schema.
+/// Resolve the FROM clause into a working table + schema + embedding dims.
 /// Handles simple tables, table aliases, FROM subqueries, and JOINs.
+#[allow(clippy::type_complexity)]
 fn resolve_from(
     ctx: &Context,
     from: &[TableWithJoins],
     tables: Option<&HashMap<String, StoredTable>>,
-) -> Result<(Table, HashMap<String, usize>), SqlError> {
+) -> Result<(Table, HashMap<String, usize>, HashMap<String, i32>), SqlError> {
     if from.is_empty() {
         return Err(SqlError::Plan("Missing FROM clause".into()));
     }
 
     // Multiple FROM tables = implicit CROSS JOIN: SELECT * FROM t1, t2
     if from.len() > 1 {
-        let (mut result_table, mut result_schema) =
+        let (mut result_table, mut result_schema, mut result_emb_dims) =
             resolve_table_factor(ctx, &from[0].relation, tables)?;
+        let mut poisoned = HashSet::new();
         // Process joins on first table
         for join in &from[0].joins {
-            let (right_table, right_schema) = resolve_table_factor(ctx, &join.relation, tables)?;
+            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
             result_table = exec_cross_join(ctx, &result_table, &right_table)?;
             result_schema = build_schema(&result_table);
+            merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
             let _ = right_schema;
         }
         // Cross join with subsequent FROM tables
         for twj in &from[1..] {
-            let (right_table, _) = resolve_table_factor(ctx, &twj.relation, tables)?;
+            let (right_table, _, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
             result_table = exec_cross_join(ctx, &result_table, &right_table)?;
             result_schema = build_schema(&result_table);
+            merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
             for join in &twj.joins {
-                let (right_table2, _) = resolve_table_factor(ctx, &join.relation, tables)?;
+                let (right_table2, _, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
                 result_table = exec_cross_join(ctx, &result_table, &right_table2)?;
                 result_schema = build_schema(&result_table);
+                merge_embedding_dims(&mut result_emb_dims, right_emb2, &mut poisoned);
             }
         }
-        return Ok((result_table, result_schema));
+        return Ok((result_table, result_schema, result_emb_dims));
     }
 
     let twj = &from[0];
 
     // Resolve the base (left) table
-    let (mut left_table, mut left_schema) = resolve_table_factor(ctx, &twj.relation, tables)?;
+    let (mut left_table, mut left_schema, mut from_emb_dims) = resolve_table_factor(ctx, &twj.relation, tables)?;
 
     // Process JOINs
+    let mut join_poisoned = HashSet::new();
     for join in &twj.joins {
-        let (right_table, right_schema) = resolve_table_factor(ctx, &join.relation, tables)?;
+        let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+        merge_embedding_dims(&mut from_emb_dims, right_emb, &mut join_poisoned);
 
         // Determine join type
         let join_type: u8 = match &join.join_operator {
@@ -1665,15 +1777,16 @@ fn resolve_from(
         left_schema = merged_schema;
     }
 
-    Ok((left_table, left_schema))
+    Ok((left_table, left_schema, from_emb_dims))
 }
 
-/// Resolve a single TableFactor (table name or FROM subquery) into a table + schema.
+/// Resolve a single TableFactor (table name or FROM subquery) into a table + schema + embedding dims.
+#[allow(clippy::type_complexity)]
 fn resolve_table_factor(
     ctx: &Context,
     factor: &TableFactor,
     tables: Option<&HashMap<String, StoredTable>>,
-) -> Result<(Table, HashMap<String, usize>), SqlError> {
+) -> Result<(Table, HashMap<String, usize>, HashMap<String, i32>), SqlError> {
     match factor {
         TableFactor::Table { name, args, .. } => {
             let table_name = object_name_to_string(name);
@@ -1688,18 +1801,23 @@ fn resolve_table_factor(
                     .collect();
                 let table = table.with_column_names(&col_names)?;
                 let schema = build_schema(&table);
-                return Ok((table, schema));
+                return Ok((table, schema, HashMap::new()));
             }
+            let table_name_lower = table_name.to_lowercase();
+            let emb_dims = tables
+                .and_then(|t| t.get(&table_name_lower))
+                .map(|s| s.embedding_dims.clone())
+                .unwrap_or_default();
             let table = resolve_table(&table_name, tables)?;
             let schema = build_schema(&table);
-            Ok((table, schema))
+            Ok((table, schema, emb_dims))
         }
         TableFactor::Derived { subquery, .. } => {
             let result = plan_query(ctx, subquery, tables)?;
             // Rename columns to match SQL aliases so outer scans work
             let table = result.table.with_column_names(&result.columns)?;
             let schema = build_result_schema(&table, &result.columns);
-            Ok((table, schema))
+            Ok((table, schema, result.embedding_dims))
         }
         _ => Err(SqlError::Plan(
             "Only table references, table functions, and subqueries are supported in FROM".into(),
@@ -1743,6 +1861,7 @@ fn plan_group_select(
     selection: Option<*mut crate::td_t>,
     group_limit: Option<i64>,
     having: Option<&Expr>,
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<(Table, Vec<String>), SqlError> {
     // RAII guard: ensures the selection is released on all exit paths
     // (including early returns). set_selection does its own retain, so the
@@ -1871,11 +1990,13 @@ fn plan_group_select(
             &final_aliases,
             schema,
             alias_exprs,
+            embedding_dims,
         );
     }
 
     // Phase 2: Execute GROUP BY with keys + all unique aggregates
     let mut g = ctx.graph(working_table)?;
+    g.column_embedding_dims = embedding_dims.clone();
 
     let mut key_nodes: Vec<Column> = Vec::new();
     for k in &key_names {
@@ -2084,6 +2205,7 @@ fn plan_count_distinct_group(
     final_aliases: &[String],
     schema: &HashMap<String, usize>,
     alias_exprs: &HashMap<String, Expr>,
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<(Table, Vec<String>), SqlError> {
     // Collect the DISTINCT column names and regular aggs
     let mut distinct_cols: Vec<String> = Vec::new();
@@ -2121,6 +2243,7 @@ fn plan_count_distinct_group(
     }
 
     let mut g = ctx.graph(working_table)?;
+    g.column_embedding_dims = embedding_dims.clone();
     let mut key_nodes: Vec<Column> = Vec::new();
     for k in &phase1_keys {
         if let Some(expr) = alias_exprs.get(k) {
@@ -2288,8 +2411,10 @@ fn plan_expr_select(
     select_items: &[SelectItem],
     schema: &HashMap<String, usize>,
     hidden_order_cols: &[String],
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let mut g = ctx.graph(working_table)?;
+    g.column_embedding_dims = embedding_dims.clone();
     let table_node = g.const_table(working_table)?;
 
     let mut proj_cols = Vec::new();
@@ -2348,6 +2473,7 @@ fn plan_window_stage(
     table: &Table,
     select_items: &[SelectItem],
     schema: &HashMap<String, usize>,
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<WindowStageResult, SqlError> {
     let win_funcs = collect_window_functions(select_items)?;
     if win_funcs.is_empty() {
@@ -2379,6 +2505,7 @@ fn plan_window_stage(
     for (spec, func_indices) in spec_groups {
         let stage_result = {
             let mut g = ctx.graph(&current_table)?;
+            g.column_embedding_dims = embedding_dims.clone();
             let table_node = g.const_table(&current_table)?;
             let (frame_type, frame_start, frame_end) = parse_window_frame(&spec)?;
 
@@ -2968,6 +3095,7 @@ fn apply_post_processing(
     result_table: Table,
     result_aliases: Vec<String>,
     _tables: Option<&HashMap<String, StoredTable>>,
+    embedding_dims: HashMap<String, i32>,
 ) -> Result<SqlResult, SqlError> {
     // ORDER BY (optionally fused with LIMIT)
     let order_by_exprs = extract_order_by(query)?;
@@ -2979,6 +3107,7 @@ fn apply_post_processing(
             .map(|i| result_table.col_name_str(i).to_string())
             .collect();
         let mut g = ctx.graph(&result_table)?;
+        g.column_embedding_dims = embedding_dims.clone();
         let table_node = g.const_table(&result_table)?;
         let sort_node = plan_order_by(
             &mut g,
@@ -3033,6 +3162,7 @@ fn apply_post_processing(
     Ok(SqlResult {
         table: result_table,
         columns: result_aliases,
+        embedding_dims,
     })
 }
 
@@ -3080,6 +3210,50 @@ fn object_name_to_string(name: &ObjectName) -> String {
         .map(|ident| ident.value.clone())
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// Merge embedding dims from a right table into the left map.
+/// If both sides define the same bare column name with different dimensions,
+/// the entry is dropped to avoid silently trusting the wrong metadata.
+/// `poisoned` tracks names that have already been seen with conflicting dims
+/// so they are never reinserted by a later table.
+fn merge_embedding_dims(
+    left: &mut HashMap<String, i32>,
+    right: HashMap<String, i32>,
+    poisoned: &mut HashSet<String>,
+) {
+    for (name, dim) in right {
+        if poisoned.contains(&name) {
+            continue;
+        }
+        match left.entry(name) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                if *e.get() != dim {
+                    // Conflicting dimensions — remove and poison to prevent
+                    // a later table from reinserting.
+                    let key = e.key().clone();
+                    e.remove();
+                    poisoned.insert(key);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(dim);
+            }
+        }
+    }
+}
+
+/// Extract the source column name from an expression, unwrapping parentheses.
+/// Returns `Some(lowercase_name)` for bare identifiers and `table.col` forms.
+fn source_col_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+            Some(parts[1].value.to_lowercase())
+        }
+        Expr::Nested(inner) => source_col_name(inner),
+        _ => None,
+    }
 }
 
 /// Check that a table path is safe: no parent traversal or null bytes.

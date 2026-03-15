@@ -495,6 +495,8 @@ impl Context {
             engine: table.engine.clone(),
             _table: PhantomData,
             _pinned: Vec::new(),
+            embedding_dims: std::collections::HashMap::new(),
+            column_embedding_dims: std::collections::HashMap::new(),
         })
     }
 }
@@ -1139,6 +1141,16 @@ pub struct Graph<'a> {
     // Box pointers, not the inner data buffers. Therefore the raw pointers
     // stored by C remain valid for the lifetime of the Graph.
     _pinned: Vec<Box<dyn std::any::Any>>,
+    // Maps Column graph-node pointers to their known embedding dimension.
+    // Populated by `const_embedding`; checked by the `_owned` similarity methods
+    // to catch dimension mismatches that the C kernel cannot detect (cases where
+    // the wrong query length still evenly divides the flat buffer).
+    embedding_dims: std::collections::HashMap<*mut ffi::td_op_t, i32>,
+    // Maps column names to their known embedding dimensions.
+    // Populated by the SQL planner from StoredTable metadata; checked by the
+    // `_owned` similarity methods when the Column was obtained via scan()
+    // (where the pointer-based `embedding_dims` lookup would miss).
+    pub(crate) column_embedding_dims: std::collections::HashMap<String, i32>,
 }
 
 impl<'a> Graph<'a> {
@@ -1154,6 +1166,17 @@ impl<'a> Graph<'a> {
             return Err(Error::NullPointer); // graph operation failed (null result)
         }
         Ok(Column { raw })
+    }
+
+    /// If `emb_col` has a registered embedding dimension (via `const_embedding`),
+    /// verify that `query_dim` matches. Returns `Error::Length` on mismatch.
+    fn check_embedding_dim(&self, emb_col: Column, query_dim: i32) -> Result<()> {
+        if let Some(&expected) = self.embedding_dims.get(&emb_col.raw) {
+            if query_dim != expected {
+                return Err(Error::Length);
+            }
+        }
+        Ok(())
     }
 
     // ---- Source ops -------------------------------------------------------
@@ -1664,6 +1687,31 @@ impl<'a> Graph<'a> {
         Self::check_op(unsafe { ffi::td_const_vec(self.raw, vec) })
     }
 
+    /// Inject an embedding column into the graph and register its dimension.
+    ///
+    /// This is the preferred way to add embedding columns because it records
+    /// the dimension for later validation by `cosine_sim_owned`,
+    /// `euclidean_dist_owned`, and `knn_owned`.
+    ///
+    /// The caller must call `td_release` on `vec` after this returns, because
+    /// `const_vec` retains its own reference.
+    ///
+    /// # Safety
+    /// `vec` must be a valid embedding column created by
+    /// `Table::create_embedding_column` with the given `dim`.
+    pub unsafe fn const_embedding(
+        &mut self,
+        vec: *mut ffi::td_t,
+        dim: i32,
+    ) -> Result<Column> {
+        if dim <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let col = unsafe { self.const_vec(vec) }?;
+        self.embedding_dims.insert(col.raw, dim);
+        Ok(col)
+    }
+
     /// Set a boolean filter mask for group-by pushdown.
     /// Rows where mask[r]==0 are skipped in scan loops.
     ///
@@ -1834,6 +1882,7 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         Self::check_op(unsafe {
             ffi::td_cosine_sim(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
@@ -1841,6 +1890,9 @@ impl<'a> Graph<'a> {
 
     /// Like `cosine_sim`, but takes ownership of the query vector and pins it
     /// so that it remains valid until this `Graph` is dropped/executed.
+    ///
+    /// If `emb_col` was registered via `const_embedding`, the query vector
+    /// length is validated against the known embedding dimension.
     pub fn cosine_sim_owned(
         &mut self,
         emb_col: Column,
@@ -1850,6 +1902,7 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {
@@ -1872,12 +1925,16 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         Self::check_op(unsafe {
             ffi::td_euclidean_dist(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
     }
 
     /// Like `euclidean_dist`, but takes ownership of the query vector and pins it.
+    ///
+    /// If `emb_col` was registered via `const_embedding`, the query vector
+    /// length is validated against the known embedding dimension.
     pub fn euclidean_dist_owned(
         &mut self,
         emb_col: Column,
@@ -1887,6 +1944,7 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {
@@ -1914,12 +1972,16 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         Self::check_op(unsafe {
             ffi::td_knn(self.raw, emb_col.raw, query_vec.as_ptr(), dim, k)
         })
     }
 
     /// Like `knn`, but takes ownership of the query vector and pins it.
+    ///
+    /// If `emb_col` was registered via `const_embedding`, the query vector
+    /// length is validated against the known embedding dimension.
     pub fn knn_owned(
         &mut self,
         emb_col: Column,
@@ -1933,6 +1995,7 @@ impl<'a> Graph<'a> {
         if dim == 0 {
             return Err(Error::InvalidInput);
         }
+        self.check_embedding_dim(emb_col, dim)?;
         let ptr = query_vec.as_ptr();
         self._pinned.push(Box::new(query_vec));
         Self::check_op(unsafe {

@@ -1,4 +1,14 @@
 # Vector similarity functions
+#
+# NOTE: Positive tests for COSINE_SIMILARITY, EUCLIDEAN_DISTANCE, and KNN
+# cannot be written in SLT because embedding columns (TD_F32) can only be
+# created via the Rust API (Table::create_embedding_column). Positive
+# coverage is provided by the Rust integration tests in tests/engine_api.rs:
+#   - vector_cosine_similarity
+#   - vector_euclidean_distance
+#   - vector_knn
+#
+# The tests below validate SQL syntax parsing and error handling.
 
 # Setup: create a table
 statement ok
@@ -22,3 +32,11 @@ SELECT COSINE_SIMILARITY(id, 42) FROM docs
 # Test: EUCLIDEAN_DISTANCE rejects non-array second argument
 statement error
 SELECT EUCLIDEAN_DISTANCE(id, 42) FROM docs
+
+# Test: COSINE_SIMILARITY rejects empty array
+statement error
+SELECT COSINE_SIMILARITY(id, ARRAY[]) FROM docs
+
+# Test: EUCLIDEAN_DISTANCE rejects empty array
+statement error
+SELECT EUCLIDEAN_DISTANCE(id, ARRAY[]) FROM docs

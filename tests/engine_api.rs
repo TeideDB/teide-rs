@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::sync::Mutex;
 
-use teide::{extract_field, ffi, AggOp, Context, Rel, Table};
+use teide::{extract_field, ffi, AggOp, Context, Rel, Session, Table};
 
 // The C engine uses global state — serialize all tests.
 static ENGINE_LOCK: Mutex<()> = Mutex::new(());
@@ -1361,8 +1361,10 @@ fn vector_cosine_similarity() {
     csv_f.flush().unwrap();
     let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
 
-    let g = ctx.graph(&table).unwrap();
-    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    // const_embedding retains; release our reference.
+    unsafe { ffi::td_release(emb_col) };
     // SAFETY: `query` outlives the execute_raw() call below.
     let sim = unsafe { g.cosine_sim(emb_node, &query) }.unwrap();
     // cosine_sim returns a raw F64 vector, use execute_raw
@@ -1409,8 +1411,9 @@ fn vector_euclidean_distance() {
     csv_f.flush().unwrap();
     let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
 
-    let g = ctx.graph(&table).unwrap();
-    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    unsafe { ffi::td_release(emb_col) };
     // SAFETY: `query` outlives the execute_raw() call below.
     let dist = unsafe { g.euclidean_dist(emb_node, &query) }.unwrap();
     let result = g.execute_raw(dist).unwrap();
@@ -1458,8 +1461,9 @@ fn vector_knn() {
     csv_f.flush().unwrap();
     let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
 
-    let g = ctx.graph(&table).unwrap();
-    let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    unsafe { ffi::td_release(emb_col) };
     // SAFETY: `query` outlives the execute() call below.
     let knn_result = unsafe { g.knn(emb_node, &query, 3) }.unwrap();
     let result = g.execute(knn_result).unwrap();
@@ -1486,4 +1490,204 @@ fn vector_knn() {
     // Verify descending order
     assert!(sim0 >= sim1, "results should be sorted descending");
     assert!(sim1 >= sim2, "results should be sorted descending");
+}
+
+#[test]
+fn vector_cosine_sim_owned_dim_mismatch() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 4;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // row 0
+        0.0, 1.0, 0.0, 0.0, // row 1
+    ];
+    let emb_col = Table::create_embedding_column(&ctx, 2, dim, &embeddings).unwrap();
+
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    writeln!(csv_f, "0").unwrap();
+    writeln!(csv_f, "1").unwrap();
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    unsafe { ffi::td_release(emb_col) };
+
+    // Wrong dimension: 3 instead of 4 — should be caught by check_embedding_dim
+    let wrong_query = vec![1.0f32, 0.0, 0.0];
+    let result = g.cosine_sim_owned(emb_node, wrong_query);
+    assert!(result.is_err(), "cosine_sim_owned should reject dimension mismatch");
+
+    // Wrong dimension: 2 instead of 4 (evenly divides buffer — C kernel wouldn't catch this)
+    let wrong_query2 = vec![1.0f32, 0.0];
+    let result2 = g.cosine_sim_owned(emb_node, wrong_query2);
+    assert!(
+        result2.is_err(),
+        "cosine_sim_owned should reject dimension mismatch even when it evenly divides"
+    );
+}
+
+#[test]
+fn vector_euclidean_dist_owned_dim_mismatch() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 3;
+    let embeddings: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let emb_col = Table::create_embedding_column(&ctx, 2, dim, &embeddings).unwrap();
+
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    writeln!(csv_f, "0").unwrap();
+    writeln!(csv_f, "1").unwrap();
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    unsafe { ffi::td_release(emb_col) };
+
+    // Wrong dimension: 2 instead of 3 (evenly divides 6-element buffer)
+    let wrong_query = vec![1.0f32, 0.0];
+    let result = g.euclidean_dist_owned(emb_node, wrong_query);
+    assert!(
+        result.is_err(),
+        "euclidean_dist_owned should reject dimension mismatch"
+    );
+}
+
+#[test]
+fn vector_knn_owned_dim_mismatch() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 4;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // row 0
+        0.0, 1.0, 0.0, 0.0, // row 1
+    ];
+    let emb_col = Table::create_embedding_column(&ctx, 2, dim, &embeddings).unwrap();
+
+    let mut csv_f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(csv_f, "id").unwrap();
+    writeln!(csv_f, "0").unwrap();
+    writeln!(csv_f, "1").unwrap();
+    csv_f.flush().unwrap();
+    let table = ctx.read_csv(csv_f.path().to_str().unwrap()).unwrap();
+
+    let mut g = ctx.graph(&table).unwrap();
+    let emb_node = unsafe { g.const_embedding(emb_col, dim).unwrap() };
+    unsafe { ffi::td_release(emb_col) };
+
+    // Wrong dimension: 2 instead of 4 (evenly divides)
+    let wrong_query = vec![1.0f32, 0.0];
+    let result = g.knn_owned(emb_node, wrong_query, 1);
+    assert!(
+        result.is_err(),
+        "knn_owned should reject dimension mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SQL-level vector dimension validation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sql_cosine_similarity_dim_mismatch_simple() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    // Create table with embedding column and register its dimension
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_column("docs", "embedding", 4).unwrap();
+
+    // Wrong dimension: 3 instead of 4 — should be rejected
+    let result = session.execute(
+        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
+    );
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("should reject dimension mismatch via simple identifier"),
+    };
+    assert!(err.contains("dimension"), "error should mention dimension: {err}");
+}
+
+#[test]
+fn sql_cosine_similarity_dim_mismatch_qualified() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_column("docs", "embedding", 4).unwrap();
+
+    // Qualified reference: d.embedding — should also be validated
+    let result = session.execute(
+        "SELECT COSINE_SIMILARITY(d.embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs d"
+    );
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("should reject dimension mismatch via qualified identifier"),
+    };
+    assert!(err.contains("dimension"), "error should mention dimension: {err}");
+}
+
+#[test]
+fn sql_embedding_dims_preserved_after_insert() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0)").unwrap();
+    session.register_embedding_column("docs", "embedding", 4).unwrap();
+
+    // Insert more rows — embedding_dims should be preserved
+    session.execute("INSERT INTO docs VALUES (1, 'science', 0.0)").unwrap();
+
+    // Should still reject wrong dimension after insert
+    let result = session.execute(
+        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
+    );
+    assert!(result.is_err(), "should reject dimension mismatch after INSERT");
+}
+
+#[test]
+fn sql_embedding_dims_preserved_after_delete() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_column("docs", "embedding", 4).unwrap();
+
+    // Delete a row — embedding_dims should be preserved
+    session.execute("DELETE FROM docs WHERE id = 0").unwrap();
+
+    // Should still reject wrong dimension after delete
+    let result = session.execute(
+        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
+    );
+    assert!(result.is_err(), "should reject dimension mismatch after DELETE");
+}
+
+#[test]
+fn sql_embedding_dims_preserved_after_update() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_column("docs", "embedding", 4).unwrap();
+
+    // Update a row — embedding_dims should be preserved
+    session.execute("UPDATE docs SET name = 'mathematics' WHERE id = 0").unwrap();
+
+    // Should still reject wrong dimension after update
+    let result = session.execute(
+        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
+    );
+    assert!(result.is_err(), "should reject dimension mismatch after UPDATE");
 }

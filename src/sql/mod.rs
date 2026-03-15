@@ -74,6 +74,8 @@ pub struct SqlResult {
     pub table: Table,
     /// Column names/aliases as they appear in the SELECT list.
     pub columns: Vec<String>,
+    /// Embedding column dimensions inherited from the source table (if any).
+    pub embedding_dims: HashMap<String, i32>,
 }
 
 /// Result of executing a SQL statement via a Session.
@@ -88,6 +90,11 @@ pub enum ExecResult {
 pub(crate) struct StoredTable {
     pub table: Table,
     pub columns: Vec<String>,
+    /// Per-column embedding dimensions (column name → dim).
+    /// Populated by `Session::register_embedding_column`; used by the SQL
+    /// planner to validate query-vector lengths in COSINE_SIMILARITY /
+    /// EUCLIDEAN_DISTANCE calls.
+    pub embedding_dims: HashMap<String, i32>,
 }
 
 impl Clone for StoredTable {
@@ -95,6 +102,7 @@ impl Clone for StoredTable {
         StoredTable {
             table: self.table.clone_ref(),
             columns: self.columns.clone(),
+            embedding_dims: self.embedding_dims.clone(),
         }
     }
 }
@@ -119,6 +127,29 @@ impl Session {
             tables: HashMap::new(),
             graphs: HashMap::new(),
         })
+    }
+
+    /// Register an embedding column's dimension for a stored table.
+    /// This enables the SQL planner to validate query vector lengths
+    /// in COSINE_SIMILARITY / EUCLIDEAN_DISTANCE calls.
+    pub fn register_embedding_column(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        dim: i32,
+    ) -> Result<(), SqlError> {
+        let table_key = table_name.to_lowercase();
+        let col_key = column_name.to_lowercase();
+        let stored = self.tables.get_mut(&table_key).ok_or_else(|| {
+            SqlError::Plan(format!("Table '{table_name}' not found"))
+        })?;
+        if !stored.columns.iter().any(|c| c.to_lowercase() == col_key) {
+            return Err(SqlError::Plan(format!(
+                "Column '{column_name}' not found in table '{table_name}'"
+            )));
+        }
+        stored.embedding_dims.insert(col_key, dim);
+        Ok(())
     }
 
     /// Execute a SQL statement, which may be a SELECT, CREATE TABLE AS, DROP TABLE,
@@ -152,7 +183,7 @@ impl Session {
                 let (table, columns) = pgq::plan_graph_table(self, expr)?;
                 let previous = self.tables.insert(
                     temp_name.clone(),
-                    StoredTable { table, columns },
+                    StoredTable { table, columns, embedding_dims: HashMap::new() },
                 );
                 saved_tables.push((temp_name.clone(), previous));
             }

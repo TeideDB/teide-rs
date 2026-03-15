@@ -664,19 +664,59 @@ fn plan_scalar_function(
         // Vector similarity functions
         "cosine_similarity" => {
             check_arg_count(name, &args, 2)?;
-            let emb_col = plan_expr(g, &args[0], schema)?;
             let query_vec = parse_array_literal(&args[1])?;
+            check_vector_dim(g, &args[0], &query_vec, name)?;
+            let emb_col = plan_expr(g, &args[0], schema)?;
             Ok(g.cosine_sim_owned(emb_col, query_vec)?)
         }
         "euclidean_distance" => {
             check_arg_count(name, &args, 2)?;
-            let emb_col = plan_expr(g, &args[0], schema)?;
             let query_vec = parse_array_literal(&args[1])?;
+            check_vector_dim(g, &args[0], &query_vec, name)?;
+            let emb_col = plan_expr(g, &args[0], schema)?;
             Ok(g.euclidean_dist_owned(emb_col, query_vec)?)
         }
 
         _ => Err(SqlError::Plan(format!("Unsupported function: {name}"))),
     }
+}
+
+/// Extract the column name from an expression, unwrapping parentheses.
+fn extract_col_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+            Some(parts[1].value.to_lowercase())
+        }
+        Expr::Nested(inner) => extract_col_name(inner),
+        _ => None,
+    }
+}
+
+/// If `expr` is a column reference with a known embedding dimension
+/// (registered in `g.column_embedding_dims`), verify that `query_vec`
+/// has the matching length.  This catches dimension mismatches that the
+/// C kernel would silently accept when the wrong dimension happens to
+/// evenly divide the flat embedding buffer.
+fn check_vector_dim(
+    g: &Graph,
+    expr: &Expr,
+    query_vec: &[f32],
+    func_name: &str,
+) -> Result<(), SqlError> {
+    let col_name = extract_col_name(expr);
+    if let Some(col_name) = col_name {
+        if let Some(&expected) = g.column_embedding_dims.get(&col_name) {
+            let actual = query_vec.len() as i32;
+            if actual != expected {
+                return Err(SqlError::Plan(format!(
+                    "{func_name}: query vector dimension {actual} does not match \
+                     embedding column '{col_name}' dimension {expected}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse an ARRAY[...] literal into a Vec<f32>.
