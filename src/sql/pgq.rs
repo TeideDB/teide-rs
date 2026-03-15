@@ -633,15 +633,17 @@ fn apply_node_filter(
         lhs.to_lowercase()
     };
     let value = parts[1].trim();
+    // Remove internal spaces from value to handle tokenizer artifacts (e.g., "- 1" -> "-1")
+    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
 
     let scan_col = g.scan(&col_name)?;
 
     let const_col = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
         let s = value[1..value.len() - 1].replace("''", "'");
         g.const_str(&s)?
-    } else if let Ok(n) = value.parse::<i64>() {
+    } else if let Ok(n) = value_nospace.parse::<i64>() {
         g.const_i64(n)?
-    } else if let Ok(f) = value.parse::<f64>() {
+    } else if let Ok(f) = value_nospace.parse::<f64>() {
         g.const_f64(f)?
     } else {
         return Err(SqlError::Plan(format!(
@@ -1434,6 +1436,8 @@ fn extract_node_id(
         lhs.to_lowercase()
     };
     let value = parts[1].trim();
+    // Remove internal spaces from value to handle tokenizer artifacts (e.g., "- 1" -> "-1")
+    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
 
     // Scan the table to find the matching row and return its row index.
     let stored = session.tables.get(table_name).ok_or_else(|| {
@@ -1451,13 +1455,20 @@ fn extract_node_id(
         None
     };
 
-    let int_val = if str_val.is_none() { value.parse::<i64>().ok() } else { None };
+    let int_val = if str_val.is_none() { value_nospace.parse::<i64>().ok() } else { None };
+    let float_val = if str_val.is_none() && int_val.is_none() {
+        value_nospace.parse::<f64>().ok()
+    } else {
+        None
+    };
 
     for row in 0..nrows {
         let matched = if let Some(ref sv) = str_val {
             stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
         } else if let Some(iv) = int_val {
             stored.table.get_i64(col_idx, row) == Some(iv)
+        } else if let Some(fv) = float_val {
+            stored.table.get_f64(col_idx, row) == Some(fv)
         } else {
             false
         };
@@ -1522,10 +1533,16 @@ fn plan_algorithm_query(
         graph.vertex_labels.get(label).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
         })?
-    } else {
+    } else if graph.vertex_labels.len() == 1 {
         graph.vertex_labels.values().next().ok_or_else(|| {
             SqlError::Plan("Graph has no vertex labels".into())
         })?
+    } else if graph.vertex_labels.is_empty() {
+        return Err(SqlError::Plan("Graph has no vertex labels".into()));
+    } else {
+        return Err(SqlError::Plan(
+            "Graph has multiple vertex labels; specify one explicitly in the MATCH pattern (e.g., (n:Label))".into(),
+        ));
     };
 
     let vertex_stored = session.tables.get(&vertex_label.table_name).ok_or_else(|| {
