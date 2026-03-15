@@ -1810,6 +1810,59 @@ impl<'a> Graph<'a> {
             ffi::td_louvain(self.raw, rel.ptr, max_iter)
         })
     }
+
+    // --- Vector similarity ops ---
+
+    /// Compute cosine similarity between an embedding column and a query vector.
+    /// Returns an F64 column with one similarity value per row.
+    ///
+    /// # Safety
+    /// The `query_vec` slice must remain valid until `execute()` is called,
+    /// because the C engine stores a raw pointer to it.
+    pub fn cosine_sim(
+        &self,
+        emb_col: Column,
+        query_vec: &[f32],
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        Self::check_op(unsafe {
+            ffi::td_cosine_sim(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
+        })
+    }
+
+    /// Compute euclidean distance between an embedding column and a query vector.
+    /// Returns an F64 column with one distance value per row.
+    ///
+    /// # Safety
+    /// The `query_vec` slice must remain valid until `execute()` is called.
+    pub fn euclidean_dist(
+        &self,
+        emb_col: Column,
+        query_vec: &[f32],
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        Self::check_op(unsafe {
+            ffi::td_euclidean_dist(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
+        })
+    }
+
+    /// Brute-force K nearest neighbor search on an embedding column.
+    /// Returns a table with `_rowid` (I64) and `_similarity` (F64) columns,
+    /// sorted by similarity descending.
+    ///
+    /// # Safety
+    /// The `query_vec` slice must remain valid until `execute()` is called.
+    pub fn knn(
+        &self,
+        emb_col: Column,
+        query_vec: &[f32],
+        k: i64,
+    ) -> Result<Column> {
+        let dim = query_vec.len() as i32;
+        Self::check_op(unsafe {
+            ffi::td_knn(self.raw, emb_col.raw, query_vec.as_ptr(), dim, k)
+        })
+    }
 }
 
 impl Drop for Graph<'_> {

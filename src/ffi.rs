@@ -241,6 +241,11 @@ pub const OP_CONNECTED_COMP: u16 = 85;
 pub const OP_DIJKSTRA: u16 = 86;
 pub const OP_LOUVAIN: u16 = 87;
 
+// Vector similarity ops
+pub const OP_COSINE_SIM: u16 = 88;
+pub const OP_EUCLIDEAN_DIST: u16 = 89;
+pub const OP_KNN: u16 = 90;
+
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
 pub const TD_WIN_RANK: u8 = 1;
@@ -978,6 +983,25 @@ extern "C" {
 
     // --- Embedding / Vector ops ---
     pub fn td_embedding_new(nrows: i64, dim: i32) -> *mut td_t;
+    pub fn td_cosine_sim(
+        g: *mut td_graph_t,
+        emb_col: *mut td_op_t,
+        query_vec: *const f32,
+        dim: i32,
+    ) -> *mut td_op_t;
+    pub fn td_euclidean_dist(
+        g: *mut td_graph_t,
+        emb_col: *mut td_op_t,
+        query_vec: *const f32,
+        dim: i32,
+    ) -> *mut td_op_t;
+    pub fn td_knn(
+        g: *mut td_graph_t,
+        emb_col: *mut td_op_t,
+        query_vec: *const f32,
+        dim: i32,
+        k: i64,
+    ) -> *mut td_op_t;
 
     // --- CSV API ---
     pub fn td_read_csv(path: *const c_char) -> *mut td_t;

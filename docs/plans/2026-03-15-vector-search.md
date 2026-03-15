@@ -646,7 +646,7 @@ git commit -m "feat(engine): add brute-force KNN search kernel with max-heap top
 - Modify: `src/ffi.rs`
 - Modify: `src/engine.rs`
 
-- [ ] **Step 1: Add FFI declarations to `src/ffi.rs`**
+- [x] **Step 1: Add FFI declarations to `src/ffi.rs`**
 
 ```rust
 pub const OP_COSINE_SIM: u16 = 88;
@@ -679,7 +679,7 @@ In the `extern "C"` block:
     ) -> *mut td_op_t;
 ```
 
-- [ ] **Step 2: Add safe wrappers to `src/engine.rs`**
+- [x] **Step 2: Add safe wrappers to `src/engine.rs`**
 
 In `impl Graph`:
 ```rust
@@ -732,12 +732,12 @@ In `impl Graph`:
     }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/ffi.rs src/engine.rs
