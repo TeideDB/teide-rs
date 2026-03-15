@@ -36,9 +36,9 @@ use crate::{Column, Context, Graph, Table};
 
 use super::expr::{
     agg_op_from_name, collect_aggregates, collect_window_functions, expr_default_name,
-    format_agg_name, has_window_functions, is_aggregate, is_count_distinct, is_pure_aggregate,
-    parse_window_frame, plan_agg_input, plan_expr, plan_having_expr, plan_post_agg_expr,
-    predict_c_agg_name,
+    extract_col_name as try_extract_col_name, format_agg_name, has_window_functions, is_aggregate,
+    is_count_distinct, is_pure_aggregate, parse_window_frame, plan_agg_input, plan_expr,
+    plan_having_expr, plan_post_agg_expr, predict_c_agg_name,
 };
 use super::{ExecResult, Session, SqlError, SqlResult, StoredTable};
 
@@ -264,16 +264,16 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         .ok_or_else(|| SqlError::Plan("INSERT INTO requires VALUES or SELECT".into()))?;
 
     // Build source table from VALUES or SELECT
-    let (source_table, source_cols) = match source_query.body.as_ref() {
+    let (source_table, source_cols, source_emb_dims) = match source_query.body.as_ref() {
         SetExpr::Values(values) => {
             let tbl = build_table_from_values(values, &target_types, &target_cols)?;
             let cols = target_cols.clone();
-            (tbl, cols)
+            (tbl, cols, HashMap::new())
         }
         _ => {
             // Treat as a subquery (SELECT ...)
             let result = plan_query(&session.ctx, source_query, Some(&session.tables))?;
-            (result.table, result.columns)
+            (result.table, result.columns, result.embedding_dims)
         }
     };
 
@@ -297,6 +297,21 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         }
         source_table
     };
+
+    // Validate embedding dimension compatibility: if the target table has
+    // registered embedding dims and the source also carries dim metadata for
+    // the same column, the dimensions must match.  Mismatched dimensions
+    // would silently corrupt the flat F32 buffer after concat.
+    for (col_name, &target_dim) in &stored.embedding_dims {
+        if let Some(&source_dim) = source_emb_dims.get(col_name) {
+            if source_dim != target_dim {
+                return Err(SqlError::Plan(format!(
+                    "INSERT INTO: embedding column '{col_name}' dimension mismatch \
+                     (source has {source_dim}, target has {target_dim})"
+                )));
+            }
+        }
+    }
 
     let nrows = source_table.nrows();
 
@@ -987,20 +1002,15 @@ fn plan_query(
 
             // Intersect embedding dims positionally: set operations are
             // positional, so match left/right columns by index, not name.
-            let merged_dims: HashMap<String, i32> = left_result
-                .columns
-                .iter()
-                .zip(right_result.columns.iter())
-                .filter_map(|(left_name, right_name)| {
-                    let left_dim = left_result.embedding_dims.get(left_name)?;
-                    let right_dim = right_result.embedding_dims.get(right_name)?;
-                    if left_dim == right_dim {
-                        Some((left_name.clone(), *left_dim))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // Error on dimension mismatch to prevent silent data corruption
+            // when concatenating flat F32 embedding buffers.
+            let merged_dims = intersect_embedding_dims_positional(
+                &left_result.columns,
+                &left_result.embedding_dims,
+                &right_result.columns,
+                &right_result.embedding_dims,
+                "UNION",
+            )?;
 
             // Apply ORDER BY and LIMIT from the outer query
             return apply_post_processing(
@@ -1075,22 +1085,15 @@ fn plan_query(
                 result
             };
 
-            // Intersect embedding dims positionally: set operations are
-            // positional, so match left/right columns by index, not name.
-            let merged_dims: HashMap<String, i32> = left_result
-                .columns
-                .iter()
-                .zip(right_result.columns.iter())
-                .filter_map(|(left_name, right_name)| {
-                    let left_dim = left_result.embedding_dims.get(left_name)?;
-                    let right_dim = right_result.embedding_dims.get(right_name)?;
-                    if left_dim == right_dim {
-                        Some((left_name.clone(), *left_dim))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // Intersect embedding dims positionally: error on dimension
+            // mismatch to prevent silent data corruption.
+            let merged_dims = intersect_embedding_dims_positional(
+                &left_result.columns,
+                &left_result.embedding_dims,
+                &right_result.columns,
+                &right_result.embedding_dims,
+                &format!("{:?}", op),
+            )?;
 
             return apply_post_processing(
                 ctx,
@@ -1393,10 +1396,10 @@ fn plan_query(
         .iter()
         .filter_map(|item| match item {
             SelectItem::ExprWithAlias { expr, alias } => {
-                source_col_name(expr).map(|src| (alias.value.to_lowercase(), src))
+                try_extract_col_name(expr).map(|src| (alias.value.to_lowercase(), src))
             }
             SelectItem::UnnamedExpr(expr) => {
-                source_col_name(expr).map(|src| (src.clone(), src))
+                try_extract_col_name(expr).map(|src| (src.clone(), src))
             }
             _ => None,
         })
@@ -1413,7 +1416,7 @@ fn plan_query(
     let computed_aliases: HashSet<String> = select_items
         .iter()
         .filter_map(|item| match item {
-            SelectItem::ExprWithAlias { expr, alias } if source_col_name(expr).is_none() => {
+            SelectItem::ExprWithAlias { expr, alias } if try_extract_col_name(expr).is_none() => {
                 Some(alias.value.to_lowercase())
             }
             _ => None,
@@ -3243,18 +3246,32 @@ fn merge_embedding_dims(
     }
 }
 
-/// Extract the source column name from an expression, unwrapping parentheses.
-/// Returns `Some(lowercase_name)` for bare identifiers and `table.col` forms.
-fn source_col_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
-        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-            Some(parts[1].value.to_lowercase())
+/// Intersect embedding dims from two set-operation sides, matched by column
+/// position.  Returns an error if both sides define dims for the same
+/// positional column but with different values (would corrupt the flat F32
+/// buffer after concat).
+fn intersect_embedding_dims_positional(
+    left_cols: &[String],
+    left_dims: &HashMap<String, i32>,
+    right_cols: &[String],
+    right_dims: &HashMap<String, i32>,
+    op_name: &str,
+) -> Result<HashMap<String, i32>, SqlError> {
+    let mut merged = HashMap::new();
+    for (left_name, right_name) in left_cols.iter().zip(right_cols.iter()) {
+        if let (Some(&ld), Some(&rd)) = (left_dims.get(left_name), right_dims.get(right_name)) {
+            if ld != rd {
+                return Err(SqlError::Plan(format!(
+                    "{op_name}: embedding column '{left_name}' dimension mismatch \
+                     (left has {ld}, right has {rd})"
+                )));
+            }
+            merged.insert(left_name.clone(), ld);
         }
-        Expr::Nested(inner) => source_col_name(inner),
-        _ => None,
     }
+    Ok(merged)
 }
+
 
 /// Check that a table path is safe: no parent traversal or null bytes.
 /// Absolute paths are allowed (local library, user has full file access).

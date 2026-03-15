@@ -682,7 +682,7 @@ fn plan_scalar_function(
 }
 
 /// Extract the column name from an expression, unwrapping parentheses.
-fn extract_col_name(expr: &Expr) -> Option<String> {
+pub(crate) fn extract_col_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
         Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
