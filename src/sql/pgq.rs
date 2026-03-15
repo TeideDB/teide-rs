@@ -825,15 +825,12 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlE
     )))
 }
 
-/// Quote a string value for CSV: wrap in double quotes if it contains
-/// commas, newlines, or quotes. Escape embedded double quotes by doubling.
+/// Quote a string value for CSV: always wrap in double quotes to preserve
+/// string type through CSV round-trip (prevents "123" from being parsed as
+/// an integer). Escape embedded double quotes by doubling.
 fn csv_quote(s: &str) -> String {
-    if s.contains(',') || s.contains('\n') || s.contains('"') || s.contains('\r') {
-        let escaped = s.replace('"', "\"\"");
-        format!("\"{escaped}\"")
-    } else {
-        s.to_string()
-    }
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -1354,6 +1351,7 @@ fn reconstruct_shortest_path(
     // This is needed when min_depth > shortest_depth: the shortest path to an
     // intermediate node may be too short, but a longer path through that node
     // may reach dst_id at the required depth.
+    const MAX_BFS_STATES: usize = 1_000_000;
     let mut visited: HashSet<(i64, i64)> = HashSet::new();
     // predecessor map: (node, depth) -> predecessor_node
     let mut pred_map: HM<(i64, i64), i64> = HM::new();
@@ -1362,6 +1360,12 @@ fn reconstruct_shortest_path(
     frontier.push_back((src_id, 0i64));
 
     while let Some((node, depth)) = frontier.pop_front() {
+        if visited.len() > MAX_BFS_STATES {
+            return Err(SqlError::Plan(format!(
+                "SHORTEST_PATH BFS exceeded {MAX_BFS_STATES} states — graph too large or \
+                 path quantifier range too wide. Try narrowing the hop range."
+            )));
+        }
         if node == dst_id && depth >= min_depth {
             // Reconstruct path by following pred_map backwards
             let mut path = vec![dst_id];
