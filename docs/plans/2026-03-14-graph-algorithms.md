@@ -1026,7 +1026,54 @@ fn graph_connected_comp() {
 }
 ```
 
-- [x] **Step 3: Add Louvain test**
+- [x] **Step 3: Add Dijkstra test**
+
+```rust
+#[test]
+fn graph_dijkstra() {
+    let _guard = lock();
+    // Create a weighted edge table: src, dst, weight
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst,weight").unwrap();
+    writeln!(f, "0,1,1.0").unwrap();
+    writeln!(f, "0,2,4.0").unwrap();
+    writeln!(f, "1,3,2.0").unwrap();
+    writeln!(f, "2,3,1.0").unwrap();
+    writeln!(f, "3,4,3.0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let g = ctx.graph(&edges).unwrap();
+    let src = g.const_i64(0).unwrap();
+    let dst = g.const_i64(4).unwrap();
+    let dj = g.dijkstra(src, Some(dst), &rel, "weight", 255).unwrap();
+    let result = g.execute(dj).unwrap();
+
+    // Should find path 0→1→3→4 with total weight 1+2+3=6.0
+    // Or 0→2→3→4 with weight 4+1+3=8.0
+    // Dijkstra should return the shorter: 6.0
+    assert!(result.nrows() > 0, "should find a path");
+
+    // Check that node 4 is reachable with distance 6.0
+    let nrows = result.nrows() as usize;
+    let mut found_dst = false;
+    for i in 0..nrows {
+        let node = result.get_i64(0, i).unwrap();
+        if node == 4 {
+            let dist = result.get_f64(1, i).unwrap();
+            assert!((dist - 6.0).abs() < 0.001, "shortest distance to 4 should be 6.0, got {dist}");
+            found_dst = true;
+        }
+    }
+    assert!(found_dst, "destination node 4 should be in results");
+}
+```
+
+- [x] **Step 4: Add Louvain test**
 
 ```rust
 #[test]
@@ -1053,21 +1100,21 @@ fn graph_louvain() {
 
 - [x] **Step 4: Run tests**
 
-Run: `cargo test --all-features -- graph_pagerank graph_connected_comp graph_louvain`
+Run: `cargo test --all-features -- graph_pagerank graph_connected_comp graph_dijkstra graph_louvain`
 Expected: PASS
 
 - [x] **Step 5: Commit**
 
 ```bash
 git add tests/engine_api.rs
-git commit -m "test: add Rust API tests for PageRank, connected components, Louvain"
+git commit -m "test: add Rust API tests for PageRank, connected components, Dijkstra, Louvain"
 ```
 
 ---
 
 ## Task 7: SQL/PGQ Integration
 
-Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()`.
+Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()`, and `SHORTEST_DISTANCE()`.
 
 **Files:**
 - Modify: `src/sql/pgq.rs`
@@ -1080,12 +1127,13 @@ In the COLUMNS projection logic, handle algorithm function calls. Add a new func
 
 ```rust
 /// Execute a graph algorithm and return its result as a stored temp table.
-/// Called when COLUMNS contains PAGERANK(), COMPONENT(), or COMMUNITY().
+/// Called when COLUMNS contains PAGERANK(), COMPONENT(), COMMUNITY(), or SHORTEST_DISTANCE().
 pub(crate) fn execute_graph_algorithm(
     session: &Session,
     graph: &PropertyGraph,
     func_name: &str,
     edge_label_name: &str,
+    args: &[String],  // additional args (e.g., src/dst node IDs, weight column)
 ) -> Result<Table, SqlError> {
     let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
         SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
@@ -1103,6 +1151,24 @@ pub(crate) fn execute_graph_algorithm(
         "pagerank" => g.pagerank(&stored_rel.rel, 20, 0.85)?,
         "component" | "connected_component" => g.connected_comp(&stored_rel.rel)?,
         "community" | "louvain" => g.louvain(&stored_rel.rel, 100)?,
+        "shortest_distance" | "dijkstra" => {
+            // Args: src_id, dst_id, weight_col
+            if args.len() < 3 {
+                return Err(SqlError::Plan(
+                    "SHORTEST_DISTANCE requires 3 args: src_id, dst_id, weight_col".into()
+                ));
+            }
+            let src_id: i64 = args[0].parse().map_err(|_| {
+                SqlError::Plan(format!("Invalid source node ID: {}", args[0]))
+            })?;
+            let dst_id: i64 = args[1].parse().map_err(|_| {
+                SqlError::Plan(format!("Invalid destination node ID: {}", args[1]))
+            })?;
+            let weight_col = &args[2];
+            let src = g.const_i64(src_id)?;
+            let dst = g.const_i64(dst_id)?;
+            g.dijkstra(src, Some(dst), &stored_rel.rel, weight_col, 255)?
+        }
         _ => return Err(SqlError::Plan(format!(
             "Unknown graph algorithm: {func_name}"
         ))),
@@ -1155,6 +1221,23 @@ SELECT COUNT(DISTINCT community) FROM GRAPH_TABLE (social MATCH (p:Person) COLUM
 1
 ```
 
+# Dijkstra: weighted shortest path (need weighted edge table)
+statement ok
+CREATE TABLE weighted_edges (src INTEGER, dst INTEGER, weight DOUBLE)
+
+statement ok
+INSERT INTO weighted_edges VALUES (0, 1, 1.0), (0, 2, 4.0), (1, 3, 2.0), (2, 3, 1.0), (3, 4, 3.0)
+
+statement ok
+CREATE PROPERTY GRAPH weighted VERTEX TABLES (persons LABEL Person) EDGE TABLES (weighted_edges SOURCE KEY (src) REFERENCES persons (id) DESTINATION KEY (dst) REFERENCES persons (id) LABEL Knows)
+
+# Shortest weighted distance from 0 to 4: 0→1→3→4 = 1+2+3 = 6.0
+query I
+SELECT COUNT(*) FROM GRAPH_TABLE (weighted MATCH (a:Person WHERE a.id = 0)-[:Knows]->(b:Person WHERE b.id = 4) COLUMNS (SHORTEST_DISTANCE(weighted, a, b, 'weight') AS dist)) WHERE dist > 0
+----
+1
+```
+
 Note: exact output values for PageRank/Louvain depend on convergence, so tests check invariants rather than specific values.
 
 - [x] **Step 3: Add SLT runner**
@@ -1176,7 +1259,7 @@ Expected: All PASS
 
 ```bash
 git add src/sql/pgq.rs tests/slt/pgq_algorithms.slt tests/slt_runner.rs
-git commit -m "feat(pgq): expose PageRank, connected components, and community detection via GRAPH_TABLE"
+git commit -m "feat(pgq): expose PageRank, connected components, Dijkstra, and community detection via GRAPH_TABLE"
 ```
 
 ---
