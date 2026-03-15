@@ -721,12 +721,17 @@ impl Table {
     /// The returned pointer is owned by the caller and must eventually be
     /// released via `td_release` (or passed to a graph op that takes ownership).
     pub fn create_embedding_column(
-        _ctx: &Context,
         nrows: i64,
         dim: i32,
         data: &[f32],
     ) -> Result<*mut ffi::td_t> {
-        if data.len() != (nrows * dim as i64) as usize {
+        if nrows <= 0 || dim <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let expected = (nrows as usize)
+            .checked_mul(dim as usize)
+            .ok_or(Error::Length)?;
+        if data.len() != expected {
             return Err(Error::Length);
         }
         let col = unsafe { ffi::td_embedding_new(nrows, dim) };
@@ -1819,7 +1824,11 @@ impl<'a> Graph<'a> {
     /// # Safety
     /// The `query_vec` slice must remain valid until `execute()` is called,
     /// because the C engine stores a raw pointer to it.
-    pub fn cosine_sim(
+    ///
+    /// # Safety
+    /// The caller must ensure `query_vec` outlives the next `execute()` call.
+    /// Prefer `cosine_sim_owned` for a safe alternative.
+    pub unsafe fn cosine_sim(
         &self,
         emb_col: Column,
         query_vec: &[f32],
@@ -1849,8 +1858,9 @@ impl<'a> Graph<'a> {
     /// Returns an F64 column with one distance value per row.
     ///
     /// # Safety
-    /// The `query_vec` slice must remain valid until `execute()` is called.
-    pub fn euclidean_dist(
+    /// The caller must ensure `query_vec` outlives the next `execute()` call.
+    /// Prefer `euclidean_dist_owned` for a safe alternative.
+    pub unsafe fn euclidean_dist(
         &self,
         emb_col: Column,
         query_vec: &[f32],
@@ -1880,8 +1890,9 @@ impl<'a> Graph<'a> {
     /// sorted by similarity descending.
     ///
     /// # Safety
-    /// The `query_vec` slice must remain valid until `execute()` is called.
-    pub fn knn(
+    /// The caller must ensure `query_vec` outlives the next `execute()` call.
+    /// Prefer `knn_owned` for a safe alternative.
+    pub unsafe fn knn(
         &self,
         emb_col: Column,
         query_vec: &[f32],

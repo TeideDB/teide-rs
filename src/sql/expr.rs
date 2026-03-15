@@ -683,6 +683,11 @@ fn plan_scalar_function(
 fn parse_array_literal(expr: &Expr) -> Result<Vec<f32>, SqlError> {
     match expr {
         Expr::Array(Array { elem, .. }) => {
+            if elem.is_empty() {
+                return Err(SqlError::Plan(
+                    "ARRAY literal must not be empty".into(),
+                ));
+            }
             let mut values = Vec::with_capacity(elem.len());
             for e in elem {
                 match e {

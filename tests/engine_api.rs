@@ -1347,7 +1347,7 @@ fn vector_cosine_similarity() {
         0.0, 1.0, 0.0, 0.0, // row 1: unit vector along y
         1.0, 1.0, 0.0, 0.0, // row 2: 45 degrees between x and y
     ];
-    let emb_col = Table::create_embedding_column(&ctx, 3, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(3, dim, &embeddings).unwrap();
 
     // Query: unit vector along x
     let query = vec![1.0f32, 0.0, 0.0, 0.0];
@@ -1363,7 +1363,8 @@ fn vector_cosine_similarity() {
 
     let g = ctx.graph(&table).unwrap();
     let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
-    let sim = g.cosine_sim(emb_node, &query).unwrap();
+    // SAFETY: `query` outlives the execute_raw() call below.
+    let sim = unsafe { g.cosine_sim(emb_node, &query) }.unwrap();
     // cosine_sim returns a raw F64 vector, use execute_raw
     let result = g.execute_raw(sim).unwrap();
 
@@ -1396,7 +1397,7 @@ fn vector_euclidean_distance() {
         0.0, 1.0, 0.0, // row 1
         2.0, 0.0, 0.0, // row 2
     ];
-    let emb_col = Table::create_embedding_column(&ctx, 3, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(3, dim, &embeddings).unwrap();
 
     let query = vec![1.0f32, 0.0, 0.0];
 
@@ -1410,7 +1411,8 @@ fn vector_euclidean_distance() {
 
     let g = ctx.graph(&table).unwrap();
     let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
-    let dist = g.euclidean_dist(emb_node, &query).unwrap();
+    // SAFETY: `query` outlives the execute_raw() call below.
+    let dist = unsafe { g.euclidean_dist(emb_node, &query) }.unwrap();
     let result = g.execute_raw(dist).unwrap();
 
     let len = unsafe { ffi::td_len(result) } as usize;
@@ -1444,7 +1446,7 @@ fn vector_knn() {
         0.0, 0.0, 1.0, // row 3: orthogonal
         0.8, 0.2, 0.0, // row 4: similar to row 0
     ];
-    let emb_col = Table::create_embedding_column(&ctx, 5, dim, &embeddings).unwrap();
+    let emb_col = Table::create_embedding_column(5, dim, &embeddings).unwrap();
 
     let query = vec![1.0f32, 0.0, 0.0];
 
@@ -1458,17 +1460,30 @@ fn vector_knn() {
 
     let g = ctx.graph(&table).unwrap();
     let emb_node = unsafe { g.const_vec(emb_col).unwrap() };
-    let knn_result = g.knn(emb_node, &query, 3).unwrap();
+    // SAFETY: `query` outlives the execute() call below.
+    let knn_result = unsafe { g.knn(emb_node, &query, 3) }.unwrap();
     let result = g.execute(knn_result).unwrap();
 
     // Should return 3 rows, sorted by similarity descending
     assert_eq!(result.nrows(), 3);
-    // Top-1 should be row 0 (exact match, sim=1.0)
-    let top_rowid = result.get_i64(0, 0).unwrap();
-    assert_eq!(top_rowid, 0, "top result should be row 0");
-    let top_sim = result.get_f64(1, 0).unwrap();
-    assert!(
-        (top_sim - 1.0).abs() < 0.001,
-        "top similarity should be 1.0, got {top_sim}"
-    );
+
+    // Verify all 3 rows: rowid and similarity, in descending similarity order
+    let rowid0 = result.get_i64(0, 0).unwrap();
+    let sim0 = result.get_f64(1, 0).unwrap();
+    assert_eq!(rowid0, 0, "rank-1 should be row 0 (exact match)");
+    assert!((sim0 - 1.0).abs() < 0.001, "rank-1 sim should be 1.0, got {sim0}");
+
+    let rowid1 = result.get_i64(0, 1).unwrap();
+    let sim1 = result.get_f64(1, 1).unwrap();
+    assert_eq!(rowid1, 1, "rank-2 should be row 1 (sim ~0.994)");
+    assert!(sim1 > 0.99, "rank-2 sim should be >0.99, got {sim1}");
+
+    let rowid2 = result.get_i64(0, 2).unwrap();
+    let sim2 = result.get_f64(1, 2).unwrap();
+    assert_eq!(rowid2, 4, "rank-3 should be row 4 (sim ~0.970)");
+    assert!(sim2 > 0.96, "rank-3 sim should be >0.96, got {sim2}");
+
+    // Verify descending order
+    assert!(sim0 >= sim1, "results should be sorted descending");
+    assert!(sim1 >= sim2, "results should be sorted descending");
 }

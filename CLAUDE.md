@@ -41,7 +41,7 @@ cargo bench --all-features
 ### Crate Structure
 
 - `src/ffi.rs` — Raw FFI bindings (hand-written from `vendor/teide/include/teide/td.h`)
-- `src/engine.rs` — Safe Rust wrappers: `Context`, `Table`, `Graph`, `Column`, `Rel`, `Error`
+- `src/engine.rs` — Safe Rust wrappers: `Context`, `Table`, `Graph`, `Column`, `Rel`, `Error`, embedding/vector similarity ops
 - `src/sql/mod.rs` — `Session`, `ExecResult`, `execute_sql` entry point
 - `src/sql/planner.rs` — SQL AST → Teide Graph translation
 - `src/sql/expr.rs` — Expression tree walker, aggregate collection
@@ -62,11 +62,11 @@ The C engine uses global state (thread-local arenas, global symbol table). Key c
 
 ### Graph API (Lazy DAG)
 
-All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`scan`, `filter`, `add`, etc.) → `g.execute(root)`. `Column` is a non-owning `Copy` handle (raw `*mut td_op_t`). On `execute()`, the C optimizer runs (type inference, constant fold, predicate pushdown, CSE, fusion, DCE), then the morsel-driven executor runs. Graph algorithm ops (`pagerank`, `connected_comp`, `dijkstra`, `louvain`) operate directly on CSR indexes and return TD_TABLE results with computed per-node values.
+All computation goes through a lazy DAG: `ctx.graph(&table)` → chain ops (`scan`, `filter`, `add`, etc.) → `g.execute(root)`. `Column` is a non-owning `Copy` handle (raw `*mut td_op_t`). On `execute()`, the C optimizer runs (type inference, constant fold, predicate pushdown, CSE, fusion, DCE), then the morsel-driven executor runs. Graph algorithm ops (`pagerank`, `connected_comp`, `dijkstra`, `louvain`) operate directly on CSR indexes and return TD_TABLE results with computed per-node values. Vector similarity ops (`cosine_sim`, `euclidean_dist`, `knn`) operate on TD_F32 embedding columns (flat N*D float arrays created via `Table::create_embedding_column`). Each has an `unsafe` borrowed variant and a safe `_owned` variant that pins the query `Vec<f32>` in the Graph's `_pinned` storage.
 
 ### SQL Layer
 
-Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry and a `HashMap<String, PropertyGraph>` for graph metadata. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, DELETE, CREATE/DROP PROPERTY GRAPH, and GRAPH_TABLE with MATCH patterns. PGQ syntax is intercepted by a custom pre-parser (`pgq_parser.rs`) before reaching sqlparser. GRAPH_TABLE COLUMNS supports algorithm functions: `PAGERANK()`, `COMPONENT()` (alias: `CONNECTED_COMPONENT`), and `COMMUNITY()` (alias: `LOUVAIN`).
+Uses `sqlparser` crate with `DuckDbDialect`. `Session` holds a `HashMap<String, StoredTable>` as table registry and a `HashMap<String, PropertyGraph>` for graph metadata. Statements dispatch through `planner::session_execute()` which builds Graph ops and executes them. Supports SELECT, CREATE TABLE AS, DROP TABLE, INSERT INTO, UPDATE, DELETE, CREATE/DROP PROPERTY GRAPH, and GRAPH_TABLE with MATCH patterns. PGQ syntax is intercepted by a custom pre-parser (`pgq_parser.rs`) before reaching sqlparser. GRAPH_TABLE COLUMNS supports algorithm functions: `PAGERANK()`, `COMPONENT()` (alias: `CONNECTED_COMPONENT`), and `COMMUNITY()` (alias: `LOUVAIN`). Scalar functions `COSINE_SIMILARITY(emb_col, ARRAY[...])` and `EUCLIDEAN_DISTANCE(emb_col, ARRAY[...])` compute vector similarity; query vectors are specified as ARRAY literals.
 
 ### Server Thread Model
 
@@ -74,7 +74,7 @@ The C engine's `!Send` constraint requires special handling: each pgwire connect
 
 ### Type System
 
-Every C object is a `td_t*` (32-byte header + data). Key type constants in `ffi.rs`: `TD_BOOL=1`, `TD_I16=4`, `TD_I32=5`, `TD_I64=6`, `TD_F64=7`, `TD_DATE=9`, `TD_TIME=10`, `TD_TIMESTAMP=11`, `TD_SYM=20`, `TD_TABLE=13`. Positive type = vector, negative = atom, 0 = list. Error returns use low pointer values (< 32) as sentinels checked via `td_is_err()`.
+Every C object is a `td_t*` (32-byte header + data). Key type constants in `ffi.rs`: `TD_BOOL=1`, `TD_I16=4`, `TD_I32=5`, `TD_I64=6`, `TD_F64=7`, `TD_F32=8`, `TD_DATE=9`, `TD_TIME=10`, `TD_TIMESTAMP=11`, `TD_SYM=20`, `TD_TABLE=13`. Positive type = vector, negative = atom, 0 = list. Error returns use low pointer values (< 32) as sentinels checked via `td_is_err()`.
 
 ## Critical: Test Serialization
 
