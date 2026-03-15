@@ -54,7 +54,7 @@ Iterative PageRank over CSR adjacency. Each iteration: for every node, sum `rank
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [x] **Step 1: Add opcode constant and declaration to `td.h`**
+- [ ] **Step 1: Add opcode constant and declaration to `td.h`**
 
 After the existing graph opcodes (line ~405 in td.h):
 ```c
@@ -77,7 +77,7 @@ td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel,
                      uint16_t max_iter);
 ```
 
-- [x] **Step 2: Extend `td_op_ext_t` graph union for algorithm params**
+- [ ] **Step 2: Extend `td_op_ext_t` graph union for algorithm params**
 
 In td.h, extend the graph union in `td_op_ext_t` (around line 501-509):
 ```c
@@ -96,7 +96,7 @@ struct {
 } graph;
 ```
 
-- [x] **Step 3: Add PageRank builder function to `graph.c`**
+- [ ] **Step 3: Add PageRank builder function to `graph.c`**
 
 ```c
 td_op_t* td_pagerank(td_graph_t* g, td_rel_t* rel,
@@ -120,7 +120,7 @@ td_op_t* td_pagerank(td_graph_t* g, td_rel_t* rel,
 }
 ```
 
-- [x] **Step 4: Add PageRank kernel to `exec.c`**
+- [ ] **Step 4: Add PageRank kernel to `exec.c`**
 
 ```c
 /*
@@ -215,7 +215,7 @@ static td_t* exec_pagerank(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [x] **Step 5: Add dispatch case in `exec_node()`**
+- [ ] **Step 5: Add dispatch case in `exec_node()`**
 
 In the switch statement in `exec_node()`:
 ```c
@@ -225,18 +225,18 @@ case OP_PAGERANK: {
 }
 ```
 
-- [x] **Step 6: Add opcode name to `dump.c`**
+- [ ] **Step 6: Add opcode name to `dump.c`**
 
 ```c
 case OP_PAGERANK:       return "PAGERANK";
 ```
 
-- [x] **Step 7: Verify C engine compiles**
+- [ ] **Step 7: Verify C engine compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS (build.rs compiles the C source)
 
-- [x] **Step 8: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add vendor/teide/
@@ -256,7 +256,7 @@ Label propagation: each node starts with its own ID as label. Each iteration: fo
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [x] **Step 1: Add builder function to `graph.c`**
+- [ ] **Step 1: Add builder function to `graph.c`**
 
 ```c
 td_op_t* td_connected_comp(td_graph_t* g, td_rel_t* rel) {
@@ -277,7 +277,7 @@ td_op_t* td_connected_comp(td_graph_t* g, td_rel_t* rel) {
 }
 ```
 
-- [x] **Step 2: Add kernel to `exec.c`**
+- [ ] **Step 2: Add kernel to `exec.c`**
 
 ```c
 /*
@@ -361,7 +361,7 @@ static td_t* exec_connected_comp(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [x] **Step 3: Add dispatch and dump**
+- [ ] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -375,12 +375,12 @@ In `dump.c`:
 case OP_CONNECTED_COMP: return "CONNECTED_COMP";
 ```
 
-- [x] **Step 4: Verify it compiles**
+- [ ] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add vendor/teide/
@@ -400,7 +400,7 @@ Dijkstra's algorithm with edge weights read from the CSR edge property table. Us
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [x] **Step 1: Add builder function to `graph.c`**
+- [ ] **Step 1: Add builder function to `graph.c`**
 
 ```c
 td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
@@ -430,7 +430,7 @@ td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
 }
 ```
 
-- [x] **Step 2: Add Dijkstra kernel to `exec.c`**
+- [ ] **Step 2: Add Dijkstra kernel to `exec.c`**
 
 ```c
 /* Min-heap entry for Dijkstra */
@@ -609,7 +609,7 @@ static td_t* exec_dijkstra(td_graph_t* g, td_op_t* op,
 }
 ```
 
-- [x] **Step 3: Add dispatch and dump**
+- [ ] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -630,12 +630,12 @@ In `dump.c`:
 case OP_DIJKSTRA: return "DIJKSTRA";
 ```
 
-- [x] **Step 4: Verify it compiles**
+- [ ] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add vendor/teide/
@@ -655,7 +655,7 @@ Louvain modularity optimization: each node starts in its own community. Each ite
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [x] **Step 1: Add builder function to `graph.c`**
+- [ ] **Step 1: Add builder function to `graph.c`**
 
 ```c
 td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel, uint16_t max_iter) {
@@ -677,7 +677,7 @@ td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel, uint16_t max_iter) {
 }
 ```
 
-- [x] **Step 2: Add Louvain kernel to `exec.c`**
+- [ ] **Step 2: Add Louvain kernel to `exec.c`**
 
 ```c
 /*
@@ -815,7 +815,7 @@ static td_t* exec_louvain(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [x] **Step 3: Add dispatch and dump**
+- [ ] **Step 3: Add dispatch and dump**
 
 In `exec_node()`:
 ```c
@@ -829,12 +829,12 @@ In `dump.c`:
 case OP_LOUVAIN: return "LOUVAIN";
 ```
 
-- [x] **Step 4: Verify it compiles**
+- [ ] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add vendor/teide/
@@ -851,7 +851,7 @@ Expose all four algorithms through `ffi.rs` and `engine.rs`.
 - Modify: `src/ffi.rs`
 - Modify: `src/engine.rs`
 
-- [x] **Step 1: Add FFI constants and declarations to `src/ffi.rs`**
+- [ ] **Step 1: Add FFI constants and declarations to `src/ffi.rs`**
 
 After `OP_WCO_JOIN` (line 235):
 ```rust
@@ -889,7 +889,7 @@ In the `extern "C"` block, after `td_wco_join`:
     ) -> *mut td_op_t;
 ```
 
-- [x] **Step 2: Add safe wrappers to `src/engine.rs`**
+- [ ] **Step 2: Add safe wrappers to `src/engine.rs`**
 
 In the `impl Graph` block, after `wco_join`:
 ```rust
@@ -938,12 +938,12 @@ In the `impl Graph` block, after `wco_join`:
     }
 ```
 
-- [x] **Step 3: Verify it compiles**
+- [ ] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [x] **Step 4: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/ffi.rs src/engine.rs
@@ -959,7 +959,7 @@ Test each algorithm through the Rust API to verify the C kernels work correctly.
 **Files:**
 - Modify: `tests/engine_api.rs`
 
-- [x] **Step 1: Add PageRank test**
+- [ ] **Step 1: Add PageRank test**
 
 ```rust
 #[test]
@@ -989,7 +989,7 @@ fn graph_pagerank() {
 }
 ```
 
-- [x] **Step 2: Add Connected Components test**
+- [ ] **Step 2: Add Connected Components test**
 
 ```rust
 #[test]
@@ -1026,7 +1026,7 @@ fn graph_connected_comp() {
 }
 ```
 
-- [x] **Step 3: Add Dijkstra test**
+- [ ] **Step 3: Add Dijkstra test**
 
 ```rust
 #[test]
@@ -1073,7 +1073,7 @@ fn graph_dijkstra() {
 }
 ```
 
-- [x] **Step 4: Add Louvain test**
+- [ ] **Step 4: Add Louvain test**
 
 ```rust
 #[test]
@@ -1098,12 +1098,12 @@ fn graph_louvain() {
 }
 ```
 
-- [x] **Step 4: Run tests**
+- [ ] **Step 4: Run tests**
 
 Run: `cargo test --all-features -- graph_pagerank graph_connected_comp graph_dijkstra graph_louvain`
 Expected: PASS
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add tests/engine_api.rs
@@ -1121,7 +1121,7 @@ Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`
 - Create: `tests/slt/pgq_algorithms.slt`
 - Modify: `tests/slt_runner.rs`
 
-- [x] **Step 1: Add algorithm dispatch to `pgq.rs`**
+- [ ] **Step 1: Add algorithm dispatch to `pgq.rs`**
 
 In the COLUMNS projection logic, handle algorithm function calls. Add a new function:
 
@@ -1179,7 +1179,7 @@ pub(crate) fn execute_graph_algorithm(
 }
 ```
 
-- [x] **Step 2: Create SLT tests**
+- [ ] **Step 2: Create SLT tests**
 
 Create `tests/slt/pgq_algorithms.slt`:
 
@@ -1240,7 +1240,7 @@ SELECT COUNT(*) FROM GRAPH_TABLE (weighted MATCH (a:Person WHERE a.id = 0)-[:Kno
 
 Note: exact output values for PageRank/Louvain depend on convergence, so tests check invariants rather than specific values.
 
-- [x] **Step 3: Add SLT runner**
+- [ ] **Step 3: Add SLT runner**
 
 Add to `tests/slt_runner.rs`:
 ```rust
@@ -1250,12 +1250,12 @@ fn slt_pgq_algorithms() {
 }
 ```
 
-- [x] **Step 4: Run all tests**
+- [ ] **Step 4: Run all tests**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS
 
-- [x] **Step 5: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/sql/pgq.rs tests/slt/pgq_algorithms.slt tests/slt_runner.rs
@@ -1266,17 +1266,17 @@ git commit -m "feat(pgq): expose PageRank, connected components, Dijkstra, and c
 
 ## Task 8: Full Regression Test
 
-- [x] **Step 1: Run complete test suite**
+- [ ] **Step 1: Run complete test suite**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All tests PASS
 
-- [x] **Step 2: Run clippy**
+- [ ] **Step 2: Run clippy**
 
 Run: `cargo clippy --all-features -- -D warnings 2>&1 | tail -10`
 Expected: No warnings
 
-- [x] **Step 3: Commit final changes**
+- [ ] **Step 3: Commit final changes**
 
 ```bash
 git add -A
