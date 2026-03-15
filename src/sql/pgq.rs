@@ -1597,7 +1597,7 @@ fn extract_node_id(
 // ---------------------------------------------------------------------------
 
 /// Known graph algorithm function names.
-const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain"];
+const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra"];
 
 /// Parse a COLUMNS expression to check if it's a graph algorithm function call.
 /// Returns `Some((func_name, args))` if the expression matches `FUNC(arg1, arg2, ...)`.
@@ -1682,37 +1682,57 @@ fn plan_algorithm_query(
         let alias = entry.alias.as_deref();
 
         if let Some((func_name, args)) = parse_algo_function(&entry.expr) {
-            // Validate arguments: expected form is FUNC(graph_name, node_var)
-            if args.len() != 2 {
-                return Err(SqlError::Plan(format!(
-                    "Algorithm function expects exactly 2 arguments: {}({}, {}). Got {} argument(s).",
-                    func_name.to_uppercase(), graph.name, node_var, args.len(),
-                )));
-            }
-            if args[0] != graph.name.to_lowercase() {
-                return Err(SqlError::Plan(format!(
-                    "Algorithm argument '{}' does not match graph name '{}'. \
-                     Expected: {}({}, {})",
-                    args[0], graph.name, func_name.to_uppercase(), graph.name, node_var,
-                )));
-            }
-            if args[1] != node_var {
-                return Err(SqlError::Plan(format!(
-                    "Algorithm argument '{}' does not match node variable '{}'. \
-                     Expected: {}({}, {})",
-                    args[1], node_var, func_name.to_uppercase(), graph.name, node_var,
-                )));
+            let is_dijkstra = matches!(func_name.as_str(), "shortest_distance" | "dijkstra");
+
+            if is_dijkstra {
+                // SHORTEST_DISTANCE(graph, src_id, dst_id, weight_col)
+                if args.len() != 4 {
+                    return Err(SqlError::Plan(format!(
+                        "SHORTEST_DISTANCE expects 4 arguments: SHORTEST_DISTANCE({}, src_id, dst_id, 'weight_col'). Got {} argument(s).",
+                        graph.name, args.len(),
+                    )));
+                }
+                if args[0] != graph.name.to_lowercase() {
+                    return Err(SqlError::Plan(format!(
+                        "First argument '{}' does not match graph name '{}'.",
+                        args[0], graph.name,
+                    )));
+                }
+            } else {
+                // Standard algorithms: FUNC(graph_name, node_var)
+                if args.len() != 2 {
+                    return Err(SqlError::Plan(format!(
+                        "Algorithm function expects exactly 2 arguments: {}({}, {}). Got {} argument(s).",
+                        func_name.to_uppercase(), graph.name, node_var, args.len(),
+                    )));
+                }
+                if args[0] != graph.name.to_lowercase() {
+                    return Err(SqlError::Plan(format!(
+                        "Algorithm argument '{}' does not match graph name '{}'. \
+                         Expected: {}({}, {})",
+                        args[0], graph.name, func_name.to_uppercase(), graph.name, node_var,
+                    )));
+                }
+                if args[1] != node_var {
+                    return Err(SqlError::Plan(format!(
+                        "Algorithm argument '{}' does not match node variable '{}'. \
+                         Expected: {}({}, {})",
+                        args[1], node_var, func_name.to_uppercase(), graph.name, node_var,
+                    )));
+                }
             }
             // Reject mixing different algorithms in the same COLUMNS clause
             if let Some(ref prev) = algo_func_used {
                 let prev_canonical = match prev.as_str() {
                     "component" | "connected_component" => "connected_component",
                     "community" | "louvain" => "louvain",
+                    "shortest_distance" | "dijkstra" => "dijkstra",
                     other => other,
                 };
                 let cur_canonical = match func_name.as_str() {
                     "component" | "connected_component" => "connected_component",
                     "community" | "louvain" => "louvain",
+                    "shortest_distance" | "dijkstra" => "dijkstra",
                     other => other,
                 };
                 if prev_canonical != cur_canonical {
@@ -1732,9 +1752,15 @@ fn plan_algorithm_query(
                          Please use a graph with a single edge label.".into()
                     )
                 })?;
-                algo_result = Some(execute_graph_algorithm(
-                    session, graph, &func_name, edge_label_name,
-                )?);
+                if is_dijkstra {
+                    algo_result = Some(execute_dijkstra_algorithm(
+                        session, graph, edge_label_name, &args,
+                    )?);
+                } else {
+                    algo_result = Some(execute_graph_algorithm(
+                        session, graph, &func_name, edge_label_name,
+                    )?);
+                }
             }
 
             // Map function name to result column
@@ -1742,6 +1768,7 @@ fn plan_algorithm_query(
                 "pagerank" => "_rank",
                 "component" | "connected_component" => "_component",
                 "community" | "louvain" => "_community",
+                "shortest_distance" | "dijkstra" => "_dist",
                 _ => return Err(SqlError::Plan(format!("Unknown algorithm: {func_name}"))),
             };
             let default_alias = result_col_name.trim_start_matches('_');
@@ -1847,10 +1874,59 @@ fn execute_graph_algorithm(
         "pagerank" => g.pagerank(&stored_rel.rel, 20, 0.85)?,
         "component" | "connected_component" => g.connected_comp(&stored_rel.rel)?,
         "community" | "louvain" => g.louvain(&stored_rel.rel, 100)?,
+        "shortest_distance" | "dijkstra" => {
+            return Err(SqlError::Plan(
+                "SHORTEST_DISTANCE() is not supported as a COLUMNS function in node-only MATCH patterns. \
+                 Use the Rust API (Graph::dijkstra) or a two-node MATCH pattern with ANY SHORTEST instead."
+                    .into(),
+            ));
+        }
         _ => return Err(SqlError::Plan(format!(
             "Unknown graph algorithm: {func_name}"
         ))),
     };
+
+    let result = g.execute(result_col)?;
+    Ok(result)
+}
+
+/// Execute Dijkstra's weighted shortest path algorithm.
+/// Args: [graph_name, src_id, dst_id, weight_col]
+fn execute_dijkstra_algorithm(
+    session: &Session,
+    graph: &PropertyGraph,
+    edge_label_name: &str,
+    args: &[String],
+) -> Result<Table, SqlError> {
+    let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
+    })?;
+
+    let src_id: i64 = args[1].parse().map_err(|_| {
+        SqlError::Plan(format!("Invalid source node ID: '{}'", args[1]))
+    })?;
+    let dst_id: i64 = args[2].parse().map_err(|_| {
+        SqlError::Plan(format!("Invalid destination node ID: '{}'", args[2]))
+    })?;
+    // Strip surrounding quotes from weight column name
+    let weight_col = args[3].trim_matches('\'').trim_matches('"');
+
+    // Attach edge properties if not already attached
+    let edge_table_name = &stored_rel.edge_label.table_name;
+    let edge_table = &session.tables.get(edge_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge table '{edge_table_name}' not found"))
+    })?.table;
+    stored_rel.rel.set_props(edge_table);
+
+    let src_table_name = &stored_rel.edge_label.src_ref_table;
+    let src_table = &session.tables.get(src_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{src_table_name}' not found"))
+    })?.table;
+
+    let g = session.ctx.graph(src_table)?;
+    let src = g.const_i64(src_id)?;
+    let dst = g.const_i64(dst_id)?;
+    let result_col = g.dijkstra(src, Some(dst), &stored_rel.rel, weight_col, 255)?;
 
     let result = g.execute(result_col)?;
     Ok(result)

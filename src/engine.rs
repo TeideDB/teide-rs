@@ -1892,11 +1892,6 @@ impl Rel {
     /// The CSR rowmap arrays map CSR positions back to property rows.
     pub fn set_props(&self, props: &Table) {
         unsafe {
-            // Extra retain to compensate: td_rel_set_props retains once but
-            // assigns the same pointer to both fwd.props and rev.props, so
-            // csr_free will release it twice.  Add one more retain here so
-            // the refcount stays balanced.
-            ffi::td_retain(props.raw);
             ffi::td_rel_set_props(self.ptr, props.raw);
         }
     }
