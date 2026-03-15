@@ -1014,8 +1014,8 @@ fn rel_var_expand() {
     let result = g.execute(vexp).unwrap();
 
     // Node 0 can reach: depth 1 → {1,2}, depth 2 → {3}, depth 3 → {4}
-    // So total reachable = some positive number
-    assert!(result.nrows() > 0, "var_expand should find reachable nodes");
+    // Total reachable = 4 nodes
+    assert_eq!(result.nrows(), 4, "var_expand should find 4 reachable nodes at depths 1-3");
 }
 
 #[test]
@@ -1042,7 +1042,7 @@ fn rel_shortest_path() {
     let result = g.execute(sp).unwrap();
 
     // Path: 0→1→3→4 or 0→2→3→4 = 3 hops, path has 4 nodes
-    assert!(result.nrows() > 0, "should find a path from 0 to 4");
+    assert_eq!(result.nrows(), 4, "shortest path from 0 to 4 should have 4 nodes");
 }
 
 #[test]

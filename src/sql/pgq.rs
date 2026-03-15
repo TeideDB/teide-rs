@@ -1,13 +1,74 @@
 // SQL/PGQ: Property graph catalog and MATCH pattern planner.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{Column, Graph, Rel, Table};
 
-/// Monotonic counter for unique temp file names (avoids race conditions).
+/// Monotonic counter for unique temp file names.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 use super::pgq_parser::{CreatePropertyGraph as ParsedCPG, PgqStatement};
 use super::{ExecResult, Session, SqlError};
+
+/// Write CSV data to a secure temp file and read it back as a Table.
+/// Uses `create_new(true)` (O_CREAT|O_EXCL) to prevent symlink attacks:
+/// the open fails if the path already exists, so a pre-planted symlink
+/// cannot redirect the write to an arbitrary file.
+fn csv_to_table(session: &Session, csv: &str, col_names: &[String]) -> Result<Table, SqlError> {
+    // Retry with fresh counter values if a stale/colliding file already exists.
+    let (tmp_path, mut file) = {
+        let mut last_err = None;
+        let mut result = None;
+        for _ in 0..8 {
+            // Mix PID, monotonic counter, and a timestamp-based nonce to make
+            // file names unpredictable to local observers (mitigates DoS via
+            // pre-creation of deterministic candidate names).
+            let nonce: u64 = {
+                let t = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                t.as_nanos() as u64
+            };
+            let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            // Simple mixing: XOR the nonce with counter shifted, then wrap in hex.
+            let tag = nonce ^ (counter.wrapping_mul(0x517cc1b727220a95));
+            let p = std::env::temp_dir().join(format!(
+                "__pgq_{:x}.csv",
+                tag
+            ));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&p) {
+                Ok(f) => { result = Some((p, f)); break; }
+                Err(e) => { last_err = Some(e); }
+            }
+        }
+        result.ok_or_else(|| SqlError::Plan(format!(
+            "Failed to create temp file after retries: {}",
+            last_err.unwrap()
+        )))?
+    };
+    let write_result = file
+        .write_all(csv.as_bytes())
+        .and_then(|()| file.flush())
+        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")));
+    drop(file);
+    let result = write_result.and_then(|()| {
+        let path_str = tmp_path.to_str().ok_or_else(|| {
+            SqlError::Plan("Temp file path not valid UTF-8".into())
+        })?;
+        let table = session.ctx.read_csv(path_str)?;
+        table.with_column_names(col_names).map_err(Into::into)
+    });
+    // Always clean up the temp file, even on error paths.
+    let _ = std::fs::remove_file(&tmp_path);
+    result
+}
 
 /// Safe conversion of `Table::nrows()` (i64) to usize, returning an error
 /// if the C engine returned a negative sentinel.
@@ -193,8 +254,14 @@ pub(crate) fn build_property_graph(
             ))
         })?;
 
-        let n_src = src_stored.table.nrows();
-        let n_dst = dst_stored.table.nrows();
+        let n_src_usize = checked_nrows(&src_stored.table).map_err(|_| SqlError::Plan(format!(
+            "Source vertex table '{}' has invalid row count", et.src_ref_table
+        )))?;
+        let n_dst_usize = checked_nrows(&dst_stored.table).map_err(|_| SqlError::Plan(format!(
+            "Destination vertex table '{}' has invalid row count", et.dst_ref_table
+        )))?;
+        let n_src = n_src_usize as i64;
+        let n_dst = n_dst_usize as i64;
 
         // Validate that edge src/dst column values are 0-based row indices.
         // The C engine CSR treats these as row offsets into the vertex tables.
@@ -356,11 +423,13 @@ pub(crate) fn plan_graph_table(
 
     let pattern = &match_clause.patterns[0];
 
-    // Check for variable-length edge first
+    // Check for variable-length edge first.
     let is_var_length = pattern.edges.len() == 1
         && !matches!(pattern.edges[0].quantifier, PathQuantifier::One);
 
     match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
+        // ANY SHORTEST always uses the shortest-path planner (supports dst filters,
+        // _node/_depth columns).
         (2, 1, PathMode::AnyShortest) => {
             plan_shortest_path(session, graph, pattern, &expr.columns)
         }
@@ -419,9 +488,18 @@ fn plan_single_hop(
         SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
     })?;
 
+    // For reverse edges, the left node in the pattern is the edge destination
+    // and the right node is the edge source, so swap the default table references.
+    let is_reverse = edge.direction == MatchDirection::Reverse;
+    let (left_default_table, right_default_table, scan_ref_col) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_col)
+    } else {
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_col)
+    };
+
     // Resolve source and destination vertex tables
-    let src_label = resolve_node_label(src_node, &stored_rel.edge_label.src_ref_table, graph)?;
-    let dst_label = resolve_node_label(dst_node, &stored_rel.edge_label.dst_ref_table, graph)?;
+    let src_label = resolve_node_label(src_node, left_default_table, graph)?;
+    let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
 
     let src_stored = session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
@@ -430,18 +508,30 @@ fn plan_single_hop(
         SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
     })?;
 
+    // Undirected traversals on heterogeneous edges (different src/dst tables)
+    // would mix node IDs from different tables in the _dst column, producing
+    // wrong results when project_columns looks up rows in dst_table.
+    if edge.direction == MatchDirection::Undirected
+        && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+    {
+        return Err(SqlError::Plan(
+            "Undirected traversals are not supported on edges with different source and \
+             destination vertex tables (heterogeneous graphs). Use a directed pattern instead."
+                .into(),
+        ));
+    }
+
     let direction: u8 = match edge.direction {
         MatchDirection::Forward => 0,
         MatchDirection::Reverse => 1,
         MatchDirection::Undirected => 2,
     };
 
-    // Build graph on the source table
+    // Build graph on the left-side node's table
     let g = session.ctx.graph(&src_stored.table)?;
 
-    // Scan the source reference column (the join key, e.g. "id")
-    let src_ref_col = &stored_rel.edge_label.src_ref_col;
-    let src_ids = g.scan(src_ref_col)?;
+    // Scan the appropriate reference column for the left-side node
+    let src_ids = g.scan(scan_ref_col)?;
 
     // Apply source node filter if present
     let src_ids = if let Some(filter_text) = &src_node.filter {
@@ -657,21 +747,7 @@ fn project_columns(
         csv.push('\n');
     }
 
-    // Write to temp file and read back as table
-    let tmp_path = std::env::temp_dir().join(format!(
-        "__pgq_{}_{}.csv",
-        std::process::id(),
-        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp_path, csv.as_bytes())
-        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
-    let path_str = tmp_path.to_str().ok_or_else(|| {
-        SqlError::Plan("Temp file path not valid UTF-8".into())
-    })?;
-    let result = session.ctx.read_csv(path_str);
-    let _ = std::fs::remove_file(&tmp_path);
-    let result = result?.with_column_names(&col_names)?;
-
+    let result = csv_to_table(session, &csv, &col_names)?;
     Ok((result, col_names))
 }
 
@@ -762,6 +838,15 @@ fn plan_var_length(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
+    // Destination-node filters are not supported in variable-length patterns
+    if dst_node.filter.is_some() {
+        return Err(SqlError::Plan(
+            "WHERE filters on destination nodes are not yet supported in variable-length patterns. \
+             Use a WHERE clause in the outer SELECT instead."
+                .into(),
+        ));
+    }
+
     let edge_label = edge.label.as_deref().ok_or_else(|| {
         SqlError::Plan("Edge pattern must specify a label".into())
     })?;
@@ -769,12 +854,32 @@ fn plan_var_length(
         SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
     })?;
 
-    let src_label = resolve_node_label(src_node, &stored_rel.edge_label.src_ref_table, graph)?;
+    // For reverse edges, swap default table/column references (same as plan_single_hop)
+    let is_reverse = edge.direction == MatchDirection::Reverse;
+    let (left_default_table, right_default_table, scan_ref_col) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_col)
+    } else {
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_col)
+    };
+
+    // Multi-hop traversals require src and dst to reference the same vertex table
+    // (node IDs must be in the same domain across hops).
+    // Range{1,1} is semantically single-hop, so skip this check for it.
+    let is_single_range = matches!(edge.quantifier, PathQuantifier::Range { min: 1, max: 1 });
+    if !is_single_range && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
+        return Err(SqlError::Plan(
+            "Variable-length patterns are not supported on edges with different source and \
+             destination vertex tables (heterogeneous graphs). Use single-hop patterns instead."
+                .into(),
+        ));
+    }
+
+    let src_label = resolve_node_label(src_node, left_default_table, graph)?;
     let src_table = &session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?.table;
 
-    let dst_label = resolve_node_label(dst_node, &stored_rel.edge_label.dst_ref_table, graph)?;
+    let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
     let dst_table = &session.tables.get(&dst_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
     })?.table;
@@ -793,8 +898,7 @@ fn plan_var_length(
     };
 
     let g = session.ctx.graph(src_table)?;
-    let src_ref_col = &stored_rel.edge_label.src_ref_col;
-    let src_ids = g.scan(src_ref_col)?;
+    let src_ids = g.scan(scan_ref_col)?;
 
     let src_ids = if let Some(filter_text) = &src_node.filter {
         apply_node_filter(&g, src_ids, filter_text, src_node.variable.as_deref())?
@@ -935,20 +1039,7 @@ fn project_var_length_columns(
         csv.push('\n');
     }
 
-    let tmp_path = std::env::temp_dir().join(format!(
-        "__pgq_vl_{}_{}.csv",
-        std::process::id(),
-        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp_path, csv.as_bytes())
-        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
-    let path_str = tmp_path.to_str().ok_or_else(|| {
-        SqlError::Plan("Temp file path not valid UTF-8".into())
-    })?;
-    let result = session.ctx.read_csv(path_str);
-    let _ = std::fs::remove_file(&tmp_path);
-    let result = result?.with_column_names(&col_names)?;
-
+    let result = csv_to_table(session, &csv, &col_names)?;
     Ok((result, col_names))
 }
 
@@ -977,23 +1068,97 @@ fn plan_shortest_path(
         SqlError::Plan(format!("Edge label '{edge_label}' not found"))
     })?;
 
-    let src_id = extract_node_id(
-        src_node,
-        &stored_rel.edge_label.src_ref_table,
-        &stored_rel.edge_label.src_ref_col,
-        session,
-    )?;
-    let dst_id = extract_node_id(
-        dst_node,
-        &stored_rel.edge_label.dst_ref_table,
-        &stored_rel.edge_label.dst_ref_col,
-        session,
-    )?;
-
-    let max_depth: u8 = match edge.quantifier {
-        PathQuantifier::Range { max, .. } => max,
-        _ => 255,
+    // For reverse edges, swap default table/column references
+    let is_reverse = edge.direction == MatchDirection::Reverse;
+    let (left_table, left_col, right_table, right_col) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.dst_ref_col,
+         &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.src_ref_col)
+    } else {
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.src_ref_col,
+         &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.dst_ref_col)
     };
+
+    // Shortest-path BFS requires src and dst to reference the same vertex table.
+    // Range{1,1} and PathQuantifier::One are semantically single-hop, so skip
+    // this check for them (same exemption as plan_var_length).
+    let is_single_hop = matches!(edge.quantifier, PathQuantifier::One | PathQuantifier::Range { min: 1, max: 1 });
+    if !is_single_hop && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
+        return Err(SqlError::Plan(
+            "SHORTEST_PATH is not supported on edges with different source and \
+             destination vertex tables (heterogeneous graphs)."
+                .into(),
+        ));
+    }
+
+    let src_id = extract_node_id(src_node, left_table, left_col, session)?;
+    let dst_id = extract_node_id(dst_node, right_table, right_col, session)?;
+
+    let (min_depth, max_depth): (u8, u8) = match edge.quantifier {
+        PathQuantifier::Range { min, max } => (min, max),
+        PathQuantifier::Plus => (1, 255),
+        PathQuantifier::Star => (0, 255),
+        PathQuantifier::One => (1, 1),
+    };
+
+    // Handle 0-hop match: if min_depth is 0 and src == dst, return immediately
+    if min_depth == 0 && src_id == dst_id {
+        // Validate columns the same way as the normal path
+        let mut col_names: Vec<String> = Vec::new();
+        // 0 = _node, 1 = _depth, 2 = path_length (total)
+        let mut col_indices: Vec<usize> = Vec::new();
+        for entry in columns {
+            let lower = entry.expr.to_lowercase();
+            let alias = entry.alias.as_deref();
+            if lower.contains("path_length") {
+                col_names.push(alias.unwrap_or("path_length").to_string());
+                col_indices.push(2); // total path length
+            } else if lower == "_node" || lower == "node" {
+                col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| lower.clone()));
+                col_indices.push(0);
+            } else if lower == "_depth" || lower == "depth" {
+                col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| lower.clone()));
+                col_indices.push(1);
+            } else if let Some(dot_pos) = lower.find('.') {
+                let var = lower[..dot_pos].trim();
+                let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+                if var == dst_var {
+                    return Err(SqlError::Plan(
+                        "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
+                         Property lookups on path nodes are not yet supported."
+                            .into(),
+                    ));
+                }
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
+                )));
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "COLUMNS: unsupported expression '{}'",
+                    entry.expr
+                )));
+            }
+        }
+        if col_names.is_empty() {
+            return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+        }
+        // Build CSV with correct values: node=src_id, depth=0, path_length=0
+        let csv_col_names: Vec<String> = (0..col_names.len())
+            .map(|i| format!("__c{i}"))
+            .collect();
+        let mut csv = csv_col_names.join(",");
+        csv.push('\n');
+        for (i, &col_idx) in col_indices.iter().enumerate() {
+            if i > 0 { csv.push(','); }
+            match col_idx {
+                0 => csv.push_str(&src_id.to_string()),
+                1 | 2 => csv.push('0'), // depth and path_length are both 0 for 0-hop
+                _ => {}
+            }
+        }
+        csv.push('\n');
+        let result = csv_to_table(session, &csv, &col_names)?;
+        return Ok((result, col_names));
+    }
 
     let direction: u8 = match edge.direction {
         MatchDirection::Forward => 0,
@@ -1001,40 +1166,62 @@ fn plan_shortest_path(
         MatchDirection::Undirected => 2,
     };
 
-    // BFS over the edge table to find and reconstruct the shortest path
+    // BFS over the edge table to find the shortest qualifying path
     let mut path = reconstruct_shortest_path(
-        session, src_id, dst_id, max_depth as i64, stored_rel, direction,
+        session, src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
     )?;
 
     if path.is_empty() {
-        // No path found → return empty result table
-        let display_names: Vec<String> = columns.iter().map(|e| {
-            e.alias.as_deref().unwrap_or(&e.expr).to_string()
-        }).collect();
-        let csv_col_names: Vec<String> = (0..columns.len())
+        // No path found → return empty result table with proper column names
+        // so that the outer query can resolve column references (e.g. ORDER BY _depth).
+        // Validate columns the same way as the non-empty branch below.
+        let mut display_names: Vec<String> = Vec::new();
+        for entry in columns {
+            let lower = entry.expr.to_lowercase();
+            let alias = entry.alias.as_deref();
+            if lower.contains("path_length") {
+                display_names.push(alias.unwrap_or("path_length").to_string());
+            } else if lower == "_node" || lower == "node"
+                || lower == "_depth" || lower == "depth"
+            {
+                display_names.push(alias.unwrap_or(&lower).to_string());
+            } else if let Some(dot_pos) = lower.find('.') {
+                let var = lower[..dot_pos].trim();
+                let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+                if var == dst_var {
+                    return Err(SqlError::Plan(
+                        "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
+                         Property lookups on path nodes are not yet supported."
+                            .into(),
+                    ));
+                }
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
+                )));
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "COLUMNS: unsupported expression '{}'",
+                    entry.expr
+                )));
+            }
+        }
+        if display_names.is_empty() {
+            return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+        }
+        let csv_col_names: Vec<String> = (0..display_names.len())
             .map(|i| format!("__c{i}"))
             .collect();
         let csv = format!("{}\n", csv_col_names.join(","));
-        let counter = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = std::env::temp_dir().join(format!(
-            "__pgq_{}_{counter}.csv",
-            std::process::id()
-        ));
-        std::fs::write(&tmp_path, csv.as_bytes())
-            .map_err(|e| SqlError::Plan(format!("Failed to write temp CSV: {e}")))?;
-        let path_str = tmp_path.to_str().ok_or_else(|| {
-            SqlError::Plan("Temp file path not valid UTF-8".into())
-        })?;
-        let result = session.ctx.read_csv(path_str);
-        let _ = std::fs::remove_file(&tmp_path);
-        return Ok((result?, display_names));
+        let result = csv_to_table(session, &csv, &display_names)?;
+        return Ok((result, display_names));
     }
 
     path.reverse(); // path is built backwards, reverse to get src -> dst order
 
     // Build result as CSV with _node and _depth columns
     let mut col_names: Vec<String> = Vec::new();
-    let mut col_indices: Vec<usize> = Vec::new(); // 0 = _node col, 1 = _depth col
+    // 0 = _node, 1 = _depth, 2 = path_length (total)
+    let mut col_indices: Vec<usize> = Vec::new();
 
     for entry in columns {
         let lower = entry.expr.to_lowercase();
@@ -1042,7 +1229,7 @@ fn plan_shortest_path(
 
         if lower.contains("path_length") {
             col_names.push(alias.unwrap_or("path_length").to_string());
-            col_indices.push(1); // depth
+            col_indices.push(2); // total path length (constant per row)
         } else if lower == "_node" || lower == "node" {
             col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| entry.expr.to_lowercase()));
             col_indices.push(0); // node
@@ -1074,6 +1261,9 @@ fn plan_shortest_path(
         return Err(SqlError::Plan("COLUMNS clause is empty".into()));
     }
 
+    // Total path length = number of edges = number of nodes - 1
+    let total_path_length = if path.is_empty() { 0 } else { path.len() - 1 };
+
     // Build CSV
     let csv_col_names: Vec<String> = (0..col_names.len())
         .map(|i| format!("__c{i}"))
@@ -1087,46 +1277,30 @@ fn plan_shortest_path(
             match col_idx {
                 0 => csv.push_str(&node_id.to_string()),
                 1 => csv.push_str(&depth.to_string()),
+                2 => csv.push_str(&total_path_length.to_string()),
                 _ => {}
             }
         }
         csv.push('\n');
     }
 
-    let tmp_path = std::env::temp_dir().join(format!(
-        "__pgq_sp_{}_{}.csv",
-        std::process::id(),
-        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp_path, csv.as_bytes())
-        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
-    let path_str = tmp_path.to_str().ok_or_else(|| {
-        SqlError::Plan("Temp file path not valid UTF-8".into())
-    })?;
-    let result = session.ctx.read_csv(path_str);
-    let _ = std::fs::remove_file(&tmp_path);
-    let result = result?.with_column_names(&col_names)?;
-
+    let result = csv_to_table(session, &csv, &col_names)?;
     Ok((result, col_names))
 }
 
 /// Reconstruct shortest path using BFS over the edge table.
 /// Returns the path as a Vec of node IDs from dst back to src (reversed).
+/// Only returns a path whose hop count is between min_depth and max_depth (inclusive).
 fn reconstruct_shortest_path(
     session: &Session,
     src_id: i64,
     dst_id: i64,
+    min_depth: i64,
     max_depth: i64,
     stored_rel: &StoredRel,
     direction: u8,
 ) -> Result<Vec<i64>, SqlError> {
-    use std::collections::{HashMap as HM, VecDeque};
-
-    // BFS using single-hop expand, tracking predecessors
-    let mut visited: HM<i64, i64> = HM::new(); // node -> predecessor
-    visited.insert(src_id, -1);
-    let mut frontier = VecDeque::new();
-    frontier.push_back((src_id, 0i64));
+    use std::collections::{HashMap as HM, HashSet, VecDeque};
 
     // Get all edges for adjacency lookup
     let edge_table_name = &stored_rel.edge_label.table_name;
@@ -1157,15 +1331,28 @@ fn reconstruct_shortest_path(
         }
     }
 
-    // BFS
+    // BFS keyed on (node, depth) to allow revisiting nodes at different depths.
+    // This is needed when min_depth > shortest_depth: the shortest path to an
+    // intermediate node may be too short, but a longer path through that node
+    // may reach dst_id at the required depth.
+    let mut visited: HashSet<(i64, i64)> = HashSet::new();
+    // predecessor map: (node, depth) -> predecessor_node
+    let mut pred_map: HM<(i64, i64), i64> = HM::new();
+    visited.insert((src_id, 0));
+    let mut frontier = VecDeque::new();
+    frontier.push_back((src_id, 0i64));
+
     while let Some((node, depth)) = frontier.pop_front() {
-        if node == dst_id {
-            // Reconstruct path
-            let mut path = Vec::new();
-            let mut cur = dst_id;
-            while cur != -1 {
-                path.push(cur);
-                cur = *visited.get(&cur).unwrap_or(&-1);
+        if node == dst_id && depth >= min_depth {
+            // Reconstruct path by following pred_map backwards
+            let mut path = vec![dst_id];
+            let mut cur_node = dst_id;
+            let mut cur_depth = depth;
+            while cur_depth > 0 {
+                let prev = pred_map[&(cur_node, cur_depth)];
+                path.push(prev);
+                cur_node = prev;
+                cur_depth -= 1;
             }
             return Ok(path);
         }
@@ -1174,9 +1361,10 @@ fn reconstruct_shortest_path(
         }
         if let Some(neighbors) = adj.get(&node) {
             for &next in neighbors {
-                if let std::collections::hash_map::Entry::Vacant(e) = visited.entry(next) {
-                    e.insert(node);
-                    frontier.push_back((next, depth + 1));
+                let next_depth = depth + 1;
+                if visited.insert((next, next_depth)) {
+                    pred_map.insert((next, next_depth), node);
+                    frontier.push_back((next, next_depth));
                 }
             }
         }
@@ -1246,10 +1434,12 @@ fn extract_node_id(
         None
     };
 
+    let int_val = if str_val.is_none() { value.parse::<i64>().ok() } else { None };
+
     for row in 0..nrows {
         let matched = if let Some(ref sv) = str_val {
             stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
-        } else if let Ok(iv) = value.parse::<i64>() {
+        } else if let Some(iv) = int_val {
             stored.table.get_i64(col_idx, row) == Some(iv)
         } else {
             false
@@ -1283,6 +1473,9 @@ fn parse_algo_function(expr: &str) -> Option<(String, Vec<String>)> {
     }
     // Find matching closing paren
     let inner = trimmed[open + 1..].strip_suffix(')')?.trim().to_string();
+    if inner.is_empty() {
+        return Some((func_name, Vec::new()));
+    }
     let args: Vec<String> = inner.split(',').map(|s| s.trim().to_lowercase()).collect();
     Some((func_name, args))
 }
@@ -1335,7 +1528,28 @@ fn plan_algorithm_query(
     for entry in columns {
         let alias = entry.alias.as_deref();
 
-        if let Some((func_name, _args)) = parse_algo_function(&entry.expr) {
+        if let Some((func_name, args)) = parse_algo_function(&entry.expr) {
+            // Validate arguments: expected form is FUNC(graph_name, node_var)
+            if args.len() != 2 {
+                return Err(SqlError::Plan(format!(
+                    "Algorithm function expects exactly 2 arguments: {}({}, {}). Got {} argument(s).",
+                    func_name.to_uppercase(), graph.name, node_var, args.len(),
+                )));
+            }
+            if args[0] != graph.name.to_lowercase() {
+                return Err(SqlError::Plan(format!(
+                    "Algorithm argument '{}' does not match graph name '{}'. \
+                     Expected: {}({}, {})",
+                    args[0], graph.name, func_name.to_uppercase(), graph.name, node_var,
+                )));
+            }
+            if args[1] != node_var {
+                return Err(SqlError::Plan(format!(
+                    "Algorithm argument '{}' does not match node variable '{}'. \
+                     Expected: {}({}, {})",
+                    args[1], node_var, func_name.to_uppercase(), graph.name, node_var,
+                )));
+            }
             // Reject mixing different algorithms in the same COLUMNS clause
             if let Some(ref prev) = algo_func_used {
                 let prev_canonical = match prev.as_str() {
@@ -1453,20 +1667,7 @@ fn plan_algorithm_query(
         csv.push('\n');
     }
 
-    let tmp_path = std::env::temp_dir().join(format!(
-        "__pgq_algo_{}_{}.csv",
-        std::process::id(),
-        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp_path, csv.as_bytes())
-        .map_err(|e| SqlError::Plan(format!("Failed to write temp file: {e}")))?;
-    let path_str = tmp_path.to_str().ok_or_else(|| {
-        SqlError::Plan("Temp file path not valid UTF-8".into())
-    })?;
-    let result = session.ctx.read_csv(path_str);
-    let _ = std::fs::remove_file(&tmp_path);
-    let result = result?.with_column_names(&col_names)?;
-
+    let result = csv_to_table(session, &csv, &col_names)?;
     Ok((result, col_names))
 }
 
