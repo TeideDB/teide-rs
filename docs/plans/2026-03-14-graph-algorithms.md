@@ -18,6 +18,8 @@
 | File | Change |
 |------|--------|
 | `vendor/teide/include/teide/td.h` | Add `OP_PAGERANK=84`, `OP_CONNECTED_COMP=85`, `OP_DIJKSTRA=86`, `OP_LOUVAIN=87` constants and function declarations |
+| `vendor/teide/src/store/csr.c` | Add `td_rel_set_props()` to attach edge property tables to CSR |
+| `vendor/teide/src/store/csr.h` | Declare `td_rel_set_props()` |
 | `vendor/teide/src/ops/graph.c` | Add builder functions: `td_pagerank()`, `td_connected_comp()`, `td_dijkstra()`, `td_louvain()` |
 | `vendor/teide/src/ops/exec.c` | Add kernel functions: `exec_pagerank()`, `exec_connected_comp()`, `exec_dijkstra()`, `exec_louvain()` and dispatch cases |
 | `vendor/teide/src/ops/dump.c` | Add opcode name strings for debugging |
@@ -31,7 +33,7 @@
 ### SQL Layer
 | File | Change |
 |------|--------|
-| `src/sql/pgq.rs` | Handle algorithm function calls in GRAPH_TABLE COLUMNS: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()` |
+| `src/sql/pgq.rs` | Handle algorithm function calls in GRAPH_TABLE COLUMNS: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()`, `SHORTEST_DISTANCE()` |
 
 ### Tests
 | File | Change |
@@ -389,9 +391,79 @@ git commit -m "feat(engine): add OP_CONNECTED_COMP via label propagation"
 
 ---
 
-## Task 3: Weighted Dijkstra — C Engine Kernel
+## Task 3: Edge Properties on CSR (Dijkstra Prerequisite)
 
-Dijkstra's algorithm with edge weights read from the CSR edge property table. Uses a binary heap (min-heap implemented as array).
+Currently `td_rel_from_edges()` builds CSR indexes but sets `csr.props = NULL`. Dijkstra needs edge weights accessible via `rel->fwd.props`. We need a C API to attach edge properties and a Rust wrapper.
+
+**Files:**
+- Modify: `vendor/teide/src/store/csr.c` (add `td_rel_set_props`)
+- Modify: `vendor/teide/src/store/csr.h` (declare `td_rel_set_props`)
+- Modify: `vendor/teide/include/teide/td.h` (public declaration)
+- Modify: `src/ffi.rs` (FFI binding)
+- Modify: `src/engine.rs` (safe wrapper on `Rel`)
+
+- [ ] **Step 1: Add `td_rel_set_props` to C engine**
+
+In `vendor/teide/src/store/csr.c`:
+```c
+/*
+ * Attach an edge property table to both forward and reverse CSR.
+ * The property table's rows correspond to the original edge table rows.
+ * The CSR's rowmap arrays map CSR positions back to property rows.
+ *
+ * Takes ownership: retains props (caller should release their ref if done).
+ */
+void td_rel_set_props(td_rel_t* rel, td_t* props) {
+    if (!rel || !props) return;
+    td_retain(props);
+    if (rel->fwd.props) td_release(rel->fwd.props);
+    if (rel->rev.props) td_release(rel->rev.props);
+    rel->fwd.props = props;
+    rel->rev.props = props;
+}
+```
+
+In `vendor/teide/include/teide/td.h`, add declaration:
+```c
+void td_rel_set_props(td_rel_t* rel, td_t* props);
+```
+
+- [ ] **Step 2: Add FFI binding and Rust wrapper**
+
+In `src/ffi.rs`, add in the extern block:
+```rust
+    pub fn td_rel_set_props(rel: *mut td_rel_t, props: *mut td_t);
+```
+
+In `src/engine.rs`, add to `impl Rel`:
+```rust
+    /// Attach an edge property table to the relationship.
+    /// The property table's rows correspond to the original edge table rows.
+    /// The CSR rowmap arrays map CSR positions back to property rows.
+    pub fn set_props(&self, props: &Table) {
+        unsafe {
+            ffi::td_rel_set_props(self.ptr, props.raw);
+        }
+    }
+```
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `cargo build --all-features 2>&1 | tail -5`
+Expected: PASS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add vendor/teide/ src/ffi.rs src/engine.rs
+git commit -m "feat(engine): add td_rel_set_props to attach edge properties to CSR"
+```
+
+---
+
+## Task 4: Weighted Dijkstra — C Engine Kernel
+
+Dijkstra's algorithm with edge weights read from the CSR edge property table. Uses a binary heap (min-heap implemented as array). **Requires Task 3** (edge properties on CSR).
 
 **Output:** TD_TABLE with `_node` (I64), `_dist` (F64), `_depth` (I64).
 
@@ -644,7 +716,7 @@ git commit -m "feat(engine): add OP_DIJKSTRA weighted shortest path kernel"
 
 ---
 
-## Task 4: Louvain Community Detection — C Engine Kernel
+## Task 5: Louvain Community Detection — C Engine Kernel
 
 Louvain modularity optimization: each node starts in its own community. Each iteration: for every node, try moving it to each neighbor's community and keep the move that maximizes modularity gain. Repeat until no moves improve modularity.
 
@@ -843,7 +915,7 @@ git commit -m "feat(engine): add OP_LOUVAIN community detection kernel"
 
 ---
 
-## Task 5: Rust FFI Bindings + Safe Wrappers
+## Task 6: Rust FFI Bindings + Safe Wrappers
 
 Expose all four algorithms through `ffi.rs` and `engine.rs`.
 
@@ -952,7 +1024,7 @@ git commit -m "feat: add FFI bindings and safe wrappers for graph algorithms"
 
 ---
 
-## Task 6: Rust API Tests
+## Task 7: Rust API Tests
 
 Test each algorithm through the Rust API to verify the C kernels work correctly.
 
@@ -1046,6 +1118,8 @@ fn graph_dijkstra() {
     let edges = ctx.read_csv(&path).unwrap();
 
     let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+    // Attach edge properties (the edge table itself) so Dijkstra can read weights
+    rel.set_props(&edges);
 
     let g = ctx.graph(&edges).unwrap();
     let src = g.const_i64(0).unwrap();
@@ -1073,7 +1147,7 @@ fn graph_dijkstra() {
 }
 ```
 
-- [ ] **Step 4: Add Louvain test**
+- [ ] **Step 4: Add Louvain test (note: step renumbered from original)**
 
 ```rust
 #[test]
@@ -1098,12 +1172,12 @@ fn graph_louvain() {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
 Run: `cargo test --all-features -- graph_pagerank graph_connected_comp graph_dijkstra graph_louvain`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add tests/engine_api.rs
@@ -1112,7 +1186,7 @@ git commit -m "test: add Rust API tests for PageRank, connected components, Dijk
 
 ---
 
-## Task 7: SQL/PGQ Integration
+## Task 8: SQL/PGQ Integration
 
 Expose algorithms via GRAPH_TABLE COLUMNS functions: `PAGERANK()`, `COMPONENT()`, `COMMUNITY()`, and `SHORTEST_DISTANCE()`.
 
@@ -1219,7 +1293,6 @@ query I
 SELECT COUNT(DISTINCT community) FROM GRAPH_TABLE (social MATCH (p:Person) COLUMNS (COMMUNITY(social, p) AS community)) WHERE community >= 0
 ----
 1
-```
 
 # Dijkstra: weighted shortest path (need weighted edge table)
 statement ok
@@ -1264,7 +1337,7 @@ git commit -m "feat(pgq): expose PageRank, connected components, Dijkstra, and c
 
 ---
 
-## Task 8: Full Regression Test
+## Task 9: Full Regression Test
 
 - [ ] **Step 1: Run complete test suite**
 
