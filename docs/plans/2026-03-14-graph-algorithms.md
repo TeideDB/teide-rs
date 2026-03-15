@@ -923,7 +923,7 @@ Expose all four algorithms through `ffi.rs` and `engine.rs`.
 - Modify: `src/ffi.rs`
 - Modify: `src/engine.rs`
 
-- [ ] **Step 1: Add FFI constants and declarations to `src/ffi.rs`**
+- [x] **Step 1: Add FFI constants and declarations to `src/ffi.rs`**
 
 After `OP_WCO_JOIN` (line 235):
 ```rust
@@ -961,7 +961,7 @@ In the `extern "C"` block, after `td_wco_join`:
     ) -> *mut td_op_t;
 ```
 
-- [ ] **Step 2: Add safe wrappers to `src/engine.rs`**
+- [x] **Step 2: Add safe wrappers to `src/engine.rs`**
 
 In the `impl Graph` block, after `wco_join`:
 ```rust
@@ -1010,12 +1010,12 @@ In the `impl Graph` block, after `wco_join`:
     }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/ffi.rs src/engine.rs
