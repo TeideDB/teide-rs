@@ -160,6 +160,23 @@ impl Tokens {
         Ok(())
     }
 
+    /// Return an error if there are unconsumed tokens (ignoring a trailing
+    /// semicolon). This prevents trailing garbage from being silently dropped.
+    fn expect_end(&self) -> Result<(), SqlError> {
+        let remaining: Vec<&str> = self.tokens[self.pos..]
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| *s != ";")
+            .collect();
+        if !remaining.is_empty() {
+            return Err(SqlError::Parse(format!(
+                "Unexpected trailing tokens: {}",
+                remaining.join(" ")
+            )));
+        }
+        Ok(())
+    }
+
 }
 
 /// Tokenize SQL into words and punctuation, respecting parentheses and commas.
@@ -319,6 +336,8 @@ fn parse_create_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
         edge_tables = parse_edge_tables(&mut t)?;
         t.expect(")")?;
     }
+
+    t.expect_end()?;
 
     Ok(PgqStatement::CreatePropertyGraph(CreatePropertyGraph {
         name,
@@ -674,6 +693,8 @@ fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
     let columns = parse_columns_clause(&mut t)?;
     t.expect(")")?;
 
+    t.expect_end()?;
+
     Ok(GraphTableExpr {
         graph_name,
         match_clause: MatchClause {
@@ -948,5 +969,6 @@ fn parse_drop_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     } else {
         name_or_if.to_lowercase()
     };
+    t.expect_end()?;
     Ok(PgqStatement::DropPropertyGraph { name, if_exists })
 }

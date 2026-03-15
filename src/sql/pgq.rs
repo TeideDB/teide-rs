@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::{Column, Graph, Rel, Table};
+use crate::{ffi, Column, Graph, Rel, Table};
 
 /// Monotonic counter for unique temp file names.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -521,6 +521,12 @@ fn plan_single_hop(
     let src_label = resolve_node_label(src_node, left_default_table, graph)?;
     let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
 
+    // Validate that explicit node labels match the edge's expected tables.
+    // Without this check, a query like (a:City)-[:knows]->(b:Person) could
+    // silently bind nodes to wrong table domains in heterogeneous graphs.
+    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source")?;
+    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination")?;
+
     let src_stored = session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?;
@@ -602,6 +608,27 @@ fn resolve_node_label<'a>(
                 ))
             })
     }
+}
+
+/// Validate that a node's resolved table matches the edge's expected table for
+/// its position (source or destination). Only checks when the node has an
+/// explicit label — if the node uses the default table, it's already correct.
+fn validate_node_table_for_edge(
+    node: &NodePattern,
+    resolved_table: &str,
+    expected_table: &str,
+    edge_label: &str,
+    position: &str,
+) -> Result<(), SqlError> {
+    if let Some(label) = &node.label {
+        if resolved_table != expected_table {
+            return Err(SqlError::Plan(format!(
+                "Node label '{label}' resolves to table '{resolved_table}', but edge \
+                 '{edge_label}' expects {position} table '{expected_table}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Apply a WHERE filter from a node pattern.
@@ -817,22 +844,55 @@ pub(super) fn validate_key_column_is_rowid(
 
 /// Get a cell value as a string for CSV output.
 /// String values are quoted and escaped for CSV safety.
+/// Temporal types (DATE, TIME, TIMESTAMP) are formatted as human-readable
+/// strings and quoted so the CSV reader preserves them as SYM, not integers.
 fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlError> {
-    // Try string first (SYM columns)
-    if let Some(s) = table.get_str(col, row) {
-        return Ok(csv_quote(&s));
+    let typ = table.col_type(col);
+    match typ {
+        ffi::TD_SYM => {
+            if let Some(s) = table.get_str(col, row) {
+                return Ok(csv_quote(&s));
+            }
+        }
+        ffi::TD_DATE => {
+            if let Some(v) = table.get_i64(col, row) {
+                return Ok(csv_quote(&Table::format_date(v as i32)));
+            }
+        }
+        ffi::TD_TIME => {
+            if let Some(v) = table.get_i64(col, row) {
+                return Ok(csv_quote(&Table::format_time(v as i32)));
+            }
+        }
+        ffi::TD_TIMESTAMP => {
+            if let Some(v) = table.get_i64(col, row) {
+                return Ok(csv_quote(&Table::format_timestamp(v)));
+            }
+        }
+        ffi::TD_F64 => {
+            if let Some(v) = table.get_f64(col, row) {
+                return Ok(v.to_string());
+            }
+        }
+        ffi::TD_BOOL => {
+            if let Some(v) = table.get_i64(col, row) {
+                return Ok(if v != 0 { "true" } else { "false" }.to_string());
+            }
+        }
+        ffi::TD_U8 | ffi::TD_CHAR | ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
+            if let Some(v) = table.get_i64(col, row) {
+                return Ok(v.to_string());
+            }
+        }
+        other => {
+            return Err(SqlError::Plan(format!(
+                "unsupported column type {} in GRAPH_TABLE projection",
+                other
+            )));
+        }
     }
-    // Try i64 (also covers BOOL which is stored as 0/1 i64)
-    if let Some(v) = table.get_i64(col, row) {
-        return Ok(v.to_string());
-    }
-    // Try f64
-    if let Some(v) = table.get_f64(col, row) {
-        return Ok(v.to_string());
-    }
-    Err(SqlError::Plan(format!(
-        "Unsupported column type at col {col}, row {row} (DATE/TIME/TIMESTAMP not supported in GRAPH_TABLE)"
-    )))
+    // Matched a supported type but get returned None — NULL
+    Ok(String::new())
 }
 
 /// Quote a string value for CSV: always wrap in double quotes to preserve
@@ -895,11 +955,13 @@ fn plan_var_length(
     }
 
     let src_label = resolve_node_label(src_node, left_default_table, graph)?;
+    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source")?;
     let src_table = &session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?.table;
 
     let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
+    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination")?;
     let dst_table = &session.tables.get(&dst_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
     })?.table;
@@ -1097,6 +1159,32 @@ fn plan_shortest_path(
         (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.src_ref_col,
          &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.dst_ref_col)
     };
+
+    // Validate explicit node labels against the edge's expected tables.
+    if let Some(label) = &src_node.label {
+        let src_vl = graph.vertex_labels.get(label).ok_or_else(|| {
+            SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
+        })?;
+        if src_vl.table_name != *left_table {
+            return Err(SqlError::Plan(format!(
+                "Node label '{label}' resolves to table '{}', but edge '{edge_label}' \
+                 expects source table '{left_table}'",
+                src_vl.table_name
+            )));
+        }
+    }
+    if let Some(label) = &dst_node.label {
+        let dst_vl = graph.vertex_labels.get(label).ok_or_else(|| {
+            SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
+        })?;
+        if dst_vl.table_name != *right_table {
+            return Err(SqlError::Plan(format!(
+                "Node label '{label}' resolves to table '{}', but edge '{edge_label}' \
+                 expects destination table '{right_table}'",
+                dst_vl.table_name
+            )));
+        }
+    }
 
     // Shortest-path BFS requires src and dst to reference the same vertex table.
     // Range{1,1} and PathQuantifier::One are semantically single-hop, so skip
@@ -1476,6 +1564,7 @@ fn extract_node_id(
         None
     };
 
+    let mut found_row: Option<usize> = None;
     for row in 0..nrows {
         let matched = if let Some(ref sv) = str_val {
             stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
@@ -1488,13 +1577,19 @@ fn extract_node_id(
         };
 
         if matched {
-            return Ok(row as i64);
+            if found_row.is_some() {
+                return Err(SqlError::Plan(format!(
+                    "Ambiguous node filter: '{filter}' matches multiple rows in '{table_name}'. \
+                     SHORTEST_PATH requires filters that identify exactly one node."
+                )));
+            }
+            found_row = Some(row);
         }
     }
 
-    Err(SqlError::Plan(format!(
-        "No matching row for filter: {filter}"
-    )))
+    found_row.map(|r| r as i64).ok_or_else(|| {
+        SqlError::Plan(format!("No matching row for filter: {filter}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
