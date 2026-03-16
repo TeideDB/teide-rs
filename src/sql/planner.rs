@@ -236,7 +236,7 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
     // ascending (= similarity descending).
     let vi = session.find_vector_index(&pattern.table_name, &pattern.emb_column);
     let results: Vec<(i64, f64)> = if let Some(vi) = vi {
-        let ef_search = std::cmp::max(50, pattern.k as i32);
+        let ef_search = std::cmp::max(50, i32::try_from(pattern.k).unwrap_or(i32::MAX));
         vi.index
             .search(&pattern.query_vec, pattern.k, ef_search)
             .map_err(SqlError::Engine)?
