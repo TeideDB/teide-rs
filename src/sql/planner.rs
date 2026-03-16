@@ -388,9 +388,17 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
                 }
                 // Copy values at HNSW row IDs.
                 let elem_size = col_elem_size(src_col);
+                let src_nrows =
+                    unsafe { crate::ffi::td_len(src_col as *const crate::ffi::td_t) } as i64;
                 let src_data = unsafe { crate::ffi::td_data(src_col) as *const u8 };
                 let dst_data = unsafe { crate::ffi::td_data(new_vec) as *mut u8 };
                 for (out_row, &(row_id, _)) in results.iter().enumerate() {
+                    if row_id < 0 || row_id >= src_nrows {
+                        return Err(SqlError::Plan(format!(
+                            "KNN returned row_id {} out of range (table has {} rows)",
+                            row_id, src_nrows
+                        )));
+                    }
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             src_data.add(row_id as usize * elem_size),

@@ -508,7 +508,7 @@ fn execute_create_vector_index(
         )));
     }
     let n_floats = raw_len as usize;
-    if !n_floats.is_multiple_of(dim as usize) {
+    if n_floats % (dim as usize) != 0 {
         return Err(SqlError::Plan(format!(
             "Column '{}' has {} floats which is not divisible by dimension {} — data may be corrupt",
             parsed.column_name, n_floats, dim
