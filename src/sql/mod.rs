@@ -132,22 +132,139 @@ impl Session {
     /// Register an embedding column's dimension for a stored table.
     /// This enables the SQL planner to validate query vector lengths
     /// in COSINE_SIMILARITY / EUCLIDEAN_DISTANCE calls.
+    ///
+    /// Returns an error if the column does not exist or is not of type `TD_F32`.
     pub fn register_embedding_column(
         &mut self,
         table_name: &str,
         column_name: &str,
         dim: i32,
     ) -> Result<(), SqlError> {
+        if dim <= 0 {
+            return Err(SqlError::Plan(format!(
+                "Embedding dimension must be positive, got {dim}"
+            )));
+        }
         let table_key = table_name.to_lowercase();
         let col_key = column_name.to_lowercase();
         let stored = self.tables.get_mut(&table_key).ok_or_else(|| {
             SqlError::Plan(format!("Table '{table_name}' not found"))
         })?;
+        let col_idx = stored
+            .columns
+            .iter()
+            .position(|c| c.to_lowercase() == col_key)
+            .ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Column '{column_name}' not found in table '{table_name}'"
+                ))
+            })?;
+        // Check the raw type tag (not the normalized one from col_type(),
+        // which maps parted columns to their base type).  Parted F32 columns
+        // have a different physical layout and are not valid embedding storage.
+        let raw_type = stored.table.get_col_idx(col_idx as i64)
+            .map(|p| unsafe { crate::ffi::td_type(p) })
+            .unwrap_or(0);
+        if raw_type != crate::ffi::TD_F32 {
+            return Err(SqlError::Plan(format!(
+                "Column '{column_name}' in table '{table_name}' has type {raw_type}, \
+                 expected TD_F32={} for embedding columns \
+                 (use Table::create_embedding_column to create proper embedding columns)",
+                crate::ffi::TD_F32,
+            )));
+        }
+        stored.embedding_dims.insert(col_key, dim);
+        Ok(())
+    }
+
+    /// Register an embedding dimension for a column without checking its type.
+    ///
+    /// Unlike [`register_embedding_column`], this method does not verify that
+    /// the column is TD_F32.  It is intended for internal use (e.g., when the
+    /// planner propagates embedding metadata through query results whose
+    /// intermediate columns may not be typed TD_F32).
+    ///
+    /// Prefer [`register_embedding_column`] when registering user-facing
+    /// embedding columns, as it enforces the TD_F32 invariant.
+    #[doc(hidden)]
+    pub fn register_embedding_dim(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        dim: i32,
+    ) -> Result<(), SqlError> {
+        if dim <= 0 {
+            return Err(SqlError::Plan(format!(
+                "Embedding dimension must be positive, got {dim}"
+            )));
+        }
+        let table_key = table_name.to_lowercase();
+        let col_key = column_name.to_lowercase();
+        let stored = self.tables.get_mut(&table_key).ok_or_else(|| {
+            SqlError::Plan(format!("Table '{table_name}' not found"))
+        })?;
+        // Validate column exists
         if !stored.columns.iter().any(|c| c.to_lowercase() == col_key) {
             return Err(SqlError::Plan(format!(
                 "Column '{column_name}' not found in table '{table_name}'"
             )));
         }
+        stored.embedding_dims.insert(col_key, dim);
+        Ok(())
+    }
+
+    /// Add a TD_F32 embedding column to a stored table and register its dimension.
+    ///
+    /// Creates a proper embedding column via `Table::create_embedding_column`,
+    /// adds it to the table, and registers the dimension for SQL planner
+    /// validation.  The `data` slice must contain exactly `nrows * dim`
+    /// elements where `nrows` matches the current row count of the table.
+    pub fn add_embedding_column(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        dim: i32,
+        data: &[f32],
+    ) -> Result<(), SqlError> {
+        let table_key = table_name.to_lowercase();
+        let col_key = column_name.to_lowercase();
+        let stored = self.tables.get_mut(&table_key).ok_or_else(|| {
+            SqlError::Plan(format!("Table '{table_name}' not found"))
+        })?;
+        if stored.columns.iter().any(|c| c == &col_key) {
+            return Err(SqlError::Plan(format!(
+                "Column '{column_name}' already exists in table '{table_name}'"
+            )));
+        }
+        let nrows = stored.table.nrows();
+        let emb_col = Table::create_embedding_column(&self.ctx, nrows, dim, data)
+            .map_err(|e| SqlError::Plan(format!(
+                "Failed to create embedding column '{column_name}': {e}"
+            )))?;
+        let col_sym = match crate::sym_intern(&col_key) {
+            Ok(s) => s,
+            Err(e) => {
+                // Release the C object to avoid a leak on failure.
+                unsafe { crate::ffi::td_release(emb_col) };
+                return Err(SqlError::Plan(format!(
+                    "Failed to intern symbol for column '{column_name}': {e}"
+                )));
+            }
+        };
+        // Use the safe add_column_raw wrapper which handles COW pointer
+        // semantics correctly (updating self.raw in place without
+        // double-releasing the old handle via Drop).
+        // SAFETY: emb_col is a valid TD_F32 column from create_embedding_column.
+        if let Err(e) = unsafe { stored.table.add_column_raw(col_sym, emb_col) } {
+            unsafe { crate::ffi::td_release(emb_col) };
+            return Err(SqlError::Plan(format!(
+                "Failed to add embedding column '{column_name}' to table '{table_name}': {e}"
+            )));
+        }
+        // add_column_raw does NOT release the caller's reference to emb_col;
+        // td_table_add_col retained it internally, so release ours now.
+        unsafe { crate::ffi::td_release(emb_col) };
+        stored.columns.push(col_key.clone());
         stored.embedding_dims.insert(col_key, dim);
         Ok(())
     }
