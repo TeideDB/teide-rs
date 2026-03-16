@@ -236,8 +236,9 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
     // ascending (= similarity descending).
     let vi = session.find_vector_index(&pattern.table_name, &pattern.emb_column);
     let results: Vec<(i64, f64)> = if let Some(vi) = vi {
+        let ef_search = std::cmp::max(50, pattern.k as i32);
         vi.index
-            .search(&pattern.query_vec, pattern.k, 50)
+            .search(&pattern.query_vec, pattern.k, ef_search)
             .map_err(SqlError::Engine)?
     } else {
         // Brute-force: use td_knn which returns (_rowid, _similarity).
@@ -394,6 +395,7 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
                 let dst_data = unsafe { crate::ffi::td_data(new_vec) as *mut u8 };
                 for (out_row, &(row_id, _)) in results.iter().enumerate() {
                     if row_id < 0 || row_id >= src_nrows {
+                        unsafe { crate::ffi_release(new_vec) };
                         return Err(SqlError::Plan(format!(
                             "KNN returned row_id {} out of range (table has {} rows)",
                             row_id, src_nrows
@@ -408,7 +410,13 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
                     }
                 }
                 unsafe { (*new_vec).val.len = n_results as i64 };
-                let name_id = crate::sym_intern(name)?;
+                let name_id = match crate::sym_intern(name) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        unsafe { crate::ffi_release(new_vec) };
+                        return Err(SqlError::Engine(e));
+                    }
+                };
                 let res = builder.add_col(name_id, new_vec);
                 unsafe { crate::ffi_release(new_vec) };
                 res?;
@@ -431,7 +439,13 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
                     unsafe { *dst.add(i) = sim };
                 }
                 unsafe { (*new_vec).val.len = n_results as i64 };
-                let name_id = crate::sym_intern(name)?;
+                let name_id = match crate::sym_intern(name) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        unsafe { crate::ffi_release(new_vec) };
+                        return Err(SqlError::Engine(e));
+                    }
+                };
                 let res = builder.add_col(name_id, new_vec);
                 unsafe { crate::ffi_release(new_vec) };
                 res?;

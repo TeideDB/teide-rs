@@ -63,7 +63,7 @@ impl sqllogictest::DB for TeideDb {
                         _ => sqllogictest::DefaultColumnType::Text,
                     })
                     .collect();
-                let rows: Vec<Vec<String>> = (0..r.table.nrows() as usize)
+                let rows: Vec<Vec<String>> = (0..r.nrows)
                     .map(|row| {
                         (0..r.columns.len())
                             .map(|col| format_cell(&r.table, col, row))

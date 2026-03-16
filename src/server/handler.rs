@@ -242,7 +242,7 @@ impl SessionMeta {
                             (col_name, td_type)
                         })
                         .collect();
-                    let nrows = st.table.nrows();
+                    let nrows = st.logical_nrows();
                     (name.to_string(), TableMeta { columns, nrows })
                 })
             })
