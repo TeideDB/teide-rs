@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::sync::Mutex;
 
-use teide::{extract_field, ffi, AggOp, Context, Rel, Session, Table};
+use teide::{extract_field, ffi, AggOp, Context, HnswIndex, Rel, Session, Table};
 
 // The C engine uses global state — serialize all tests.
 static ENGINE_LOCK: Mutex<()> = Mutex::new(());
@@ -1785,4 +1785,60 @@ fn sql_select_distinct_rejected_on_embedding_table() {
     assert!(result.is_err(), "SELECT DISTINCT should be rejected on embedding tables");
     let err = format!("{}", result.err().unwrap());
     assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// HNSW Index Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hnsw_build_and_search() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 4;
+    let vectors: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // 0: x-axis
+        0.0, 1.0, 0.0, 0.0, // 1: y-axis
+        0.0, 0.0, 1.0, 0.0, // 2: z-axis
+        0.9, 0.1, 0.0, 0.0, // 3: near x-axis
+        0.1, 0.9, 0.0, 0.0, // 4: near y-axis
+    ];
+
+    let idx = HnswIndex::build(&ctx, &vectors, 5, dim, 4, 20).unwrap();
+
+    // Search for vectors near x-axis
+    let query = vec![1.0f32, 0.0, 0.0, 0.0];
+    let results = idx.search(&query, 3, 10).unwrap();
+
+    assert_eq!(results.len(), 3);
+    // Top result should be node 0 (exact match) — distance 0
+    assert_eq!(results[0].0, 0, "nearest should be node 0");
+    // Node 3 should be second (0.9, 0.1, 0, 0) — very close to x-axis
+    assert_eq!(results[1].0, 3, "second nearest should be node 3");
+}
+
+#[test]
+fn hnsw_save_load_roundtrip() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    let dim: i32 = 3;
+    let vectors: Vec<f32> = vec![
+        1.0, 0.0, 0.0, // 0
+        0.0, 1.0, 0.0, // 1
+        0.0, 0.0, 1.0, // 2
+    ];
+
+    let idx = HnswIndex::build(&ctx, &vectors, 3, dim, 4, 20).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_str().unwrap();
+    idx.save(dir_path).unwrap();
+
+    let idx2 = HnswIndex::load(dir_path).unwrap();
+    let query = vec![1.0f32, 0.0, 0.0];
+    let results = idx2.search(&query, 1, 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, 0, "loaded index should find node 0");
 }

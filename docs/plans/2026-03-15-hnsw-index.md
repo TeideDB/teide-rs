@@ -681,7 +681,7 @@ git commit -m "feat: add HnswIndex RAII wrapper with build/search/save/load/mmap
 **Files:**
 - Modify: `tests/engine_api.rs`
 
-- [ ] **Step 1: Add HNSW build + search test**
+- [x] **Step 1: Add HNSW build + search test**
 
 ```rust
 #[test]
@@ -712,7 +712,7 @@ fn hnsw_build_and_search() {
 }
 ```
 
-- [ ] **Step 2: Add HNSW save/load roundtrip test**
+- [x] **Step 2: Add HNSW save/load roundtrip test**
 
 ```rust
 #[test]
@@ -740,12 +740,12 @@ fn hnsw_save_load_roundtrip() {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test --all-features -- hnsw_build_and_search hnsw_save_load_roundtrip`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/engine_api.rs
