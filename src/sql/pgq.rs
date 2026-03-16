@@ -489,6 +489,12 @@ fn execute_create_vector_index(
     }
 
     let n_floats = unsafe { ffi::td_len(col_ptr) } as usize;
+    if !n_floats.is_multiple_of(dim as usize) {
+        return Err(SqlError::Plan(format!(
+            "Column '{}' has {} floats which is not divisible by dimension {} — data may be corrupt",
+            parsed.column_name, n_floats, dim
+        )));
+    }
     let n_nodes = (n_floats / dim as usize) as i64;
 
     // Extract the float data

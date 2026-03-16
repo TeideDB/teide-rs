@@ -2201,7 +2201,7 @@ impl HnswIndex {
         m: i32,
         ef_construction: i32,
     ) -> Result<Self> {
-        if m <= 0 || ef_construction <= 0 {
+        if m <= 0 || ef_construction <= 0 || dim <= 0 || n_nodes < 0 {
             return Err(Error::InvalidInput);
         }
         let expected = (dim as i64)
@@ -2224,7 +2224,7 @@ impl HnswIndex {
 
     /// Search for K nearest neighbors.
     pub fn search(&self, query: &[f32], k: i64, ef_search: i32) -> Result<Vec<(i64, f64)>> {
-        if k <= 0 {
+        if k <= 0 || ef_search <= 0 || query.is_empty() {
             return Err(Error::InvalidInput);
         }
         let dim = i32::try_from(query.len()).map_err(|_| Error::InvalidInput)?;

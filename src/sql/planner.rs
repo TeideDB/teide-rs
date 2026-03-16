@@ -94,6 +94,10 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                     },
                 );
                 if create.or_replace {
+                    // Vector indexes hold raw pointers into the old column data
+                    // which is now freed by the replacement.
+                    session.remove_vector_indexes_for_table(&table_name);
+
                     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
                         // Rollback: restore the old table
                         if let Some(old) = old_table {
@@ -116,6 +120,8 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                     .tables
                     .insert(table_name.clone(), StoredTable { table, columns, embedding_dims: HashMap::new() });
                 if create.or_replace {
+                    session.remove_vector_indexes_for_table(&table_name);
+
                     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
                         if let Some(old) = old_table {
                             session.tables.insert(table_name, old);
@@ -677,6 +683,10 @@ fn plan_update(
             embedding_dims: prev_embedding_dims,
         },
     );
+
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped before any search can dereference them.
+    session.remove_vector_indexes_for_table(&table_name);
 
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
         if let Some(old) = old_table {
