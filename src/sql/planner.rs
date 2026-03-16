@@ -456,7 +456,7 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
         .ok_or_else(|| SqlError::Plan(format!("Table '{table_name}' not found")))?;
 
     let columns = stored.columns.clone();
-    let old_nrows = stored.table.nrows();
+    let old_nrows = stored.logical_nrows();
 
     // Embedding columns are flat N*D F32 arrays.  The C engine's filter
     // kernel operates element-wise and is not dimension-aware, so filtering
