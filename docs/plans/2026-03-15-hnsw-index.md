@@ -531,7 +531,7 @@ git commit -m "feat(engine): add OP_HNSW_KNN execution kernel"
 - Modify: `src/ffi.rs`
 - Modify: `src/engine.rs`
 
-- [ ] **Step 1: Add FFI declarations**
+- [x] **Step 1: Add FFI declarations**
 
 ```rust
 // --- HNSW Index ---
@@ -572,7 +572,7 @@ extern "C" {
 }
 ```
 
-- [ ] **Step 2: Add `HnswIndex` RAII wrapper in `engine.rs`**
+- [x] **Step 2: Add `HnswIndex` RAII wrapper in `engine.rs`**
 
 ```rust
 /// RAII wrapper for a C-allocated HNSW index.
@@ -662,12 +662,12 @@ impl Drop for HnswIndex {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/ffi.rs src/engine.rs

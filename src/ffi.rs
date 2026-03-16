@@ -245,6 +245,7 @@ pub const OP_LOUVAIN: u16 = 87;
 pub const OP_COSINE_SIM: u16 = 88;
 pub const OP_EUCLIDEAN_DIST: u16 = 89;
 pub const OP_KNN: u16 = 90;
+pub const OP_HNSW_KNN: u16 = 91;
 
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
@@ -593,6 +594,11 @@ pub struct td_task_t {
 
 #[repr(C)]
 pub struct td_dispatch_t {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+pub struct td_hnsw_t {
     _opaque: [u8; 0],
 }
 
@@ -1001,6 +1007,36 @@ extern "C" {
         query_vec: *const f32,
         dim: i32,
         k: i64,
+    ) -> *mut td_op_t;
+
+    // --- HNSW Index API ---
+    pub fn td_hnsw_build(
+        vectors: *const f32,
+        n_nodes: i64,
+        dim: i32,
+        m: i32,
+        ef_construction: i32,
+    ) -> *mut td_hnsw_t;
+    pub fn td_hnsw_free(idx: *mut td_hnsw_t);
+    pub fn td_hnsw_search(
+        idx: *const td_hnsw_t,
+        query: *const f32,
+        dim: i32,
+        k: i64,
+        ef_search: i32,
+        out_ids: *mut i64,
+        out_dists: *mut f64,
+    ) -> i64;
+    pub fn td_hnsw_save(idx: *const td_hnsw_t, dir: *const c_char) -> td_err_t;
+    pub fn td_hnsw_load(dir: *const c_char) -> *mut td_hnsw_t;
+    pub fn td_hnsw_mmap(dir: *const c_char) -> *mut td_hnsw_t;
+    pub fn td_hnsw_knn(
+        g: *mut td_graph_t,
+        idx: *mut td_hnsw_t,
+        query_vec: *const f32,
+        dim: i32,
+        k: i64,
+        ef_search: i32,
     ) -> *mut td_op_t;
 
     // --- CSV API ---

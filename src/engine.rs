@@ -2182,6 +2182,110 @@ impl Drop for Rel {
 }
 
 // ---------------------------------------------------------------------------
+// HnswIndex — RAII wrapper for td_hnsw_t
+// ---------------------------------------------------------------------------
+
+/// RAII wrapper for a C-allocated HNSW index.
+pub struct HnswIndex {
+    ptr: *mut ffi::td_hnsw_t,
+    _engine: Arc<EngineGuard>,
+}
+
+impl HnswIndex {
+    /// Build an HNSW index from embedding data.
+    pub fn build(
+        ctx: &Context,
+        vectors: &[f32],
+        n_nodes: i64,
+        dim: i32,
+        m: i32,
+        ef_construction: i32,
+    ) -> Result<Self> {
+        if vectors.len() != (n_nodes * dim as i64) as usize {
+            return Err(Error::Length);
+        }
+        let ptr = unsafe {
+            ffi::td_hnsw_build(vectors.as_ptr(), n_nodes, dim, m, ef_construction)
+        };
+        if ptr.is_null() {
+            return Err(Error::Oom);
+        }
+        Ok(HnswIndex {
+            ptr,
+            _engine: ctx.engine.clone(),
+        })
+    }
+
+    /// Search for K nearest neighbors.
+    pub fn search(&self, query: &[f32], k: i64, ef_search: i32) -> Result<Vec<(i64, f64)>> {
+        let dim = query.len() as i32;
+        let mut ids = vec![0i64; k as usize];
+        let mut dists = vec![0f64; k as usize];
+        let n_found = unsafe {
+            ffi::td_hnsw_search(
+                self.ptr,
+                query.as_ptr(),
+                dim,
+                k,
+                ef_search,
+                ids.as_mut_ptr(),
+                dists.as_mut_ptr(),
+            )
+        };
+        ids.truncate(n_found as usize);
+        dists.truncate(n_found as usize);
+        Ok(ids.into_iter().zip(dists).collect())
+    }
+
+    /// Save index to disk.
+    pub fn save(&self, dir: &str) -> Result<()> {
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let err = unsafe { ffi::td_hnsw_save(self.ptr, c_dir.as_ptr()) };
+        if err != ffi::td_err_t::TD_OK {
+            return Err(Error::from_code(err));
+        }
+        Ok(())
+    }
+
+    /// Load index from disk.
+    pub fn load(dir: &str) -> Result<Self> {
+        let engine = acquire_existing_engine_guard()?;
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe { ffi::td_hnsw_load(c_dir.as_ptr()) };
+        if ptr.is_null() {
+            return Err(Error::Io);
+        }
+        Ok(HnswIndex { ptr, _engine: engine })
+    }
+
+    /// Memory-map index from disk (zero-copy).
+    pub fn mmap(dir: &str) -> Result<Self> {
+        let engine = acquire_existing_engine_guard()?;
+        let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
+        let ptr = unsafe { ffi::td_hnsw_mmap(c_dir.as_ptr()) };
+        if ptr.is_null() {
+            return Err(Error::Io);
+        }
+        Ok(HnswIndex { ptr, _engine: engine })
+    }
+
+    /// Raw pointer for FFI interop.
+    pub fn as_raw(&self) -> *mut ffi::td_hnsw_t {
+        self.ptr
+    }
+}
+
+impl Drop for HnswIndex {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                ffi::td_hnsw_free(self.ptr);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Re-exports for downstream crates
 // ---------------------------------------------------------------------------
 
