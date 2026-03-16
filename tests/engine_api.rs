@@ -1735,3 +1735,33 @@ fn sql_select_limit_rejected_on_embedding_table() {
     let err = format!("{}", result.err().unwrap());
     assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
 }
+
+#[test]
+fn sql_select_group_by_rejected_on_embedding_table() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    let result = session.execute("SELECT name, COUNT(*) FROM docs GROUP BY name");
+    assert!(result.is_err(), "SELECT GROUP BY should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}
+
+#[test]
+fn sql_select_distinct_rejected_on_embedding_table() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    let result = session.execute("SELECT DISTINCT name FROM docs");
+    assert!(result.is_err(), "SELECT DISTINCT should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}

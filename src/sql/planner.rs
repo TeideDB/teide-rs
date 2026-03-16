@@ -1286,9 +1286,10 @@ fn plan_query(
     let has_windows = has_window_functions(select_items);
 
     // Embedding columns are flat N*D F32 arrays.  The C engine's filter,
-    // sort, and head kernels operate element-wise and are not dimension-aware,
-    // so filtering, ordering, or limiting a table that contains embedding
-    // columns would corrupt their data.
+    // sort, head, group-by, and distinct kernels operate element-wise and
+    // are not dimension-aware, so filtering, ordering, limiting, grouping,
+    // or deduplicating a table that contains embedding columns would corrupt
+    // their data.
     if !from_embedding_dims.is_empty() {
         let emb_cols: Vec<_> = from_embedding_dims.keys().cloned().collect();
         let emb_list = emb_cols.join(", ");
@@ -1307,6 +1308,18 @@ fn plan_query(
         if limit_val.is_some() || offset_val.is_some() {
             return Err(SqlError::Plan(format!(
                 "SELECT with LIMIT/OFFSET is not yet supported on tables with embedding columns \
+                 (source has embedding columns: {emb_list})"
+            )));
+        }
+        if has_group_by || has_aggregates {
+            return Err(SqlError::Plan(format!(
+                "SELECT with GROUP BY/aggregation is not yet supported on tables with embedding columns \
+                 (source has embedding columns: {emb_list})"
+            )));
+        }
+        if is_distinct {
+            return Err(SqlError::Plan(format!(
+                "SELECT DISTINCT is not yet supported on tables with embedding columns \
                  (source has embedding columns: {emb_list})"
             )));
         }
