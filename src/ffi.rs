@@ -1018,6 +1018,7 @@ extern "C" {
         ef_construction: i32,
     ) -> *mut td_hnsw_t;
     pub fn td_hnsw_free(idx: *mut td_hnsw_t);
+    pub fn td_hnsw_dim(idx: *const td_hnsw_t) -> i32;
     pub fn td_hnsw_search(
         idx: *const td_hnsw_t,
         query: *const f32,

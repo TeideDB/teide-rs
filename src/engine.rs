@@ -2188,6 +2188,7 @@ impl Drop for Rel {
 /// RAII wrapper for a C-allocated HNSW index.
 pub struct HnswIndex {
     ptr: *mut ffi::td_hnsw_t,
+    dim: i32,
     _engine: Arc<EngineGuard>,
 }
 
@@ -2218,6 +2219,7 @@ impl HnswIndex {
         }
         Ok(HnswIndex {
             ptr,
+            dim,
             _engine: ctx.engine.clone(),
         })
     }
@@ -2228,6 +2230,9 @@ impl HnswIndex {
             return Err(Error::InvalidInput);
         }
         let dim = i32::try_from(query.len()).map_err(|_| Error::InvalidInput)?;
+        if dim != self.dim {
+            return Err(Error::Length);
+        }
         let mut ids = vec![0i64; k as usize];
         let mut dists = vec![0f64; k as usize];
         let n_found = unsafe {
@@ -2267,7 +2272,8 @@ impl HnswIndex {
         if ptr.is_null() {
             return Err(Error::Io);
         }
-        Ok(HnswIndex { ptr, _engine: engine })
+        let dim = unsafe { ffi::td_hnsw_dim(ptr) };
+        Ok(HnswIndex { ptr, dim, _engine: engine })
     }
 
     /// Memory-map index from disk.
@@ -2280,7 +2286,8 @@ impl HnswIndex {
         if ptr.is_null() {
             return Err(Error::Io);
         }
-        Ok(HnswIndex { ptr, _engine: engine })
+        let dim = unsafe { ffi::td_hnsw_dim(ptr) };
+        Ok(HnswIndex { ptr, dim, _engine: engine })
     }
 
     /// Raw pointer for FFI interop.
