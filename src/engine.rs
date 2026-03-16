@@ -2201,7 +2201,7 @@ impl HnswIndex {
         m: i32,
         ef_construction: i32,
     ) -> Result<Self> {
-        if m <= 0 || ef_construction <= 0 || dim <= 0 || n_nodes < 0 {
+        if m <= 0 || ef_construction <= 0 || dim <= 0 || n_nodes <= 0 {
             return Err(Error::InvalidInput);
         }
         let expected = (dim as i64)

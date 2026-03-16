@@ -94,10 +94,6 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                     },
                 );
                 if create.or_replace {
-                    // Vector indexes hold raw pointers into the old column data
-                    // which is now freed by the replacement.
-                    session.remove_vector_indexes_for_table(&table_name);
-
                     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
                         // Rollback: restore the old table
                         if let Some(old) = old_table {
@@ -107,6 +103,9 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                         }
                         return Err(e);
                     }
+                    // Vector indexes hold raw pointers into the old column data
+                    // which is now freed — drop after rollback checks succeed.
+                    session.remove_vector_indexes_for_table(&table_name);
                 }
 
                 Ok(ExecResult::Ddl(format!(
@@ -120,8 +119,6 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                     .tables
                     .insert(table_name.clone(), StoredTable { table, columns, embedding_dims: HashMap::new() });
                 if create.or_replace {
-                    session.remove_vector_indexes_for_table(&table_name);
-
                     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
                         if let Some(old) = old_table {
                             session.tables.insert(table_name, old);
@@ -130,6 +127,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                         }
                         return Err(e);
                     }
+                    session.remove_vector_indexes_for_table(&table_name);
                 }
 
                 Ok(ExecResult::Ddl(format!(
@@ -397,8 +395,6 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         }
     }
 
-    let nrows = source_table.nrows();
-
     // Concatenate with existing table
     let existing = &stored.table;
     let merged = concat_tables(&session.ctx, existing, &source_table)?;
@@ -416,18 +412,20 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         },
     );
 
-    // Vector indexes hold raw pointers into the old column data which is now
-    // freed, so they must be dropped before any search can dereference them.
-    session.remove_vector_indexes_for_table(&table_name);
-
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
-        // Rollback: restore the previous table state
+        // Rollback: restore the previous table state (and keep vector indexes
+        // intact since old_table still holds the data they reference).
         if let Some(old) = old_table {
             session.tables.insert(table_name, old);
         }
         return Err(e);
     }
 
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped after rollback checks succeed.
+    session.remove_vector_indexes_for_table(&table_name);
+
+    let nrows = source_logical_nrows;
     Ok(ExecResult::Ddl(format!(
         "Inserted {nrows} rows into '{table_name}'"
     )))
@@ -512,16 +510,16 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
         },
     );
 
-    // Vector indexes hold raw pointers into the old column data which is now
-    // freed, so they must be dropped before any search can dereference them.
-    session.remove_vector_indexes_for_table(&table_name);
-
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
         if let Some(old) = old_table {
             session.tables.insert(table_name, old);
         }
         return Err(e);
     }
+
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped after rollback checks succeed.
+    session.remove_vector_indexes_for_table(&table_name);
 
     Ok(ExecResult::Ddl(format!(
         "Deleted {deleted} rows from '{table_name}'"
@@ -684,16 +682,16 @@ fn plan_update(
         },
     );
 
-    // Vector indexes hold raw pointers into the old column data which is now
-    // freed, so they must be dropped before any search can dereference them.
-    session.remove_vector_indexes_for_table(&table_name);
-
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
         if let Some(old) = old_table {
             session.tables.insert(table_name, old);
         }
         return Err(e);
     }
+
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped after rollback checks succeed.
+    session.remove_vector_indexes_for_table(&table_name);
 
     Ok(ExecResult::Ddl(format!(
         "Updated {updated_count} rows in '{table_name}'"

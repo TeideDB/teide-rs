@@ -488,7 +488,14 @@ fn execute_create_vector_index(
         )));
     }
 
-    let n_floats = unsafe { ffi::td_len(col_ptr) } as usize;
+    let raw_len = unsafe { ffi::td_len(col_ptr) };
+    if raw_len <= 0 {
+        return Err(SqlError::Plan(format!(
+            "Column '{}' is empty or has invalid length {}",
+            parsed.column_name, raw_len
+        )));
+    }
+    let n_floats = raw_len as usize;
     if !n_floats.is_multiple_of(dim as usize) {
         return Err(SqlError::Plan(format!(
             "Column '{}' has {} floats which is not divisible by dimension {} — data may be corrupt",
