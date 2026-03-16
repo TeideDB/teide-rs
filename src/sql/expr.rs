@@ -240,16 +240,18 @@ pub fn plan_expr(
         }
 
         // CompoundIdentifier: table_alias.column
+        // Try qualified name first to avoid ambiguity in joins with
+        // duplicate column names (g.scan picks the first physical match).
         Expr::CompoundIdentifier(parts) => {
             if parts.len() == 2 {
                 let col_name = parts[1].value.to_lowercase();
-                if schema.contains_key(&col_name) {
-                    return Ok(g.scan(&col_name)?);
-                }
-                // Try fully qualified name "alias.col"
                 let full = format!("{}.{}", parts[0].value.to_lowercase(), col_name);
                 if schema.contains_key(&full) {
                     return Ok(g.scan(&full)?);
+                }
+                // Fall back to bare column name
+                if schema.contains_key(&col_name) {
+                    return Ok(g.scan(&col_name)?);
                 }
                 return Err(SqlError::Plan(format!("Column '{}' not found", col_name)));
             }
@@ -682,6 +684,7 @@ fn plan_scalar_function(
 }
 
 /// Extract the column name from an expression, unwrapping parentheses.
+/// For compound identifiers like `t.col`, returns only the bare column name.
 pub(crate) fn extract_col_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
@@ -689,6 +692,21 @@ pub(crate) fn extract_col_name(expr: &Expr) -> Option<String> {
             Some(parts[1].value.to_lowercase())
         }
         Expr::Nested(inner) => extract_col_name(inner),
+        _ => None,
+    }
+}
+
+/// Like [`extract_col_name`] but preserves table qualifiers.
+/// Returns `"table.col"` for compound identifiers, `"col"` for bare identifiers.
+pub(crate) fn extract_col_name_qualified(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 2 => Some(format!(
+            "{}.{}",
+            parts[0].value.to_lowercase(),
+            parts[1].value.to_lowercase()
+        )),
+        Expr::Nested(inner) => extract_col_name_qualified(inner),
         _ => None,
     }
 }
@@ -704,7 +722,11 @@ fn check_vector_dim(
     query_vec: &[f32],
     func_name: &str,
 ) -> Result<(), SqlError> {
-    let col_name = extract_col_name(expr);
+    // Try qualified name first (resolves JOIN-ambiguous embedding dims
+    // where the bare name was poisoned), then fall back to bare name.
+    let col_name = extract_col_name_qualified(expr)
+        .filter(|q| g.column_embedding_dims.contains_key(q))
+        .or_else(|| extract_col_name(expr));
     if let Some(col_name) = col_name {
         if let Some(&expected) = g.column_embedding_dims.get(&col_name) {
             let actual = i32::try_from(query_vec.len()).map_err(|_| {

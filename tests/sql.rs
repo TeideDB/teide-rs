@@ -487,10 +487,12 @@ fn join_full_outer_sql() {
     );
     assert_eq!(r.table.nrows(), 21);
 
-    // Verify the result has columns from both sides
-    // Left table has 9 cols; right table has 2 cols (id1 = key, skipped; x1 = non-key)
-    // Total = 9 left + 1 right (x1) = 10
-    assert_eq!(r.columns.len(), 10);
+    // Verify the result has columns from both sides.
+    // Left table has 9 cols; right table has 2 cols (id1 + x1).
+    // FULL OUTER JOIN ON preserves both key columns (either can be NULL for
+    // unmatched rows), so duplicate "id1" is renamed to "y.id1".
+    // Total = 9 left + 2 right = 11
+    assert_eq!(r.columns.len(), 11);
 }
 
 #[test]
