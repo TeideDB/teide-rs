@@ -1152,8 +1152,15 @@ fn plan_query(
 
             let keep_matches = matches!(op, sqlparser::ast::SetOperator::Intersect);
 
+            let merged_dims = intersect_embedding_dims_positional(
+                &left_result.columns,
+                &left_result.embedding_dims,
+                &right_result.columns,
+                &right_result.embedding_dims,
+                if keep_matches { "INTERSECT" } else { "EXCEPT" },
+            )?;
             let result =
-                exec_set_operation(ctx, &left_result.table, &right_result.table, keep_matches)?;
+                exec_set_operation(ctx, &left_result.table, &right_result.table, keep_matches, &merged_dims)?;
 
             // Without ALL: apply DISTINCT
             let result = if !is_all {
@@ -1287,6 +1294,21 @@ fn plan_query(
     let offset_val = extract_offset(query)?;
     let limit_val = extract_limit(query)?;
     let has_windows = has_window_functions(select_items);
+
+    // Embedding columns are flat N*D F32 arrays.  The C engine's filter
+    // kernel operates element-wise and is not dimension-aware, so filtering
+    // a table that contains embedding columns would corrupt their data.
+    if effective_where.is_some() && !from_embedding_dims.is_empty() {
+        return Err(SqlError::Plan(format!(
+            "SELECT with WHERE is not yet supported on tables with embedding columns \
+             (source has embedding columns: {})",
+            from_embedding_dims
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
 
     // Stage 1: WHERE filter (resolve subqueries first)
     // Uses effective_where which may have had predicates removed by pushdown above.
@@ -1768,7 +1790,7 @@ fn resolve_from(
         for join in &from[0].joins {
             let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
             let left_ncols = result_table.ncols() as usize;
-            result_table = exec_cross_join(ctx, &result_table, &right_table)?;
+            result_table = exec_cross_join(ctx, &result_table, &right_table, &result_emb_dims)?;
             result_table = qualify_join_result(
                 &result_table, left_ncols, &result_schema, &right_schema,
                 false, table_factor_alias(&from[0].relation).as_deref(),
@@ -1787,7 +1809,7 @@ fn resolve_from(
         for twj in &from[1..] {
             let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
             let left_ncols = result_table.ncols() as usize;
-            result_table = exec_cross_join(ctx, &result_table, &right_table)?;
+            result_table = exec_cross_join(ctx, &result_table, &right_table, &result_emb_dims)?;
             result_table = qualify_join_result(
                 &result_table, left_ncols, &result_schema, &right_schema,
                 false, None,
@@ -1804,7 +1826,7 @@ fn resolve_from(
             for join in &twj.joins {
                 let (right_table2, right_schema2, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
                 let left_ncols2 = result_table.ncols() as usize;
-                result_table = exec_cross_join(ctx, &result_table, &right_table2)?;
+                result_table = exec_cross_join(ctx, &result_table, &right_table2, &result_emb_dims)?;
                 result_table = qualify_join_result(
                     &result_table, left_ncols2, &result_schema, &right_schema2,
                     false, None,
@@ -1868,7 +1890,7 @@ fn resolve_from(
             JoinOperator::FullOuter(..) => 2,
             JoinOperator::CrossJoin => {
                 let left_ncols = left_table.ncols() as usize;
-                let result = exec_cross_join(ctx, &left_table, &right_table)?;
+                let result = exec_cross_join(ctx, &left_table, &right_table, &from_emb_dims)?;
                 let result = qualify_join_result(
                     &result,
                     left_ncols,
@@ -3199,8 +3221,22 @@ fn concat_tables(ctx: &Context, left: &Table, right: &Table) -> Result<Table, Sq
 /// Rejects columns with null bitmaps because the memcpy expansion does not
 /// preserve them. This is fine in practice: cross join is only used for
 /// small literal tables that never contain nulls.
-fn exec_cross_join(ctx: &Context, left: &Table, right: &Table) -> Result<Table, SqlError> {
+fn exec_cross_join(
+    ctx: &Context,
+    left: &Table,
+    right: &Table,
+    embedding_dims: &HashMap<String, i32>,
+) -> Result<Table, SqlError> {
     let _ = ctx;
+
+    // Embedding columns are flat N*D F32 arrays.  The element-wise memcpy
+    // expansion does not handle multi-element rows, so reject early.
+    if !embedding_dims.is_empty() {
+        return Err(SqlError::Plan(
+            "CROSS JOIN is not supported on tables with embedding columns".into(),
+        ));
+    }
+
     let left = ensure_vector_columns(left, "CROSS JOIN")?;
     let right = ensure_vector_columns(right, "CROSS JOIN")?;
 
@@ -3295,10 +3331,21 @@ fn exec_set_operation(
     left: &Table,
     right: &Table,
     keep_matches: bool,
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<Table, SqlError> {
     use std::collections::HashMap as StdMap;
 
     let _ = ctx;
+
+    // Embedding columns are flat N*D F32 arrays.  The per-element hash/compare
+    // and copy logic is not dimension-aware, so reject early.
+    if !embedding_dims.is_empty() {
+        let op = if keep_matches { "INTERSECT" } else { "EXCEPT" };
+        return Err(SqlError::Plan(format!(
+            "{op} is not supported on tables with embedding columns"
+        )));
+    }
+
     let left = ensure_vector_columns(left, "SET operation")?;
     let right = ensure_vector_columns(right, "SET operation")?;
 
