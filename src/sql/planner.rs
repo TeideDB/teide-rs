@@ -410,6 +410,10 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         },
     );
 
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped before any search can dereference them.
+    session.remove_vector_indexes_for_table(&table_name);
+
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
         // Rollback: restore the previous table state
         if let Some(old) = old_table {
@@ -501,6 +505,10 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
             embedding_dims: prev_embedding_dims,
         },
     );
+
+    // Vector indexes hold raw pointers into the old column data which is now
+    // freed, so they must be dropped before any search can dereference them.
+    session.remove_vector_indexes_for_table(&table_name);
 
     if let Err(e) = session.invalidate_graphs_for_table(&table_name) {
         if let Some(old) = old_table {

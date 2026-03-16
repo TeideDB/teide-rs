@@ -2201,7 +2201,13 @@ impl HnswIndex {
         m: i32,
         ef_construction: i32,
     ) -> Result<Self> {
-        if vectors.len() != (n_nodes * dim as i64) as usize {
+        if m <= 0 || ef_construction <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let expected = (dim as i64)
+            .checked_mul(n_nodes)
+            .ok_or(Error::Length)?;
+        if vectors.len() != expected as usize {
             return Err(Error::Length);
         }
         let ptr = unsafe {
@@ -2218,7 +2224,10 @@ impl HnswIndex {
 
     /// Search for K nearest neighbors.
     pub fn search(&self, query: &[f32], k: i64, ef_search: i32) -> Result<Vec<(i64, f64)>> {
-        let dim = query.len() as i32;
+        if k <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let dim = i32::try_from(query.len()).map_err(|_| Error::InvalidInput)?;
         let mut ids = vec![0i64; k as usize];
         let mut dists = vec![0f64; k as usize];
         let n_found = unsafe {
@@ -2232,6 +2241,9 @@ impl HnswIndex {
                 dists.as_mut_ptr(),
             )
         };
+        if n_found < 0 {
+            return Err(Error::Domain);
+        }
         ids.truncate(n_found as usize);
         dists.truncate(n_found as usize);
         Ok(ids.into_iter().zip(dists).collect())
@@ -2258,7 +2270,9 @@ impl HnswIndex {
         Ok(HnswIndex { ptr, _engine: engine })
     }
 
-    /// Memory-map index from disk (zero-copy).
+    /// Memory-map index from disk.
+    /// NOTE: the C implementation does not yet use mmap; this currently
+    /// behaves identically to `load`.
     pub fn mmap(dir: &str) -> Result<Self> {
         let engine = acquire_existing_engine_guard()?;
         let c_dir = CString::new(dir).map_err(|_| Error::InvalidInput)?;
