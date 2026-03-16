@@ -790,6 +790,11 @@ fn parse_array_literal(expr: &Expr) -> Result<Vec<f32>, SqlError> {
     }
 }
 
+/// Non-failing version of `parse_array_literal` for use in query pattern detection.
+pub(crate) fn try_parse_array_literal(expr: &Expr) -> Option<Vec<f32>> {
+    parse_array_literal(expr).ok()
+}
+
 /// Parse a field/unit argument from a function call (string literal or identifier).
 fn parse_field_arg(arg: &Expr) -> Result<String, SqlError> {
     match arg {

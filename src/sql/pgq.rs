@@ -445,6 +445,18 @@ fn execute_create_vector_index(
         )));
     }
 
+    // Reject duplicate indexes on the same (table, column) pair to ensure
+    // deterministic transparent KNN optimisation via find_vector_index.
+    let dup_col_key = parsed.column_name.to_lowercase();
+    if session.vector_indexes.values().any(|vi| {
+        vi.table_name == parsed.table_name && vi.column_name == dup_col_key
+    }) {
+        return Err(SqlError::Plan(format!(
+            "A vector index already exists on {}.{}",
+            parsed.table_name, parsed.column_name
+        )));
+    }
+
     // Look up the table
     let stored = session.tables.get(&parsed.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", parsed.table_name))

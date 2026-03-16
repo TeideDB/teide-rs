@@ -692,6 +692,14 @@ fn print_table(result: &teide::sql::SqlResult) {
     let _ = lock.write_all(out.as_bytes());
 }
 
+fn csv_quote(val: &str) -> String {
+    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+        format!("\"{}\"", val.replace('"', "\"\""))
+    } else {
+        val.to_string()
+    }
+}
+
 fn print_csv(result: &teide::sql::SqlResult) {
     let table = &result.table;
     let col_indices = resolve_col_indices(result);
@@ -701,11 +709,12 @@ fn print_csv(result: &teide::sql::SqlResult) {
         .iter()
         .enumerate()
         .map(|(pos, &_idx)| {
-            if pos < result.columns.len() {
+            let val = if pos < result.columns.len() {
                 result.columns[pos].clone()
             } else {
                 table.col_name_str(_idx).to_string()
-            }
+            };
+            csv_quote(&val)
         })
         .collect();
     println!("{}", headers.join(","));
@@ -716,7 +725,8 @@ fn print_csv(result: &teide::sql::SqlResult) {
             .enumerate()
             .map(|(pos, &col)| {
                 let dim = emb_dims.get(pos).copied().unwrap_or(0);
-                format_cell(table, col, row, dim)
+                let val = format_cell(table, col, row, dim);
+                csv_quote(&val)
             })
             .collect();
         println!("{}", cells.join(","));

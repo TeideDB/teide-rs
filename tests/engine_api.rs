@@ -1938,3 +1938,85 @@ fn hnsw_sql_drop_table_cascades_vector_index() {
     let drop_idx = session.execute("DROP VECTOR INDEX idx");
     assert!(drop_idx.is_err(), "index should have been cascaded on table drop");
 }
+
+#[test]
+fn hnsw_knn_query_uses_index() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    // Create a table with an embedding column.
+    session
+        .execute("CREATE TABLE docs (id INTEGER, name VARCHAR)")
+        .unwrap();
+    session
+        .execute("INSERT INTO docs VALUES (0, 'math'), (1, 'science'), (2, 'art'), (3, 'physics'), (4, 'music')")
+        .unwrap();
+
+    let dim = 4i32;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // math
+        0.0, 1.0, 0.0, 0.0, // science
+        0.0, 0.0, 1.0, 0.0, // art
+        0.9, 0.1, 0.0, 0.0, // physics (near math)
+        0.0, 0.0, 0.0, 1.0, // music
+    ];
+    session
+        .add_embedding_column("docs", "embedding", dim, &embeddings)
+        .unwrap();
+
+    // Create an HNSW vector index.
+    session
+        .execute("CREATE VECTOR INDEX emb_idx ON docs(embedding) USING HNSW(M=4, ef_construction=20)")
+        .unwrap();
+
+    // Query: ORDER BY cosine_similarity LIMIT k — should use HNSW index.
+    let result = session
+        .execute("SELECT id, name, cosine_similarity(embedding, ARRAY[1.0, 0.0, 0.0, 0.0]) AS sim FROM docs ORDER BY cosine_similarity(embedding, ARRAY[1.0, 0.0, 0.0, 0.0]) DESC LIMIT 2")
+        .unwrap();
+    match &result {
+        teide::ExecResult::Query(sql_result) => {
+            assert_eq!(sql_result.nrows, 2, "should return 2 rows");
+            assert_eq!(sql_result.columns.len(), 3, "should have 3 columns: id, name, sim");
+            assert_eq!(sql_result.columns[0], "id");
+            assert_eq!(sql_result.columns[1], "name");
+        }
+        _ => panic!("Expected Query result"),
+    }
+}
+
+#[test]
+fn order_by_similarity_without_index() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    // Create a table with an embedding column but NO vector index.
+    session
+        .execute("CREATE TABLE docs2 (id INTEGER, name VARCHAR)")
+        .unwrap();
+    session
+        .execute("INSERT INTO docs2 VALUES (0, 'math'), (1, 'science'), (2, 'art')")
+        .unwrap();
+
+    let dim = 3i32;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, // math
+        0.0, 1.0, 0.0, // science
+        0.0, 0.0, 1.0, // art
+    ];
+    session
+        .add_embedding_column("docs2", "embedding", dim, &embeddings)
+        .unwrap();
+
+    // Without an index, ORDER BY cosine_similarity LIMIT k should still work
+    // (brute-force) when SELECT doesn't include the raw embedding column.
+    let result = session
+        .execute("SELECT id, cosine_similarity(embedding, ARRAY[1.0, 0.0, 0.0]) AS sim FROM docs2 ORDER BY sim DESC LIMIT 2")
+        .unwrap();
+    match &result {
+        teide::ExecResult::Query(sql_result) => {
+            assert_eq!(sql_result.nrows, 2, "should return 2 rows");
+            assert_eq!(sql_result.columns.len(), 2, "should have 2 columns: id, sim");
+        }
+        _ => panic!("Expected Query result"),
+    }
+}

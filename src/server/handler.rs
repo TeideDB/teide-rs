@@ -133,18 +133,6 @@ impl SessionBridge {
                         let ncols = sql_result.table.ncols() as usize;
                         let nrows = sql_result.nrows;
 
-                        let columns: Vec<(String, i8)> = (0..ncols)
-                            .map(|i| {
-                                let name = if i < sql_result.columns.len() {
-                                    sql_result.columns[i].clone()
-                                } else {
-                                    sql_result.table.col_name_str(i)
-                                };
-                                let td_type = sql_result.table.col_type(i);
-                                (name, td_type)
-                            })
-                            .collect();
-
                         // Build per-column embedding dims for display
                         let col_dims: Vec<i32> = (0..ncols)
                             .map(|i| {
@@ -154,6 +142,28 @@ impl SessionBridge {
                                     return 0;
                                 };
                                 sql_result.embedding_dims.get(name).copied().unwrap_or(0)
+                            })
+                            .collect();
+
+                        let columns: Vec<(String, i8)> = (0..ncols)
+                            .map(|i| {
+                                let name = if i < sql_result.columns.len() {
+                                    sql_result.columns[i].clone()
+                                } else {
+                                    sql_result.table.col_name_str(i)
+                                };
+                                let td_type = sql_result.table.col_type(i);
+                                // Multi-dimensional embedding columns are rendered
+                                // as "[...]" text.  Advertise them as VARCHAR so
+                                // typed PG clients don't try to parse them as
+                                // scalar FLOAT4.
+                                let dim = col_dims.get(i).copied().unwrap_or(0);
+                                let wire_type = if td_type == crate::ffi::TD_F32 && dim > 1 {
+                                    crate::ffi::TD_SYM
+                                } else {
+                                    td_type
+                                };
+                                (name, wire_type)
                             })
                             .collect();
 

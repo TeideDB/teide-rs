@@ -25,9 +25,9 @@ use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, ColumnDef, DataType, Delete, Distinct, Expr, FromTable,
-    FunctionArg, FunctionArgExpr, GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator,
-    ObjectName, ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
-    UnaryOperator, Value, Values,
+    FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert, JoinConstraint,
+    JoinOperator, ObjectName, ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, UnaryOperator, Value, Values,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -60,6 +60,10 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
 
     match stmt {
         Statement::Query(q) => {
+            // Try KNN fast path (HNSW-accelerated or brute-force).
+            if let Some(result) = try_hnsw_knn(session, &q)? {
+                return Ok(ExecResult::Query(result));
+            }
             let result = plan_query(&session.ctx, &q, Some(&session.tables))?;
             Ok(ExecResult::Query(result))
         }
@@ -80,7 +84,13 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
 
             if let Some(query) = &create.query {
                 // CREATE TABLE ... AS SELECT
-                let result = plan_query(&session.ctx, query, Some(&session.tables))?;
+                // Try KNN fast path (HNSW-accelerated or brute-force),
+                // then fall back to the general planner.
+                let result = if let Some(r) = try_hnsw_knn(session, query)? {
+                    r
+                } else {
+                    plan_query(&session.ctx, query, Some(&session.tables))?
+                };
                 let nrows = result.nrows as i64;
                 let ncols = result.columns.len();
 
@@ -174,6 +184,427 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
             "Only SELECT, CREATE TABLE, DROP TABLE, INSERT INTO, DELETE, and UPDATE are supported".into(),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// HNSW-accelerated KNN optimization
+// ---------------------------------------------------------------------------
+
+/// Information extracted from a KNN query pattern:
+/// `SELECT ... FROM table ORDER BY similarity_func(col, ARRAY[...]) LIMIT k`
+struct KnnPattern {
+    table_name: String,
+    emb_column: String,
+    query_vec: Vec<f32>,
+    k: i64,
+    func_name: String, // "cosine_similarity" or "euclidean_distance"
+    #[allow(dead_code)]
+    desc: bool, // ORDER BY direction (reserved for future reverse-order support)
+}
+
+/// Try to detect a KNN query pattern and execute it directly.
+/// Uses an HNSW index when available, otherwise falls back to brute-force KNN.
+/// Returns `Some(SqlResult)` if the pattern was matched, `None` otherwise.
+fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, SqlError> {
+    let pattern = match detect_knn_pattern(query) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let stored = session
+        .tables
+        .get(&pattern.table_name)
+        .ok_or_else(|| SqlError::Plan(format!("Table '{}' not found", pattern.table_name)))?;
+
+    // Validate query vector dimension against the embedding column.
+    let expected_dim = stored
+        .embedding_dims
+        .get(&pattern.emb_column)
+        .copied()
+        .unwrap_or(0);
+    if expected_dim > 0 && pattern.query_vec.len() as i32 != expected_dim {
+        return Err(SqlError::Plan(format!(
+            "Query vector has {} elements but column '{}' has dimension {}",
+            pattern.query_vec.len(),
+            pattern.emb_column,
+            expected_dim
+        )));
+    }
+
+    // Run search: HNSW-accelerated if an index exists, brute-force otherwise.
+    // Both paths produce (row_id, cosine_distance) pairs sorted by distance
+    // ascending (= similarity descending).
+    let vi = session.find_vector_index(&pattern.table_name, &pattern.emb_column);
+    let results: Vec<(i64, f64)> = if let Some(vi) = vi {
+        vi.index
+            .search(&pattern.query_vec, pattern.k, 50)
+            .map_err(SqlError::Engine)?
+    } else {
+        // Brute-force: use td_knn which returns (_rowid, _similarity).
+        let source_table = &stored.table;
+        let mut g = session.ctx.graph(source_table).map_err(SqlError::Engine)?;
+        let emb_col = g.scan(&pattern.emb_column).map_err(SqlError::Engine)?;
+        let knn_node = g
+            .knn_owned(emb_col, pattern.query_vec.clone(), pattern.k)
+            .map_err(SqlError::Engine)?;
+        let knn_table = g.execute(knn_node).map_err(SqlError::Engine)?;
+        let n = knn_table.nrows() as usize;
+        if n == 0 {
+            Vec::new()
+        } else {
+            let rowid_ptr = knn_table
+                .get_col_idx(0)
+                .ok_or_else(|| SqlError::Plan("KNN result missing _rowid".into()))?;
+            let sim_ptr = knn_table
+                .get_col_idx(1)
+                .ok_or_else(|| SqlError::Plan("KNN result missing _similarity".into()))?;
+            let rowids =
+                unsafe { std::slice::from_raw_parts(crate::ffi::td_data(rowid_ptr) as *const i64, n) };
+            let sims =
+                unsafe { std::slice::from_raw_parts(crate::ffi::td_data(sim_ptr) as *const f64, n) };
+            // Convert similarity to cosine distance for uniform handling
+            // with the HNSW path (which returns distances).
+            rowids
+                .iter()
+                .copied()
+                .zip(sims.iter().map(|&s| 1.0 - s))
+                .collect()
+        }
+    };
+    let n_results = results.len();
+
+    // Build the result table from the source table + HNSW results.
+    // For each SELECT column, extract values at the returned row IDs.
+    let select = match query.body.as_ref() {
+        SetExpr::Select(s) => s,
+        _ => return Ok(None),
+    };
+
+    let source_table = &stored.table;
+    let source_ncols = source_table.ncols() as usize;
+
+    // Determine which columns to include and their names.
+    let mut output_cols: Vec<OutputCol> = Vec::new();
+    for item in &select.projection {
+        match item {
+            SelectItem::Wildcard(_) => {
+                for c in 0..source_ncols {
+                    let name = source_table.col_name_str(c);
+                    let dim = stored.embedding_dims.get(&name).copied().unwrap_or(0);
+                    if dim > 1 {
+                        // Embedding columns cannot be projected correctly by
+                        // the HNSW fast path — fall back to brute-force,
+                        // consistent with explicit column projection.
+                        return Ok(None);
+                    }
+                    output_cols.push(OutputCol::SourceColumn(c, name.clone(), name));
+                }
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                if let Some(func) = extract_similarity_func(expr) {
+                    if func.name == pattern.func_name
+                        && func.column == pattern.emb_column
+                    {
+                        // The projected similarity must use the same query
+                        // vector as the ORDER BY; otherwise the HNSW search
+                        // distances would be reported under the wrong vector.
+                        let proj_vec = extract_query_vec_from_func(expr);
+                        if proj_vec.as_ref() != Some(&pattern.query_vec) {
+                            return Ok(None);
+                        }
+                        let alias = expr_default_name(expr);
+                        output_cols.push(OutputCol::Similarity(alias));
+                    } else {
+                        return Ok(None); // Unsupported expression
+                    }
+                } else if let Some(col_name) = try_extract_col_name(expr) {
+                    let col_name = col_name.to_lowercase();
+                    // Embedding columns cannot be projected correctly by the
+                    // HNSW fast path (they are multi-dimensional F32 arrays) —
+                    // fall through to the brute-force planner.
+                    if stored.embedding_dims.get(&col_name).is_some_and(|&d| d > 1) {
+                        return Ok(None);
+                    }
+                    let col_idx = find_col_index(source_table, &col_name)
+                        .ok_or_else(|| SqlError::Plan(format!("Column '{col_name}' not found")))?;
+                    output_cols.push(OutputCol::SourceColumn(col_idx, col_name.clone(), col_name));
+                } else {
+                    return Ok(None); // Complex expression — fall through
+                }
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                if let Some(func) = extract_similarity_func(expr) {
+                    if func.name == pattern.func_name
+                        && func.column == pattern.emb_column
+                    {
+                        let proj_vec = extract_query_vec_from_func(expr);
+                        if proj_vec.as_ref() != Some(&pattern.query_vec) {
+                            return Ok(None);
+                        }
+                        output_cols.push(OutputCol::Similarity(alias.value.to_lowercase()));
+                    } else {
+                        return Ok(None);
+                    }
+                } else if let Some(col_name) = try_extract_col_name(expr) {
+                    let col_name = col_name.to_lowercase();
+                    if stored.embedding_dims.get(&col_name).is_some_and(|&d| d > 1) {
+                        return Ok(None);
+                    }
+                    let col_idx = find_col_index(source_table, &col_name)
+                        .ok_or_else(|| SqlError::Plan(format!("Column '{col_name}' not found")))?;
+                    output_cols.push(OutputCol::SourceColumn(col_idx, alias.value.to_lowercase(), col_name));
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    if output_cols.is_empty() {
+        return Ok(None);
+    }
+
+    // Build the result table using raw FFI.
+    let ncols = output_cols.len();
+    let mut builder = RawTableBuilder::new(ncols as i64)?;
+    let mut col_names = Vec::with_capacity(ncols);
+
+    for output_col in &output_cols {
+        match output_col {
+            OutputCol::SourceColumn(src_idx, name, _) => {
+                let src_col = source_table
+                    .get_col_idx(*src_idx as i64)
+                    .ok_or_else(|| SqlError::Plan("Column missing".into()))?;
+                // Null bitmaps are not preserved by the memcpy gather below;
+                // fall back to the brute-force planner for nullable columns.
+                let attrs = unsafe { (*src_col).attrs };
+                if attrs & crate::ffi::TD_ATTR_HAS_NULLS != 0 {
+                    return Ok(None);
+                }
+                let new_vec = col_vec_new(src_col, n_results as i64);
+                if new_vec.is_null() || crate::ffi_is_err(new_vec) {
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                // Copy values at HNSW row IDs.
+                let elem_size = col_elem_size(src_col);
+                let src_data = unsafe { crate::ffi::td_data(src_col) as *const u8 };
+                let dst_data = unsafe { crate::ffi::td_data(new_vec) as *mut u8 };
+                for (out_row, &(row_id, _)) in results.iter().enumerate() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src_data.add(row_id as usize * elem_size),
+                            dst_data.add(out_row * elem_size),
+                            elem_size,
+                        );
+                    }
+                }
+                unsafe { (*new_vec).val.len = n_results as i64 };
+                let name_id = crate::sym_intern(name)?;
+                let res = builder.add_col(name_id, new_vec);
+                unsafe { crate::ffi_release(new_vec) };
+                res?;
+                col_names.push(name.clone());
+            }
+            OutputCol::Similarity(name) => {
+                let new_vec =
+                    unsafe { crate::raw::td_vec_new(crate::ffi::TD_F64, n_results as i64) };
+                if new_vec.is_null() || crate::ffi_is_err(new_vec) {
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                let dst = unsafe { crate::ffi::td_data(new_vec) as *mut f64 };
+                for (i, &(_, dist)) in results.iter().enumerate() {
+                    // HNSW returns cosine distance; convert to similarity
+                    let sim = if pattern.func_name == "cosine_similarity" {
+                        1.0 - dist
+                    } else {
+                        dist // euclidean_distance is already a distance
+                    };
+                    unsafe { *dst.add(i) = sim };
+                }
+                unsafe { (*new_vec).val.len = n_results as i64 };
+                let name_id = crate::sym_intern(name)?;
+                let res = builder.add_col(name_id, new_vec);
+                unsafe { crate::ffi_release(new_vec) };
+                res?;
+                col_names.push(name.clone());
+            }
+        }
+    }
+
+    let table = builder.finish()?;
+
+    // Propagate dim-1 embedding metadata for source columns that pass through.
+    // Dim-1 embeddings have layout identical to plain F32 columns (one float
+    // per row) so the memcpy gather above handles them correctly, but we must
+    // preserve the metadata so that CTAS inherits it into the derived table.
+    let mut result_embedding_dims = HashMap::new();
+    for output_col in &output_cols {
+        if let OutputCol::SourceColumn(_, output_name, src_name) = output_col {
+            if let Some(&d) = stored.embedding_dims.get(src_name) {
+                result_embedding_dims.insert(output_name.clone(), d);
+            }
+        }
+    }
+
+    // HNSW results are sorted by cosine distance ascending (= similarity
+    // descending), which matches the required ORDER BY ... DESC semantics.
+    Ok(Some(SqlResult {
+        nrows: n_results,
+        columns: col_names,
+        embedding_dims: result_embedding_dims,
+        table,
+    }))
+}
+
+enum OutputCol {
+    /// (column index in source table, output name, original source column name)
+    SourceColumn(usize, String, String),
+    Similarity(String), // output name for the similarity value
+}
+
+struct SimilarityFunc {
+    name: String,
+    column: String,
+}
+
+/// Extract similarity function info from an expression if it is
+/// cosine_similarity(col, ARRAY[...]) or euclidean_distance(col, ARRAY[...]).
+fn extract_similarity_func(expr: &Expr) -> Option<SimilarityFunc> {
+    if let Expr::Function(func) = expr {
+        let name = object_name_to_string(&func.name).to_lowercase();
+        if name == "cosine_similarity" || name == "euclidean_distance" {
+            if let FunctionArguments::List(arg_list) = &func.args {
+                if arg_list.args.len() == 2 {
+                    // Accept both bare identifier and table-qualified (e.g. d.embedding)
+                    let col_name = match &arg_list.args[0] {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) => {
+                            Some(ident.value.to_lowercase())
+                        }
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::CompoundIdentifier(parts))) => {
+                            parts.last().map(|p| p.value.to_lowercase())
+                        }
+                        _ => None,
+                    };
+                    if let Some(column) = col_name {
+                        return Some(SimilarityFunc { name, column });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the query vector from a similarity function's second argument
+/// (an ARRAY literal).
+fn extract_query_vec_from_func(expr: &Expr) -> Option<Vec<f32>> {
+    if let Expr::Function(func) = expr {
+        if let FunctionArguments::List(arg_list) = &func.args {
+            if arg_list.args.len() == 2 {
+                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(array_expr)) = &arg_list.args[1]
+                {
+                    return super::expr::try_parse_array_literal(array_expr);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect a KNN query pattern:
+/// `SELECT ... FROM table ORDER BY cosine_similarity(col, ARRAY[...]) DESC LIMIT k`
+/// with no WHERE, GROUP BY, HAVING, DISTINCT, JOINs, OFFSET, or subqueries.
+///
+/// Only matches cosine_similarity (the HNSW index is cosine-only).
+/// Only matches DESC ordering (most similar first), which is the natural
+/// HNSW output order.  OFFSET is rejected because the HNSW search returns
+/// exactly k results and cannot skip rows.
+fn detect_knn_pattern(query: &Query) -> Option<KnnPattern> {
+    // CTEs may shadow session table names; bail out and let the normal
+    // planner handle CTE resolution.
+    if query.with.is_some() {
+        return None;
+    }
+
+    // Must have ORDER BY and LIMIT, no OFFSET.
+    let order_by = query.order_by.as_ref()?;
+    if order_by.exprs.len() != 1 {
+        return None;
+    }
+    if query.offset.is_some() {
+        return None;
+    }
+    let limit_expr = query.limit.as_ref()?;
+    let k = match limit_expr {
+        Expr::Value(Value::Number(n, _)) => n.parse::<i64>().ok()?,
+        _ => return None,
+    };
+    if k <= 0 {
+        return None;
+    }
+
+    // ORDER BY must be a similarity function.
+    let ob = &order_by.exprs[0];
+    let desc = ob.asc.map(|asc| !asc).unwrap_or(false);
+    let sim_func = extract_similarity_func(&ob.expr)?;
+    let query_vec = extract_query_vec_from_func(&ob.expr)?;
+
+    // HNSW index is cosine-only — reject euclidean_distance.
+    if sim_func.name != "cosine_similarity" {
+        return None;
+    }
+
+    // Only DESC ordering matches HNSW output (most similar first).
+    // ASC would require returning the *least* similar rows, which HNSW
+    // cannot do efficiently.
+    if !desc {
+        return None;
+    }
+
+    // Body must be a simple SELECT.
+    let select = match query.body.as_ref() {
+        SetExpr::Select(s) => s,
+        _ => return None,
+    };
+
+    // No WHERE, GROUP BY, HAVING, DISTINCT.
+    if select.selection.is_some() || select.having.is_some() {
+        return None;
+    }
+    if !matches!(&select.group_by, GroupByExpr::Expressions(v, _) if v.is_empty()) {
+        return None;
+    }
+    if select.distinct.is_some() {
+        return None;
+    }
+
+    // Single table, no JOINs.
+    if select.from.len() != 1 {
+        return None;
+    }
+    let from = &select.from[0];
+    if !from.joins.is_empty() {
+        return None;
+    }
+    let table_name = match &from.relation {
+        TableFactor::Table { name, .. } => object_name_to_string(name).to_lowercase(),
+        _ => return None,
+    };
+
+    Some(KnnPattern {
+        table_name,
+        emb_column: sim_func.column,
+        query_vec,
+        k,
+        func_name: sim_func.name,
+        desc,
+    })
+}
+
+/// Find a column index by name in a table.
+fn find_col_index(table: &Table, name: &str) -> Option<usize> {
+    (0..table.ncols() as usize).find(|&c| table.col_name_str(c).eq_ignore_ascii_case(name))
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +726,13 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
                 (tbl, cols, HashMap::new(), nrows)
             }
             _ => {
-                // Treat as a subquery (SELECT ...)
-                let result = plan_query(&session.ctx, source_query, Some(&session.tables))?;
+                // Treat as a subquery (SELECT ...).
+                // Try KNN fast path first, then fall back to the general planner.
+                let result = if let Some(r) = try_hnsw_knn(session, source_query)? {
+                    r
+                } else {
+                    plan_query(&session.ctx, source_query, Some(&session.tables))?
+                };
                 let nrows = result.nrows;
                 (result.table, result.columns, result.embedding_dims, nrows)
             }
@@ -1375,10 +1811,17 @@ fn plan_query(
     if effective_where.is_some() {
         reject_if_has_embeddings(&high_dim_embeddings, "SELECT with WHERE")?;
     }
-    if !order_by_exprs.is_empty() {
+    // ORDER BY and LIMIT/OFFSET are safe when the result table being sorted
+    // contains no high-dim embedding columns.  The sort/head kernels operate
+    // element-wise, which is fine for scalar columns.  We check both the
+    // SELECT output and hidden ORDER BY columns for embedding references.
+    let sort_safe_for_embeddings = !high_dim_embeddings.is_empty()
+        && !select_output_has_embeddings(select_items, &high_dim_embeddings)
+        && !order_by_has_embedding_ref(&order_by_exprs, &high_dim_embeddings);
+    if !order_by_exprs.is_empty() && !sort_safe_for_embeddings {
         reject_if_has_embeddings(&high_dim_embeddings, "SELECT with ORDER BY")?;
     }
-    if limit_val.is_some() || offset_val.is_some() {
+    if (limit_val.is_some() || offset_val.is_some()) && !sort_safe_for_embeddings {
         reject_if_has_embeddings(&high_dim_embeddings, "SELECT with LIMIT/OFFSET")?;
     }
     if has_group_by || has_aggregates {
@@ -4303,6 +4746,41 @@ fn is_identity_projection(select_items: &[SelectItem], schema: &HashMap<String, 
     projected_names == schema_names
 }
 
+/// Recursively collect column identifier references from an expression.
+fn collect_expr_column_refs(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Identifier(ident) => {
+            out.push(ident.value.to_lowercase());
+        }
+        Expr::Function(f) => {
+            if let sqlparser::ast::FunctionArguments::List(arg_list) = &f.args {
+                for arg in &arg_list.args {
+                    if let sqlparser::ast::FunctionArg::Unnamed(
+                        sqlparser::ast::FunctionArgExpr::Expr(e),
+                    ) = arg
+                    {
+                        collect_expr_column_refs(e, out);
+                    }
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_expr_column_refs(left, out);
+            collect_expr_column_refs(right, out);
+        }
+        Expr::UnaryOp { expr: inner, .. } => {
+            collect_expr_column_refs(inner, out);
+        }
+        Expr::Nested(inner) => {
+            collect_expr_column_refs(inner, out);
+        }
+        Expr::Cast { expr: inner, .. } => {
+            collect_expr_column_refs(inner, out);
+        }
+        _ => {} // literals, arrays, etc. — no column refs
+    }
+}
+
 /// Collect ORDER BY columns that are valid source columns but not part of the
 /// visible SELECT projection. These will be carried as hidden columns.
 fn collect_hidden_order_columns(
@@ -4311,15 +4789,27 @@ fn collect_hidden_order_columns(
     schema: &HashMap<String, usize>,
 ) -> Vec<String> {
     let mut extra = Vec::new();
-    for (item, _, _) in order_by {
-        let OrderByItem::Name(name) = item else {
-            continue;
-        };
+    let add_if_hidden = |name: &String, extra: &mut Vec<String>| {
         if visible_aliases.iter().any(|a| a == name) {
-            continue;
+            return;
         }
         if schema.contains_key(name) && !extra.iter().any(|c| c == name) {
             extra.push(name.clone());
+        }
+    };
+    for (item, _, _) in order_by {
+        match item {
+            OrderByItem::Name(name) => {
+                add_if_hidden(name, &mut extra);
+            }
+            OrderByItem::Expression(expr) => {
+                let mut refs = Vec::new();
+                collect_expr_column_refs(expr, &mut refs);
+                for name in &refs {
+                    add_if_hidden(name, &mut extra);
+                }
+            }
+            OrderByItem::Position(_) => {}
         }
     }
     extra
@@ -4513,5 +5003,175 @@ fn extract_offset(query: &Query) -> Result<Option<i64>, SqlError> {
             }
             _ => Err(SqlError::Plan("OFFSET must be an integer literal".into())),
         },
+    }
+}
+
+/// Check if the SELECT output would include any high-dimensional embedding
+/// columns.  Returns `true` if a wildcard or direct column reference to a
+/// high-dim embedding column is found.  Function calls and other expressions
+/// produce scalar results and are safe.
+fn select_output_has_embeddings(
+    select_items: &[SelectItem],
+    embedding_dims: &HashMap<String, i32>,
+) -> bool {
+    if embedding_dims.is_empty() {
+        return false;
+    }
+    for item in select_items {
+        match item {
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
+                // Wildcard includes all source columns, including embeddings.
+                return true;
+            }
+            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                if expr_is_embedding_ref(expr, embedding_dims) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if ORDER BY items would place any high-dimensional embedding column
+/// into the result table as a hidden sort key.
+fn order_by_has_embedding_ref(
+    order_by: &[(OrderByItem, bool, Option<bool>)],
+    embedding_dims: &HashMap<String, i32>,
+) -> bool {
+    for (item, _, _) in order_by {
+        match item {
+            OrderByItem::Name(name) => {
+                if embedding_dims.get(name).is_some_and(|&d| d > 1) {
+                    return true;
+                }
+            }
+            OrderByItem::Expression(expr) => {
+                if expr_is_embedding_ref(expr, embedding_dims) {
+                    return true;
+                }
+            }
+            OrderByItem::Position(_) => {
+                // Positions reference SELECT output columns which are already
+                // checked by select_output_has_embeddings.
+            }
+        }
+    }
+    false
+}
+
+/// Check if an expression references a high-dim embedding column, recursively
+/// walking into sub-expressions.  Arithmetic over an embedding column (e.g.
+/// `embedding + 0.0`) still operates on the flat N*D buffer, so it must be
+/// rejected just like a direct reference.
+fn expr_is_embedding_ref(expr: &Expr, embedding_dims: &HashMap<String, i32>) -> bool {
+    match expr {
+        Expr::Identifier(ident) => {
+            embedding_dims
+                .get(&ident.value.to_lowercase())
+                .is_some_and(|&d| d > 1)
+        }
+        Expr::CompoundIdentifier(parts) => {
+            if let Some(last) = parts.last() {
+                embedding_dims
+                    .get(&last.value.to_lowercase())
+                    .is_some_and(|&d| d > 1)
+            } else {
+                false
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expr_is_embedding_ref(left, embedding_dims)
+                || expr_is_embedding_ref(right, embedding_dims)
+        }
+        Expr::UnaryOp { expr: inner, .. } => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::Nested(inner) => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::Function(func) => {
+            // cosine_similarity / euclidean_distance consume an embedding
+            // column but produce a scalar f64 result — they are safe.
+            let fname = object_name_to_string(&func.name).to_lowercase();
+            if fname == "cosine_similarity" || fname == "euclidean_distance" {
+                return false;
+            }
+            if let FunctionArguments::List(arg_list) = &func.args {
+                arg_list.args.iter().any(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                    | FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. } => {
+                        expr_is_embedding_ref(e, embedding_dims)
+                    }
+                    _ => false,
+                })
+            } else {
+                false
+            }
+        }
+        Expr::Cast { expr: inner, .. } => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_is_embedding_ref(inner, embedding_dims)
+        }
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            expr_is_embedding_ref(inner, embedding_dims)
+                || expr_is_embedding_ref(low, embedding_dims)
+                || expr_is_embedding_ref(high, embedding_dims)
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                if expr_is_embedding_ref(op, embedding_dims) {
+                    return true;
+                }
+            }
+            for c in conditions {
+                if expr_is_embedding_ref(c, embedding_dims) {
+                    return true;
+                }
+            }
+            for r in results {
+                if expr_is_embedding_ref(r, embedding_dims) {
+                    return true;
+                }
+            }
+            if let Some(e) = else_result {
+                if expr_is_embedding_ref(e, embedding_dims) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            ..
+        }
+        | Expr::ILike {
+            expr: inner,
+            pattern,
+            ..
+        } => {
+            expr_is_embedding_ref(inner, embedding_dims)
+                || expr_is_embedding_ref(pattern, embedding_dims)
+        }
+        Expr::Trim { expr: inner, .. } => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::Substring { expr: inner, .. } => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::Extract { expr: inner, .. } => expr_is_embedding_ref(inner, embedding_dims),
+        Expr::Ceil { expr: inner, .. } | Expr::Floor { expr: inner, .. } => {
+            expr_is_embedding_ref(inner, embedding_dims)
+        }
+        Expr::InList {
+            expr: inner, list, ..
+        } => {
+            expr_is_embedding_ref(inner, embedding_dims)
+                || list.iter().any(|e| expr_is_embedding_ref(e, embedding_dims))
+        }
+        _ => false,
     }
 }

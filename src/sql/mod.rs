@@ -560,7 +560,6 @@ impl Session {
     }
 
     /// Find a vector index for a given table and column.
-    #[allow(dead_code)]
     pub(crate) fn find_vector_index(
         &self,
         table_name: &str,

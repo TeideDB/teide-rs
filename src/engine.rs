@@ -2053,6 +2053,30 @@ impl<'a> Graph<'a> {
             ffi::td_knn(self.raw, emb_col.raw, ptr, dim, k)
         })
     }
+
+    /// HNSW-accelerated K nearest neighbor search.
+    /// Uses a pre-built HNSW index instead of brute-force scan.
+    /// Returns a table with `_rowid` (I64) and `_similarity` (F64) columns,
+    /// sorted by similarity descending (same format as `knn_owned`).
+    pub fn hnsw_knn(
+        &mut self,
+        index: &HnswIndex,
+        query_vec: Vec<f32>,
+        k: i64,
+        ef_search: i32,
+    ) -> Result<Column> {
+        if k <= 0 {
+            return Err(Error::InvalidInput);
+        }
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim != index.dim {
+            return Err(Error::Length);
+        }
+        let ptr = self.pin_query_vec(query_vec);
+        Self::check_op(unsafe {
+            ffi::td_hnsw_knn(self.raw, index.ptr, ptr, dim, k, ef_search)
+        })
+    }
 }
 
 impl Drop for Graph<'_> {
