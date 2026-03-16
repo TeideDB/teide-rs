@@ -1690,3 +1690,48 @@ fn sql_update_rejected_on_embedding_table() {
     let err = format!("{}", result.err().unwrap());
     assert!(err.contains("not supported"), "error should mention not supported: {err}");
 }
+
+#[test]
+fn sql_select_where_rejected_on_embedding_table() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    let result = session.execute("SELECT * FROM docs WHERE id = 0");
+    assert!(result.is_err(), "SELECT WHERE should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}
+
+#[test]
+fn sql_select_order_by_rejected_on_embedding_table() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    let result = session.execute("SELECT * FROM docs ORDER BY id");
+    assert!(result.is_err(), "SELECT ORDER BY should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}
+
+#[test]
+fn sql_select_limit_rejected_on_embedding_table() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    let result = session.execute("SELECT * FROM docs LIMIT 1");
+    assert!(result.is_err(), "SELECT LIMIT should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}

@@ -1174,16 +1174,6 @@ fn plan_query(
                 result
             };
 
-            // Intersect embedding dims positionally: error on dimension
-            // mismatch to prevent silent data corruption.
-            let merged_dims = intersect_embedding_dims_positional(
-                &left_result.columns,
-                &left_result.embedding_dims,
-                &right_result.columns,
-                &right_result.embedding_dims,
-                &format!("{:?}", op),
-            )?;
-
             return apply_post_processing(
                 ctx,
                 query,
@@ -1295,19 +1285,31 @@ fn plan_query(
     let limit_val = extract_limit(query)?;
     let has_windows = has_window_functions(select_items);
 
-    // Embedding columns are flat N*D F32 arrays.  The C engine's filter
-    // kernel operates element-wise and is not dimension-aware, so filtering
-    // a table that contains embedding columns would corrupt their data.
-    if effective_where.is_some() && !from_embedding_dims.is_empty() {
-        return Err(SqlError::Plan(format!(
-            "SELECT with WHERE is not yet supported on tables with embedding columns \
-             (source has embedding columns: {})",
-            from_embedding_dims
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+    // Embedding columns are flat N*D F32 arrays.  The C engine's filter,
+    // sort, and head kernels operate element-wise and are not dimension-aware,
+    // so filtering, ordering, or limiting a table that contains embedding
+    // columns would corrupt their data.
+    if !from_embedding_dims.is_empty() {
+        let emb_cols: Vec<_> = from_embedding_dims.keys().cloned().collect();
+        let emb_list = emb_cols.join(", ");
+        if effective_where.is_some() {
+            return Err(SqlError::Plan(format!(
+                "SELECT with WHERE is not yet supported on tables with embedding columns \
+                 (source has embedding columns: {emb_list})"
+            )));
+        }
+        if !order_by_exprs.is_empty() {
+            return Err(SqlError::Plan(format!(
+                "SELECT with ORDER BY is not yet supported on tables with embedding columns \
+                 (source has embedding columns: {emb_list})"
+            )));
+        }
+        if limit_val.is_some() || offset_val.is_some() {
+            return Err(SqlError::Plan(format!(
+                "SELECT with LIMIT/OFFSET is not yet supported on tables with embedding columns \
+                 (source has embedding columns: {emb_list})"
+            )));
+        }
     }
 
     // Stage 1: WHERE filter (resolve subqueries first)
