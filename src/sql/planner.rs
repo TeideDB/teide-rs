@@ -36,9 +36,9 @@ use crate::{Column, Context, Graph, Table};
 
 use super::expr::{
     agg_op_from_name, collect_aggregates, collect_window_functions, expr_default_name,
-    extract_col_name as try_extract_col_name, format_agg_name, has_window_functions, is_aggregate,
-    is_count_distinct, is_pure_aggregate, parse_window_frame, plan_agg_input, plan_expr,
-    plan_having_expr, plan_post_agg_expr, predict_c_agg_name,
+    extract_col_name as try_extract_col_name, extract_col_name_qualified, format_agg_name,
+    has_window_functions, is_aggregate, is_count_distinct, is_pure_aggregate, parse_window_frame,
+    plan_agg_input, plan_expr, plan_having_expr, plan_post_agg_expr, predict_c_agg_name,
 };
 use super::{ExecResult, Session, SqlError, SqlResult, StoredTable};
 
@@ -285,6 +285,7 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
             &target_types,
             &source_table,
             &source_cols,
+            &stored.embedding_dims,
         )?
     } else {
         if source_table.ncols() != stored.table.ncols() {
@@ -302,8 +303,36 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
     // registered embedding dims and the source also carries dim metadata for
     // the same column, the dimensions must match.  Mismatched dimensions
     // would silently corrupt the flat F32 buffer after concat.
+    //
+    // Remap source embedding dims to target column names using positional
+    // mapping so that aliased columns (e.g. INSERT INTO t(emb) SELECT src_emb
+    // FROM ...) are validated correctly.
+    let remapped_source_emb: HashMap<String, i32> = if !insert.columns.is_empty() {
+        // Explicit column list: insert_cols[i] maps source col i → target col name
+        let mut map = HashMap::new();
+        for (src_idx, ident) in insert.columns.iter().enumerate() {
+            let target_name = ident.value.to_lowercase();
+            if let Some(src_name) = source_cols.get(src_idx) {
+                if let Some(&dim) = source_emb_dims.get(&src_name.to_lowercase()) {
+                    map.insert(target_name, dim);
+                }
+            }
+        }
+        map
+    } else {
+        // Positional insert: source col i maps to target col i
+        let mut map = HashMap::new();
+        for (i, src_name) in source_cols.iter().enumerate() {
+            if let Some(&dim) = source_emb_dims.get(&src_name.to_lowercase()) {
+                if let Some(tgt_name) = target_cols.get(i) {
+                    map.insert(tgt_name.to_lowercase(), dim);
+                }
+            }
+        }
+        map
+    };
     for (col_name, &target_dim) in &stored.embedding_dims {
-        if let Some(&source_dim) = source_emb_dims.get(col_name) {
+        if let Some(&source_dim) = remapped_source_emb.get(col_name) {
             if source_dim != target_dim {
                 return Err(SqlError::Plan(format!(
                     "INSERT INTO: embedding column '{col_name}' dimension mismatch \
@@ -371,6 +400,22 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
     let columns = stored.columns.clone();
     let old_nrows = stored.table.nrows();
+
+    // Embedding columns are flat N*D F32 arrays.  The C engine's filter
+    // kernel operates element-wise and is not dimension-aware, so filtering
+    // a table that contains embedding columns would corrupt their data.
+    if delete.selection.is_some() && !stored.embedding_dims.is_empty() {
+        return Err(SqlError::Plan(format!(
+            "DELETE with WHERE is not supported on tables with embedding columns \
+             (table '{table_name}' has embedding columns: {})",
+            stored
+                .embedding_dims
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
 
     let new_table = if let Some(selection) = &delete.selection {
         // DELETE WHERE pred → keep rows where NOT pred
@@ -463,6 +508,23 @@ fn plan_update(
     let original_nrows = stored.table.nrows();
     let columns = stored.columns.clone();
     let prev_embedding_dims = stored.embedding_dims.clone();
+
+    // Embedding columns are flat N*D F32 arrays.  The C engine's
+    // if_then_else / select kernels operate element-wise and are not
+    // dimension-aware, so UPDATE on a table with embedding columns would
+    // corrupt their data.
+    if !stored.embedding_dims.is_empty() {
+        return Err(SqlError::Plan(format!(
+            "UPDATE is not supported on tables with embedding columns \
+             (table '{table_name}' has embedding columns: {})",
+            stored
+                .embedding_dims
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
 
     let schema: HashMap<String, usize> = columns
         .iter()
@@ -805,6 +867,7 @@ fn reorder_insert_columns(
     target_types: &[i8],
     source: &Table,
     source_cols: &[String],
+    embedding_dims: &HashMap<String, i32>,
 ) -> Result<Table, SqlError> {
     let _ = source_cols;
     let ncols = target_cols.len();
@@ -851,6 +914,17 @@ fn reorder_insert_columns(
                 .get_col_idx(src_idx as i64)
                 .ok_or_else(|| SqlError::Plan("INSERT INTO: source column missing".into()))?
         } else {
+            // Embedding columns cannot be default-filled: td_vec_new allocates
+            // nrows elements, but an embedding column needs nrows * dim floats.
+            if let Some(&dim) = embedding_dims.get(&target_cols[tgt_idx]) {
+                if dim > 1 {
+                    return Err(SqlError::Plan(format!(
+                        "INSERT INTO: embedding column '{}' (dim={}) cannot be omitted; \
+                         provide it explicitly in the column list",
+                        target_cols[tgt_idx], dim
+                    )));
+                }
+            }
             // Create a default-filled column (zeros/empty)
             let new_col = unsafe { crate::raw::td_vec_new(typ, nrows as i64) };
             if new_col.is_null() {
@@ -1384,7 +1458,7 @@ fn plan_query(
     // Drop hidden ORDER BY helper columns (if any) before exposing SQL result.
     let result_table = trim_to_visible_columns(ctx, result_table, &result_aliases)?;
 
-    validate_result_table(&result_table)?;
+    validate_result_table(&result_table, &from_embedding_dims, &result_aliases)?;
     // Propagate embedding dimensions for columns that appear in the result.
     // This allows CTEs and derived tables to inherit dimension metadata.
     // Only propagate for columns that are direct passthroughs of source
@@ -1392,14 +1466,23 @@ fn plan_query(
     // must NOT inherit embedding metadata even if the alias matches.
     let source_dims = from_embedding_dims.clone();
     // Map result alias -> source column name for all direct column references.
+    // Uses qualified names (e.g. "t.col") when available so that JOIN-poisoned
+    // bare names can still be resolved via their qualified entries.
     let alias_to_source: HashMap<String, String> = select_items
         .iter()
         .filter_map(|item| match item {
             SelectItem::ExprWithAlias { expr, alias } => {
-                try_extract_col_name(expr).map(|src| (alias.value.to_lowercase(), src))
+                extract_col_name_qualified(expr)
+                    .map(|src| (alias.value.to_lowercase(), src))
             }
             SelectItem::UnnamedExpr(expr) => {
-                try_extract_col_name(expr).map(|src| (src.clone(), src))
+                // Result alias is always the bare name; source may be qualified.
+                let bare = try_extract_col_name(expr);
+                let qualified = extract_col_name_qualified(expr);
+                match (bare, qualified) {
+                    (Some(b), Some(q)) => Some((b, q)),
+                    _ => None,
+                }
             }
             _ => None,
         })
@@ -1426,8 +1509,18 @@ fn plan_query(
         .iter()
         .filter_map(|col| {
             if let Some(src) = alias_to_source.get(col) {
-                // Explicit column reference (named or aliased) — propagate.
-                source_dims.get(src).map(|&dim| (col.clone(), dim))
+                // Try exact (possibly qualified) match first, then strip the
+                // qualifier and retry with the bare column name.  This handles
+                // both JOINs (qualified entry survives poisoning) and non-JOINs
+                // (only bare entries exist in source_dims).
+                source_dims
+                    .get(src)
+                    .or_else(|| {
+                        src.rsplit('.')
+                            .next()
+                            .and_then(|bare| source_dims.get(bare))
+                    })
+                    .map(|&dim| (col.clone(), dim))
             } else if has_wildcard && !computed_aliases.contains(col) {
                 // Wildcard-expanded columns keep their source embedding dims,
                 // but only if not shadowed by a computed expression alias.
@@ -1563,17 +1656,26 @@ fn extract_join_keys(
             op: BinaryOperator::Eq,
             right,
         } => {
-            let l_name = extract_col_name(left)?;
-            let r_name = extract_col_name(right)?;
+            let (l_bare, l_qual) = extract_col_name(left)?;
+            let (r_bare, r_qual) = extract_col_name(right)?;
 
-            // Determine which side belongs to which table
-            if left_schema.contains_key(&l_name) && right_schema.contains_key(&r_name) {
-                Ok(vec![(l_name, r_name)])
-            } else if left_schema.contains_key(&r_name) && right_schema.contains_key(&l_name) {
-                Ok(vec![(r_name, l_name)])
+            // Determine which side belongs to which table, trying qualified
+            // names first so that `b.id` resolves in schemas where the bare
+            // `id` has been renamed to `b.id` by a prior chained join.
+            let l_in_left = resolve_col_in_schema(&l_bare, l_qual.as_deref(), left_schema);
+            let r_in_right = resolve_col_in_schema(&r_bare, r_qual.as_deref(), right_schema);
+            let r_in_left = resolve_col_in_schema(&r_bare, r_qual.as_deref(), left_schema);
+            let l_in_right = resolve_col_in_schema(&l_bare, l_qual.as_deref(), right_schema);
+
+            if let (Some(lk), Some(rk)) = (l_in_left, r_in_right) {
+                Ok(vec![(lk, rk)])
+            } else if let (Some(rk), Some(lk)) = (r_in_left, l_in_right) {
+                Ok(vec![(rk, lk)])
             } else {
+                let l_display = l_qual.as_deref().unwrap_or(&l_bare);
+                let r_display = r_qual.as_deref().unwrap_or(&r_bare);
                 Err(SqlError::Plan(format!(
-                    "JOIN ON columns '{l_name}' and '{r_name}' not found in respective tables"
+                    "JOIN ON columns '{l_display}' and '{r_display}' not found in respective tables"
                 )))
             }
         }
@@ -1593,12 +1695,16 @@ fn extract_join_keys(
 }
 
 /// Extract a column name from an expression (handles Identifier and CompoundIdentifier).
-fn extract_col_name(expr: &Expr) -> Result<String, SqlError> {
+/// Returns `(bare_name, Option<qualified_name>)`.  For `b.id` the result is
+/// `("id", Some("b.id"))`.  For plain `id` the result is `("id", None)`.
+fn extract_col_name(expr: &Expr) -> Result<(String, Option<String>), SqlError> {
     match expr {
-        Expr::Identifier(ident) => Ok(ident.value.to_lowercase()),
+        Expr::Identifier(ident) => Ok((ident.value.to_lowercase(), None)),
         Expr::CompoundIdentifier(parts) => {
             if parts.len() == 2 {
-                Ok(parts[1].value.to_lowercase())
+                let bare = parts[1].value.to_lowercase();
+                let qualified = format!("{}.{}", parts[0].value.to_lowercase(), bare);
+                Ok((bare, Some(qualified)))
             } else {
                 Err(SqlError::Plan(format!(
                     "Unsupported compound identifier in JOIN: {expr}"
@@ -1609,6 +1715,24 @@ fn extract_col_name(expr: &Expr) -> Result<String, SqlError> {
             "Unsupported expression in JOIN ON: {expr}"
         ))),
     }
+}
+
+/// Look up a column in a schema, trying the qualified form first (`table.col`),
+/// then falling back to the bare name (`col`).  Returns the key that matched.
+fn resolve_col_in_schema(
+    bare: &str,
+    qualified: Option<&str>,
+    schema: &HashMap<String, usize>,
+) -> Option<String> {
+    if let Some(q) = qualified {
+        if schema.contains_key(q) {
+            return Some(q.to_string());
+        }
+    }
+    if schema.contains_key(bare) {
+        return Some(bare.to_string());
+    }
+    None
 }
 
 /// Resolve the FROM clause into a working table + schema + embedding dims.
@@ -1627,25 +1751,64 @@ fn resolve_from(
     if from.len() > 1 {
         let (mut result_table, mut result_schema, mut result_emb_dims) =
             resolve_table_factor(ctx, &from[0].relation, tables)?;
+        if let Some(ref alias) = table_factor_alias(&from[0].relation) {
+            let snapshot = result_emb_dims.clone();
+            add_qualified_embedding_dims(&mut result_emb_dims, alias, &snapshot);
+        }
         let mut poisoned = HashSet::new();
         // Process joins on first table
         for join in &from[0].joins {
             let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+            let left_ncols = result_table.ncols() as usize;
             result_table = exec_cross_join(ctx, &result_table, &right_table)?;
+            result_table = qualify_join_result(
+                &result_table, left_ncols, &result_schema, &right_schema,
+                false, table_factor_alias(&from[0].relation).as_deref(),
+                table_factor_alias(&join.relation).as_deref(),
+            )?;
             result_schema = build_schema(&result_table);
+            let right_emb = if let Some(alias) = table_factor_alias(&join.relation) {
+                let mut extended = right_emb;
+                let bare: Vec<_> = extended.iter().filter(|(k, _)| !k.contains('.')).map(|(k, &v)| (format!("{alias}.{k}"), v)).collect();
+                for (qk, qv) in bare { extended.insert(qk, qv); }
+                extended
+            } else { right_emb };
             merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
-            let _ = right_schema;
         }
         // Cross join with subsequent FROM tables
         for twj in &from[1..] {
-            let (right_table, _, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
+            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
+            let left_ncols = result_table.ncols() as usize;
             result_table = exec_cross_join(ctx, &result_table, &right_table)?;
+            result_table = qualify_join_result(
+                &result_table, left_ncols, &result_schema, &right_schema,
+                false, None,
+                table_factor_alias(&twj.relation).as_deref(),
+            )?;
             result_schema = build_schema(&result_table);
+            let right_emb = if let Some(alias) = table_factor_alias(&twj.relation) {
+                let mut extended = right_emb;
+                let bare: Vec<_> = extended.iter().filter(|(k, _)| !k.contains('.')).map(|(k, &v)| (format!("{alias}.{k}"), v)).collect();
+                for (qk, qv) in bare { extended.insert(qk, qv); }
+                extended
+            } else { right_emb };
             merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
             for join in &twj.joins {
-                let (right_table2, _, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
+                let (right_table2, right_schema2, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
+                let left_ncols2 = result_table.ncols() as usize;
                 result_table = exec_cross_join(ctx, &result_table, &right_table2)?;
+                result_table = qualify_join_result(
+                    &result_table, left_ncols2, &result_schema, &right_schema2,
+                    false, None,
+                    table_factor_alias(&join.relation).as_deref(),
+                )?;
                 result_schema = build_schema(&result_table);
+                let right_emb2 = if let Some(alias) = table_factor_alias(&join.relation) {
+                    let mut extended = right_emb2;
+                    let bare: Vec<_> = extended.iter().filter(|(k, _)| !k.contains('.')).map(|(k, &v)| (format!("{alias}.{k}"), v)).collect();
+                    for (qk, qv) in bare { extended.insert(qk, qv); }
+                    extended
+                } else { right_emb2 };
                 merge_embedding_dims(&mut result_emb_dims, right_emb2, &mut poisoned);
             }
         }
@@ -1657,10 +1820,32 @@ fn resolve_from(
     // Resolve the base (left) table
     let (mut left_table, mut left_schema, mut from_emb_dims) = resolve_table_factor(ctx, &twj.relation, tables)?;
 
+    // Add qualified entries for the left table so that `table.col` references
+    // survive bare-name poisoning when joining tables with same-named columns.
+    if let Some(ref alias) = table_factor_alias(&twj.relation) {
+        let snapshot = from_emb_dims.clone();
+        add_qualified_embedding_dims(&mut from_emb_dims, alias, &snapshot);
+    }
+
     // Process JOINs
     let mut join_poisoned = HashSet::new();
     for join in &twj.joins {
         let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+        // Add qualified entries for the right table before merging.
+        let right_emb = if let Some(alias) = table_factor_alias(&join.relation) {
+            let mut extended = right_emb;
+            let bare_entries: Vec<_> = extended
+                .iter()
+                .filter(|(k, _)| !k.contains('.'))
+                .map(|(k, &v)| (format!("{alias}.{k}"), v))
+                .collect();
+            for (qk, qv) in bare_entries {
+                extended.insert(qk, qv);
+            }
+            extended
+        } else {
+            right_emb
+        };
         merge_embedding_dims(&mut from_emb_dims, right_emb, &mut join_poisoned);
 
         // Determine join type
@@ -1674,10 +1859,19 @@ fn resolve_from(
             }
             JoinOperator::FullOuter(..) => 2,
             JoinOperator::CrossJoin => {
+                let left_ncols = left_table.ncols() as usize;
                 let result = exec_cross_join(ctx, &left_table, &right_table)?;
-                let merged_schema = build_schema(&result);
+                let result = qualify_join_result(
+                    &result,
+                    left_ncols,
+                    &left_schema,
+                    &right_schema,
+                    false,
+                    table_factor_alias(&twj.relation).as_deref(),
+                    table_factor_alias(&join.relation).as_deref(),
+                )?;
                 left_table = result;
-                left_schema = merged_schema;
+                left_schema = build_schema(&left_table);
                 continue;
             }
             _ => {
@@ -1773,7 +1967,27 @@ fn resolve_from(
             g.execute(joined)?
         };
 
-        // Build merged schema
+        // Rename duplicate columns in the join result so that `g.scan("alias.col")`
+        // resolves to the correct physical column.  Without renaming, the C engine's
+        // td_scan picks the first physical match for a bare name, which is wrong when
+        // both sides have a column with the same name (e.g. embedding).
+        // For RIGHT JOIN the C engine places right_table columns first (it was
+        // the actual-left after the swap).  Pass the correct first-side column
+        // count so that qualify_join_result computes the boundary correctly.
+        let first_side_ncols = if is_right_join {
+            right_table.ncols() as usize
+        } else {
+            left_table.ncols() as usize
+        };
+        let result = qualify_join_result(
+            &result,
+            first_side_ncols,
+            &left_schema,
+            &right_schema,
+            is_right_join,
+            table_factor_alias(&twj.relation).as_deref(),
+            table_factor_alias(&join.relation).as_deref(),
+        )?;
         let merged_schema = build_schema(&result);
 
         left_table = result;
@@ -1781,6 +1995,145 @@ fn resolve_from(
     }
 
     Ok((left_table, left_schema, from_emb_dims))
+}
+
+/// Extract the effective alias (or table name) from a `TableFactor`.
+/// Used to build qualified embedding-dim entries (`alias.col`) that survive
+/// bare-name poisoning during JOIN merges.
+fn table_factor_alias(factor: &TableFactor) -> Option<String> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => alias
+            .as_ref()
+            .map(|a| a.name.value.to_lowercase())
+            .or_else(|| Some(object_name_to_string(name).to_lowercase())),
+        TableFactor::Derived { alias, .. } => alias
+            .as_ref()
+            .map(|a| a.name.value.to_lowercase()),
+        _ => None,
+    }
+}
+
+/// Add qualified entries (`"alias.col" -> dim`) to an embedding-dims map.
+/// Qualified keys never collide across different tables, so they survive
+/// the bare-name poisoning in [`merge_embedding_dims`].
+fn add_qualified_embedding_dims(
+    dims: &mut HashMap<String, i32>,
+    table_alias: &str,
+    source_dims: &HashMap<String, i32>,
+) {
+    for (col, &dim) in source_dims {
+        // Only add qualified entries for bare column names (skip already-qualified).
+        if !col.contains('.') {
+            dims.insert(format!("{table_alias}.{col}"), dim);
+        }
+    }
+}
+
+/// Rename duplicate columns in a join result so that `g.scan("alias.col")`
+/// resolves to the correct physical column in the C engine.
+///
+/// Columns with unique bare names keep their original name.  Columns whose
+/// bare name appears in both sides are renamed to `"alias.col"` using
+/// the left/right schemas and the right-side alias.  Previously-qualified
+/// names from the left side (from chained joins) are preserved.
+fn qualify_join_result(
+    result: &Table,
+    left_ncols: usize,
+    left_schema: &HashMap<String, usize>,
+    _right_schema: &HashMap<String, usize>,
+    is_right_join: bool,
+    left_alias: Option<&str>,
+    right_alias: Option<&str>,
+) -> Result<Table, SqlError> {
+    let ncols = result.ncols() as usize;
+
+    // Detect duplicates from the ACTUAL result table columns (not the pre-join
+    // schemas), because the C engine may deduplicate join key columns.
+    let mut name_count: HashMap<String, u32> = HashMap::new();
+    for i in 0..ncols {
+        let bare = result.col_name_str(i).to_lowercase();
+        *name_count.entry(bare).or_default() += 1;
+    }
+    let has_dups = name_count.values().any(|&c| c > 1);
+    if !has_dups {
+        return Ok(result.clone_ref());
+    }
+
+    // `left_ncols` is the first-side column count: for a normal join this is the
+    // left table's ncols; for a RIGHT JOIN the caller passes the right table's
+    // ncols (since the C engine places right columns first after the swap).
+    // Cap at ncols to handle C engine key deduplication from the second side.
+    let boundary = left_ncols.min(ncols);
+
+    // Build a reverse map: index -> qualified name for left columns.
+    // Left columns may already be qualified from a prior chained join.
+    let mut left_idx_to_name: HashMap<usize, String> = HashMap::new();
+    for (name, &idx) in left_schema {
+        if name.contains('.') || !left_idx_to_name.contains_key(&idx) {
+            left_idx_to_name.insert(idx, name.clone());
+        }
+    }
+
+    let mut names = Vec::with_capacity(ncols);
+    for i in 0..ncols {
+        let bare = result.col_name_str(i).to_lowercase();
+        if name_count.get(&bare).copied().unwrap_or(0) <= 1 {
+            names.push(bare);
+            continue;
+        }
+        let is_first_side = i < boundary;
+        if is_right_join {
+            if is_first_side {
+                // First side = right table in a right join.
+                if let Some(ra) = right_alias {
+                    names.push(format!("{ra}.{bare}"));
+                } else {
+                    names.push(bare);
+                }
+            } else {
+                // Second side = left table (may have chained qualifications).
+                let left_idx = i - boundary;
+                if let Some(qname) = left_idx_to_name.get(&left_idx) {
+                    if qname.contains('.') {
+                        names.push(qname.clone());
+                    } else if let Some(la) = left_alias {
+                        names.push(format!("{la}.{bare}"));
+                    } else {
+                        names.push(qname.clone());
+                    }
+                } else if let Some(la) = left_alias {
+                    names.push(format!("{la}.{bare}"));
+                } else {
+                    names.push(bare);
+                }
+            }
+        } else if is_first_side {
+            // First side = left table.
+            if let Some(qname) = left_idx_to_name.get(&i) {
+                if qname.contains('.') {
+                    names.push(qname.clone());
+                } else if let Some(la) = left_alias {
+                    names.push(format!("{la}.{bare}"));
+                } else {
+                    names.push(qname.clone());
+                }
+            } else if let Some(la) = left_alias {
+                names.push(format!("{la}.{bare}"));
+            } else {
+                names.push(bare);
+            }
+        } else {
+            // Second side = right table.
+            if let Some(ra) = right_alias {
+                names.push(format!("{ra}.{bare}"));
+            } else {
+                names.push(bare);
+            }
+        }
+    }
+    result.with_column_names(&names).map_err(|e| {
+        SqlError::Plan(format!("Failed to qualify join columns: {e}"))
+    })
 }
 
 /// Resolve a single TableFactor (table name or FROM subquery) into a table + schema + embedding dims.
@@ -3161,7 +3514,7 @@ fn apply_post_processing(
         }
     };
 
-    validate_result_table(&result_table)?;
+    validate_result_table(&result_table, &embedding_dims, &result_aliases)?;
     Ok(SqlResult {
         table: result_table,
         columns: result_aliases,
@@ -3173,7 +3526,11 @@ fn apply_post_processing(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn validate_result_table(table: &Table) -> Result<(), SqlError> {
+fn validate_result_table(
+    table: &Table,
+    embedding_dims: &HashMap<String, i32>,
+    result_aliases: &[String],
+) -> Result<(), SqlError> {
     let nrows = table.nrows();
     for col_idx in 0..table.ncols() {
         let col = table.get_col_idx(col_idx).ok_or_else(|| {
@@ -3194,6 +3551,20 @@ fn validate_result_table(table: &Table) -> Result<(), SqlError> {
         }
         let len = unsafe { crate::raw::td_len(col) };
         if len != nrows {
+            // Embedding columns are flat TD_F32 arrays with len = nrows * dim.
+            // Check if this column is a known embedding and its length is consistent.
+            // Try both the engine column name and the result alias (set operations
+            // store dims under the alias which may differ from the engine name).
+            let col_name = table.col_name_str(col_idx as usize).to_lowercase();
+            let alias_name = result_aliases.get(col_idx as usize);
+            let dim = embedding_dims
+                .get(&col_name)
+                .or_else(|| alias_name.and_then(|a| embedding_dims.get(a)));
+            if let Some(&dim) = dim {
+                if len == nrows * dim as i64 {
+                    continue;
+                }
+            }
             return Err(SqlError::Plan(format!(
                 "Result column '{}' has length {} but table has {} rows",
                 table.col_name_str(col_idx as usize),

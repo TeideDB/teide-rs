@@ -1602,7 +1602,7 @@ fn sql_cosine_similarity_dim_mismatch_simple() {
     // Create table with embedding column and register its dimension
     session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
-    session.register_embedding_column("docs", "embedding", 4).unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
     // Wrong dimension: 3 instead of 4 — should be rejected
     let result = session.execute(
@@ -1622,7 +1622,7 @@ fn sql_cosine_similarity_dim_mismatch_qualified() {
 
     session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
-    session.register_embedding_column("docs", "embedding", 4).unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
     // Qualified reference: d.embedding — should also be validated
     let result = session.execute(
@@ -1642,7 +1642,7 @@ fn sql_embedding_dims_preserved_after_insert() {
 
     session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0)").unwrap();
-    session.register_embedding_column("docs", "embedding", 4).unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
     // Insert more rows — embedding_dims should be preserved
     session.execute("INSERT INTO docs VALUES (1, 'science', 0.0)").unwrap();
@@ -1655,39 +1655,38 @@ fn sql_embedding_dims_preserved_after_insert() {
 }
 
 #[test]
-fn sql_embedding_dims_preserved_after_delete() {
+fn sql_delete_rejected_on_embedding_table() {
     let _guard = lock();
     let mut session = Session::new().unwrap();
 
     session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
-    session.register_embedding_column("docs", "embedding", 4).unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
-    // Delete a row — embedding_dims should be preserved
-    session.execute("DELETE FROM docs WHERE id = 0").unwrap();
+    // DELETE with WHERE on embedding tables is rejected because the C engine's
+    // filter kernel is not dimension-aware and would corrupt flat N*D F32 arrays.
+    let result = session.execute("DELETE FROM docs WHERE id = 0");
+    assert!(result.is_err(), "DELETE WHERE should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not supported"), "error should mention not supported: {err}");
 
-    // Should still reject wrong dimension after delete
-    let result = session.execute(
-        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
-    );
-    assert!(result.is_err(), "should reject dimension mismatch after DELETE");
+    // DELETE without WHERE (truncate) should still work
+    session.execute("DELETE FROM docs").unwrap();
 }
 
 #[test]
-fn sql_embedding_dims_preserved_after_update() {
+fn sql_update_rejected_on_embedding_table() {
     let _guard = lock();
     let mut session = Session::new().unwrap();
 
     session.execute("CREATE TABLE docs (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0), (1, 'science', 0.0)").unwrap();
-    session.register_embedding_column("docs", "embedding", 4).unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
-    // Update a row — embedding_dims should be preserved
-    session.execute("UPDATE docs SET name = 'mathematics' WHERE id = 0").unwrap();
-
-    // Should still reject wrong dimension after update
-    let result = session.execute(
-        "SELECT COSINE_SIMILARITY(embedding, ARRAY[1.0, 0.0, 0.0]) FROM docs"
-    );
-    assert!(result.is_err(), "should reject dimension mismatch after UPDATE");
+    // UPDATE on embedding tables is rejected because the C engine's
+    // if_then_else kernel is not dimension-aware and would corrupt flat N*D arrays.
+    let result = session.execute("UPDATE docs SET name = 'mathematics' WHERE id = 0");
+    assert!(result.is_err(), "UPDATE should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not supported"), "error should mention not supported: {err}");
 }
