@@ -59,9 +59,20 @@ pub(crate) struct CreatePropertyGraph {
 }
 
 #[derive(Debug)]
+pub(crate) struct CreateVectorIndex {
+    pub name: String,
+    pub table_name: String,
+    pub column_name: String,
+    pub m: Option<i32>,
+    pub ef_construction: Option<i32>,
+}
+
+#[derive(Debug)]
 pub(crate) enum PgqStatement {
     CreatePropertyGraph(CreatePropertyGraph),
     DropPropertyGraph { name: String, if_exists: bool },
+    CreateVectorIndex(CreateVectorIndex),
+    DropVectorIndex { name: String, if_exists: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +129,12 @@ pub(crate) fn try_parse_pgq(sql: &str) -> Result<Option<PgqStatement>, SqlError>
     }
     if upper.starts_with("DROP PROPERTY GRAPH") {
         return Ok(Some(parse_drop_property_graph(stripped)?));
+    }
+    if upper.starts_with("CREATE VECTOR INDEX") {
+        return Ok(Some(parse_create_vector_index(stripped)?));
+    }
+    if upper.starts_with("DROP VECTOR INDEX") {
+        return Ok(Some(parse_drop_vector_index(stripped)?));
     }
     Ok(None)
 }
@@ -971,4 +988,88 @@ fn parse_drop_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     };
     t.expect_end()?;
     Ok(PgqStatement::DropPropertyGraph { name, if_exists })
+}
+
+// ---------------------------------------------------------------------------
+// CREATE VECTOR INDEX
+// Syntax: CREATE VECTOR INDEX <name> ON <table>(<column>) [USING HNSW(M=16, ef_construction=200)]
+// ---------------------------------------------------------------------------
+
+fn parse_create_vector_index(sql: &str) -> Result<PgqStatement, SqlError> {
+    let mut t = Tokens::new(sql);
+    t.expect("CREATE")?;
+    t.expect("VECTOR")?;
+    t.expect("INDEX")?;
+    let name = t.next()?.to_lowercase();
+    t.expect("ON")?;
+    let table_name = t.next()?.to_lowercase();
+    t.expect("(")?;
+    let column_name = t.next()?.to_lowercase();
+    t.expect(")")?;
+
+    let mut m = None;
+    let mut ef_construction = None;
+
+    // Parse optional USING HNSW(M=16, ef_construction=200)
+    if t.peek().map(|s| s.to_uppercase()) == Some("USING".into()) {
+        t.next()?; // consume USING
+        t.expect("HNSW")?;
+        t.expect("(")?;
+        loop {
+            if t.peek() == Some(")") {
+                break;
+            }
+            let param = t.next()?.to_uppercase();
+            t.expect("=")?;
+            let value_str = t.next()?;
+            let value: i32 = value_str
+                .parse()
+                .map_err(|_| SqlError::Parse(format!("Invalid HNSW parameter value: {value_str}")))?;
+            match param.as_str() {
+                "M" => m = Some(value),
+                "EF_CONSTRUCTION" => ef_construction = Some(value),
+                _ => {
+                    return Err(SqlError::Parse(format!(
+                        "Unknown HNSW parameter: {param}"
+                    )));
+                }
+            }
+            if t.peek() == Some(",") {
+                t.next()?; // consume comma
+            }
+        }
+        t.expect(")")?;
+    }
+
+    t.expect_end()?;
+    Ok(PgqStatement::CreateVectorIndex(CreateVectorIndex {
+        name,
+        table_name,
+        column_name,
+        m,
+        ef_construction,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// DROP VECTOR INDEX
+// Syntax: DROP VECTOR INDEX [IF EXISTS] <name>
+// ---------------------------------------------------------------------------
+
+fn parse_drop_vector_index(sql: &str) -> Result<PgqStatement, SqlError> {
+    let mut t = Tokens::new(sql);
+    t.expect("DROP")?;
+    t.expect("VECTOR")?;
+    t.expect("INDEX")?;
+    let mut if_exists = false;
+    let name_or_if = t.next()?;
+    let name = if name_or_if.to_uppercase() == "IF" {
+        t.expect("EXISTS")?;
+        if_exists = true;
+        t.next()?.to_lowercase()
+    } else {
+        name_or_if.to_lowercase()
+    };
+    t.expect_end()?;
+    Ok(PgqStatement::DropVectorIndex { name, if_exists })
 }

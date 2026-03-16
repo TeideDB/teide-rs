@@ -147,6 +147,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                 let table_name = object_name_to_string(name).to_lowercase();
                 if session.tables.remove(&table_name).is_some() {
                     session.remove_graphs_for_table(&table_name);
+                    session.remove_vector_indexes_for_table(&table_name);
                     msgs.push(format!("Dropped table '{table_name}'"));
                 } else if if_exists {
                     msgs.push(format!("Table '{table_name}' not found (skipped)"));

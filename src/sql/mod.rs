@@ -29,7 +29,7 @@ pub mod pgq;
 pub mod pgq_parser;
 pub mod planner;
 
-use crate::{Context, Rel, Table};
+use crate::{Context, HnswIndex, Rel, Table};
 use std::collections::HashMap;
 
 /// Errors produced by the SQL layer.
@@ -148,6 +148,15 @@ impl Clone for StoredTable {
     }
 }
 
+/// Metadata for a stored vector index.
+pub(crate) struct VectorIndexInfo {
+    pub table_name: String,
+    pub column_name: String,
+    pub index: HnswIndex,
+    pub m: i32,
+    pub ef_construction: i32,
+}
+
 /// A stateful SQL session that maintains a table registry across queries.
 ///
 // pub(crate) access allows planner to manage table registry directly.
@@ -156,6 +165,7 @@ impl Clone for StoredTable {
 pub struct Session {
     pub(crate) tables: HashMap<String, StoredTable>,
     pub(crate) graphs: HashMap<String, pgq::PropertyGraph>,
+    pub(crate) vector_indexes: HashMap<String, VectorIndexInfo>,
     pub(crate) ctx: Context,
 }
 
@@ -167,6 +177,7 @@ impl Session {
             ctx,
             tables: HashMap::new(),
             graphs: HashMap::new(),
+            vector_indexes: HashMap::new(),
         })
     }
 
@@ -545,6 +556,23 @@ impl Session {
         self.tables
             .get(name)
             .map(|st| (st.logical_nrows(), st.columns.len()))
+    }
+
+    /// Find a vector index for a given table and column.
+    pub(crate) fn find_vector_index(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Option<&VectorIndexInfo> {
+        self.vector_indexes.values().find(|vi| {
+            vi.table_name == table_name && vi.column_name == column_name
+        })
+    }
+
+    /// Remove any vector indexes that reference the given table.
+    pub(crate) fn remove_vector_indexes_for_table(&mut self, table_name: &str) {
+        self.vector_indexes
+            .retain(|_, vi| vi.table_name != table_name);
     }
 }
 

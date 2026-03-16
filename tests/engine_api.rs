@@ -1842,3 +1842,99 @@ fn hnsw_save_load_roundtrip() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, 0, "loaded index should find node 0");
 }
+
+#[test]
+fn hnsw_sql_create_drop_vector_index() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    // Create a table and add an embedding column
+    session
+        .execute("CREATE TABLE docs (id INTEGER, name VARCHAR)")
+        .unwrap();
+    session
+        .execute("INSERT INTO docs VALUES (0, 'math'), (1, 'science'), (2, 'art')")
+        .unwrap();
+
+    let dim = 4i32;
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, // math
+        0.0, 1.0, 0.0, 0.0, // science
+        0.0, 0.0, 1.0, 0.0, // art
+    ];
+    session
+        .add_embedding_column("docs", "embedding", dim, &embeddings)
+        .unwrap();
+
+    // CREATE VECTOR INDEX
+    let result = session
+        .execute("CREATE VECTOR INDEX emb_idx ON docs(embedding) USING HNSW(M=4, ef_construction=20)")
+        .unwrap();
+    match &result {
+        teide::ExecResult::Ddl(msg) => {
+            assert!(msg.contains("Created vector index 'emb_idx'"), "unexpected message: {msg}");
+        }
+        _ => panic!("Expected DDL result"),
+    }
+
+    // Duplicate should error
+    let dup = session.execute("CREATE VECTOR INDEX emb_idx ON docs(embedding)");
+    assert!(dup.is_err(), "duplicate index should fail");
+
+    // DROP VECTOR INDEX
+    let result = session.execute("DROP VECTOR INDEX emb_idx").unwrap();
+    match &result {
+        teide::ExecResult::Ddl(msg) => {
+            assert!(msg.contains("Dropped vector index 'emb_idx'"), "unexpected message: {msg}");
+        }
+        _ => panic!("Expected DDL result"),
+    }
+
+    // DROP again should error
+    let drop2 = session.execute("DROP VECTOR INDEX emb_idx");
+    assert!(drop2.is_err(), "drop non-existent index should fail");
+
+    // DROP IF EXISTS should succeed
+    let result = session
+        .execute("DROP VECTOR INDEX IF EXISTS emb_idx")
+        .unwrap();
+    match &result {
+        teide::ExecResult::Ddl(msg) => {
+            assert!(msg.contains("not found (skipped)"), "unexpected message: {msg}");
+        }
+        _ => panic!("Expected DDL result"),
+    }
+}
+
+#[test]
+fn hnsw_sql_drop_table_cascades_vector_index() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    session
+        .execute("CREATE TABLE docs (id INTEGER)")
+        .unwrap();
+    session
+        .execute("INSERT INTO docs VALUES (0), (1), (2)")
+        .unwrap();
+
+    let embeddings: Vec<f32> = vec![
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    ];
+    session
+        .add_embedding_column("docs", "emb", 3, &embeddings)
+        .unwrap();
+
+    session
+        .execute("CREATE VECTOR INDEX idx ON docs(emb) USING HNSW(M=4, ef_construction=20)")
+        .unwrap();
+
+    // Drop the table — should cascade and remove the vector index
+    session.execute("DROP TABLE docs").unwrap();
+
+    // The vector index should be gone
+    let drop_idx = session.execute("DROP VECTOR INDEX idx");
+    assert!(drop_idx.is_err(), "index should have been cascaded on table drop");
+}

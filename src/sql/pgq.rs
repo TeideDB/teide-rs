@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::{ffi, Column, Graph, Rel, Table};
+use crate::{ffi, Column, Graph, HnswIndex, Rel, Table};
 
 /// Monotonic counter for unique temp file names.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -413,7 +413,109 @@ pub(crate) fn execute_pgq(
                 )))
             }
         }
+        PgqStatement::CreateVectorIndex(parsed) => {
+            execute_create_vector_index(session, parsed)
+        }
+        PgqStatement::DropVectorIndex { name, if_exists } => {
+            if session.vector_indexes.remove(&name).is_some() {
+                Ok(ExecResult::Ddl(format!(
+                    "Dropped vector index '{name}'"
+                )))
+            } else if if_exists {
+                Ok(ExecResult::Ddl(format!(
+                    "Vector index '{name}' not found (skipped)"
+                )))
+            } else {
+                Err(SqlError::Plan(format!(
+                    "Vector index '{name}' not found"
+                )))
+            }
+        }
     }
+}
+
+fn execute_create_vector_index(
+    session: &mut Session,
+    parsed: super::pgq_parser::CreateVectorIndex,
+) -> Result<ExecResult, SqlError> {
+    let name = parsed.name.clone();
+    if session.vector_indexes.contains_key(&name) {
+        return Err(SqlError::Plan(format!(
+            "Vector index '{name}' already exists"
+        )));
+    }
+
+    // Look up the table
+    let stored = session.tables.get(&parsed.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", parsed.table_name))
+    })?;
+
+    // Find the embedding column and its dimension
+    let col_key = parsed.column_name.to_lowercase();
+    let dim = stored.embedding_dims.get(&col_key).copied().ok_or_else(|| {
+        SqlError::Plan(format!(
+            "Column '{}' in table '{}' is not a registered embedding column. \
+             Use Session::register_embedding_column or add_embedding_column first.",
+            parsed.column_name, parsed.table_name
+        ))
+    })?;
+
+    // Find the column index
+    let col_idx = stored
+        .columns
+        .iter()
+        .position(|c| c.to_lowercase() == col_key)
+        .ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Column '{}' not found in table '{}'",
+                parsed.column_name, parsed.table_name
+            ))
+        })?;
+
+    // Get the raw F32 data from the column
+    let col_ptr = stored.table.get_col_idx(col_idx as i64).ok_or_else(|| {
+        SqlError::Plan(format!(
+            "Cannot access column '{}' data",
+            parsed.column_name
+        ))
+    })?;
+    let col_type = unsafe { ffi::td_type(col_ptr) };
+    if col_type != ffi::TD_F32 {
+        return Err(SqlError::Plan(format!(
+            "Column '{}' has type {col_type}, expected TD_F32={} for vector index",
+            parsed.column_name,
+            ffi::TD_F32
+        )));
+    }
+
+    let n_floats = unsafe { ffi::td_len(col_ptr) } as usize;
+    let n_nodes = (n_floats / dim as usize) as i64;
+
+    // Extract the float data
+    let data_ptr = unsafe { ffi::td_data(col_ptr) as *const f32 };
+    let vectors = unsafe { std::slice::from_raw_parts(data_ptr, n_floats) };
+
+    let m = parsed.m.unwrap_or(16);
+    let ef_construction = parsed.ef_construction.unwrap_or(200);
+
+    let index = HnswIndex::build(&session.ctx, vectors, n_nodes, dim, m, ef_construction)
+        .map_err(|e| SqlError::Engine(e))?;
+
+    session.vector_indexes.insert(
+        name.clone(),
+        super::VectorIndexInfo {
+            table_name: parsed.table_name.clone(),
+            column_name: col_key,
+            index,
+            m,
+            ef_construction,
+        },
+    );
+
+    Ok(ExecResult::Ddl(format!(
+        "Created vector index '{name}' on {}.{} (HNSW, M={m}, ef_construction={ef_construction}, {n_nodes} vectors, dim={dim})",
+        parsed.table_name, parsed.column_name
+    )))
 }
 
 // ---------------------------------------------------------------------------

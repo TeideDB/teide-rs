@@ -40,3 +40,33 @@ SELECT COSINE_SIMILARITY(id, ARRAY[]) FROM docs
 # Test: EUCLIDEAN_DISTANCE rejects empty array
 statement error
 SELECT EUCLIDEAN_DISTANCE(id, ARRAY[]) FROM docs
+
+# ---------------------------------------------------------------------------
+# CREATE VECTOR INDEX / DROP VECTOR INDEX
+# ---------------------------------------------------------------------------
+#
+# NOTE: Positive CREATE VECTOR INDEX tests require embedding columns which
+# can only be created via the Rust API. Positive coverage is provided by
+# the Rust integration tests in tests/engine_api.rs.
+#
+# The tests below validate SQL syntax parsing and error handling.
+
+# Test: CREATE VECTOR INDEX on non-existent table
+statement error
+CREATE VECTOR INDEX idx ON nonexistent(col)
+
+# Test: CREATE VECTOR INDEX on non-embedding column
+statement error
+CREATE VECTOR INDEX idx ON docs(name)
+
+# Test: DROP VECTOR INDEX on non-existent index
+statement error
+DROP VECTOR INDEX nonexistent
+
+# Test: DROP VECTOR INDEX IF EXISTS on non-existent index (no error)
+statement ok
+DROP VECTOR INDEX IF EXISTS nonexistent
+
+# Test: CREATE VECTOR INDEX with invalid HNSW parameter
+statement error
+CREATE VECTOR INDEX idx ON docs(name) USING HNSW(INVALID_PARAM=42)

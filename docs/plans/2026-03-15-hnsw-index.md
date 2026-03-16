@@ -761,7 +761,7 @@ git commit -m "test: add HNSW index build, search, and persistence tests"
 - Modify: `src/sql/pgq.rs` (execute, store in session)
 - Modify: `src/sql/mod.rs` (add vector_indexes to Session)
 
-- [ ] **Step 1: Add vector index storage to Session**
+- [x] **Step 1: Add vector index storage to Session**
 
 In `src/sql/mod.rs`:
 ```rust
@@ -773,7 +773,7 @@ pub struct Session {
 }
 ```
 
-- [ ] **Step 2: Parse CREATE/DROP VECTOR INDEX in `pgq_parser.rs`**
+- [x] **Step 2: Parse CREATE/DROP VECTOR INDEX in `pgq_parser.rs`**
 
 SQL syntax:
 ```sql
@@ -791,7 +791,7 @@ if upper.starts_with("DROP VECTOR INDEX") {
 }
 ```
 
-- [ ] **Step 3: Implement index building in `pgq.rs`**
+- [x] **Step 3: Implement index building in `pgq.rs`**
 
 When `CREATE VECTOR INDEX` is executed:
 1. Look up the table and embedding column
@@ -799,11 +799,11 @@ When `CREATE VECTOR INDEX` is executed:
 3. Call `HnswIndex::build()`
 4. Store in `session.vector_indexes`
 
-- [ ] **Step 4: Transparent KNN optimization**
+- [x] **Step 4: Transparent KNN optimization**
 
 When the planner sees a KNN() table function and a vector index exists on the target column, automatically rewrite to use `OP_HNSW_KNN` instead of `OP_KNN` (brute-force).
 
-- [ ] **Step 5: Add SLT tests**
+- [x] **Step 5: Add SLT tests**
 
 Append to `tests/slt/vector.slt`:
 ```
@@ -819,12 +819,12 @@ statement ok
 DROP VECTOR INDEX emb_idx
 ```
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/sql/pgq_parser.rs src/sql/pgq.rs src/sql/mod.rs tests/slt/vector.slt
