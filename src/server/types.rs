@@ -38,6 +38,7 @@ pub fn teide_to_pg_type(td_type: i8) -> Type {
         ffi::TD_I64 => Type::INT8,
         ffi::TD_TIMESTAMP => Type::TIMESTAMP,
         ffi::TD_F64 => Type::FLOAT8,
+        ffi::TD_F32 => Type::FLOAT4,
         ffi::TD_SYM => Type::VARCHAR,
         _ => Type::VARCHAR,
     }
