@@ -523,6 +523,17 @@ fn execute_create_vector_index(
     let m = parsed.m.unwrap_or(16);
     let ef_construction = parsed.ef_construction.unwrap_or(200);
 
+    if m <= 0 {
+        return Err(SqlError::Plan(format!(
+            "HNSW parameter M must be positive, got {m}"
+        )));
+    }
+    if ef_construction <= 0 {
+        return Err(SqlError::Plan(format!(
+            "HNSW parameter ef_construction must be positive, got {ef_construction}"
+        )));
+    }
+
     let index = HnswIndex::build(&session.ctx, vectors, n_nodes, dim, m, ef_construction)
         .map_err(SqlError::Engine)?;
 

@@ -2065,7 +2065,7 @@ impl<'a> Graph<'a> {
         k: i64,
         ef_search: i32,
     ) -> Result<Column> {
-        if k <= 0 {
+        if k <= 0 || ef_search <= 0 {
             return Err(Error::InvalidInput);
         }
         let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
