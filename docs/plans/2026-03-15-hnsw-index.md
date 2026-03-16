@@ -60,7 +60,7 @@ The core data structure: multi-layer proximity graph where each node has up to `
 - Create: `vendor/teide/src/store/hnsw.h`
 - Create: `vendor/teide/src/store/hnsw.c`
 
-- [ ] **Step 1: Define `td_hnsw_t` structure in `hnsw.h`**
+- [x] **Step 1: Define `td_hnsw_t` structure in `hnsw.h`**
 
 ```c
 #ifndef TD_HNSW_H
@@ -129,7 +129,7 @@ td_hnsw_t* td_hnsw_mmap(const char* dir);
 #endif /* TD_HNSW_H */
 ```
 
-- [ ] **Step 2: Implement HNSW construction in `hnsw.c`**
+- [x] **Step 2: Implement HNSW construction in `hnsw.c`**
 
 ```c
 #include "hnsw.h"
@@ -302,7 +302,7 @@ void td_hnsw_free(td_hnsw_t* idx) {
 
 Note: The full HNSW construction is ~300 lines of C. The plan provides the structure and key functions; the implementer should follow the HNSW paper (Algorithm 1) for the complete insertion logic including neighbor selection heuristic.
 
-- [ ] **Step 3: Implement HNSW search in `hnsw.c`**
+- [x] **Step 3: Implement HNSW search in `hnsw.c`**
 
 ```c
 /* --- Search: find K approximate nearest neighbors --- */
@@ -343,7 +343,7 @@ int64_t td_hnsw_search(const td_hnsw_t* idx,
 }
 ```
 
-- [ ] **Step 4: Implement persistence (save/load/mmap) in `hnsw.c`**
+- [x] **Step 4: Implement persistence (save/load/mmap) in `hnsw.c`**
 
 File layout on disk:
 ```
@@ -369,12 +369,12 @@ td_hnsw_t* td_hnsw_mmap(const char* dir) {
 }
 ```
 
-- [ ] **Step 5: Verify it compiles**
+- [x] **Step 5: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -f vendor/teide/src/store/hnsw.h vendor/teide/src/store/hnsw.c
