@@ -76,6 +76,10 @@ pub struct SqlResult {
     pub columns: Vec<String>,
     /// Embedding column dimensions inherited from the source table (if any).
     pub embedding_dims: HashMap<String, i32>,
+    /// True row count.  For tables with embedding columns, `table.nrows()`
+    /// returns N*D (the flat F32 array length).  This field holds the corrected
+    /// count so that consumers do not need to be aware of the embedding layout.
+    pub nrows: usize,
 }
 
 /// Result of executing a SQL statement via a Session.
@@ -95,6 +99,43 @@ pub(crate) struct StoredTable {
     /// planner to validate query-vector lengths in COSINE_SIMILARITY /
     /// EUCLIDEAN_DISTANCE calls.
     pub embedding_dims: HashMap<String, i32>,
+}
+
+impl StoredTable {
+    /// Return the logical row count, correcting for embedding columns whose
+    /// flat F32 arrays make `table.nrows()` return N*D instead of N.
+    pub(crate) fn logical_nrows(&self) -> i64 {
+        if self.embedding_dims.is_empty() {
+            return self.table.nrows();
+        }
+        let raw = self.table.nrows();
+        // Find the first non-embedding column and use its length.
+        for ci in 0..self.table.ncols() {
+            let name = self.table.col_name_str(ci as usize).to_lowercase();
+            if !self.embedding_dims.contains_key(&name) {
+                if let Some(col) = self.table.get_col_idx(ci) {
+                    let col_type = unsafe { crate::raw::td_type(col) };
+                    if col_type > 0
+                        && !crate::ffi::td_is_parted(col_type)
+                        && col_type != crate::ffi::TD_MAPCOMMON
+                    {
+                        return unsafe { crate::raw::td_len(col) };
+                    }
+                }
+                return raw;
+            }
+        }
+        // All columns are embeddings — derive N from the first column.
+        if self.table.ncols() > 0 {
+            let name = self.table.col_name_str(0).to_lowercase();
+            if let Some(&d) = self.embedding_dims.get(&name) {
+                if d > 0 {
+                    return raw / d as i64;
+                }
+            }
+        }
+        raw
+    }
 }
 
 impl Clone for StoredTable {
@@ -231,7 +272,7 @@ impl Session {
                 "Column '{column_name}' already exists in table '{table_name}'"
             )));
         }
-        let nrows = stored.table.nrows();
+        let nrows = stored.logical_nrows();
         let emb_col = Table::create_embedding_column(&self.ctx, nrows, dim, data)
             .map_err(|e| SqlError::Plan(format!(
                 "Failed to create embedding column '{column_name}': {e}"
@@ -503,7 +544,7 @@ impl Session {
     pub fn table_info(&self, name: &str) -> Option<(i64, usize)> {
         self.tables
             .get(name)
-            .map(|st| (st.table.nrows(), st.columns.len()))
+            .map(|st| (st.logical_nrows(), st.columns.len()))
     }
 }
 

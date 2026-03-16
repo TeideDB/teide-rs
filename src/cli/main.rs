@@ -436,6 +436,17 @@ fn resolve_col_indices(result: &teide::sql::SqlResult) -> Vec<usize> {
 // Output formatting
 // ---------------------------------------------------------------------------
 
+/// Build a per-position embedding dimension lookup from a `SqlResult`.
+/// Returns a vec parallel to `col_indices` where each entry is the
+/// embedding dimension (0 = not an embedding column).
+fn embedding_dims_for_columns(result: &teide::sql::SqlResult) -> Vec<i32> {
+    result
+        .columns
+        .iter()
+        .map(|name| result.embedding_dims.get(name).copied().unwrap_or(0))
+        .collect()
+}
+
 fn print_result(result: &teide::sql::SqlResult, format: &OutputFormat) {
     match format {
         OutputFormat::Table => print_table(result),
@@ -456,6 +467,7 @@ fn type_name(typ: i8) -> &'static str {
         5 => "i32",
         6 => "i64",
         7 => "f64",
+        8 => "f32",
         9 => "date",
         10 => "time",
         11 => "timestamp",
@@ -472,7 +484,7 @@ fn print_table(result: &teide::sql::SqlResult) {
     let mut out = String::with_capacity(4096);
 
     let table = &result.table;
-    let nrows = table.nrows() as usize;
+    let nrows = result.nrows;
     let col_indices = resolve_col_indices(result);
     let ncols = col_indices.len();
 
@@ -498,6 +510,8 @@ fn print_table(result: &teide::sql::SqlResult) {
         .map(|&idx| type_name(table.col_type(idx)))
         .collect();
 
+    let emb_dims = embedding_dims_for_columns(result);
+
     let is_right: Vec<bool> = col_indices
         .iter()
         .map(|&idx| matches!(table.col_type(idx), 1 | 4 | 5 | 6 | 7))
@@ -513,8 +527,9 @@ fn print_table(result: &teide::sql::SqlResult) {
     for r in 0..head_n {
         let mut row = Vec::with_capacity(ncols);
         let mut nulls = Vec::with_capacity(ncols);
-        for &c in &col_indices {
-            let val = format_cell(table, c, r);
+        for (pos, &c) in col_indices.iter().enumerate() {
+            let dim = emb_dims.get(pos).copied().unwrap_or(0);
+            let val = format_cell(table, c, r, dim);
             nulls.push(val == "NULL");
             row.push(val);
         }
@@ -531,8 +546,9 @@ fn print_table(result: &teide::sql::SqlResult) {
         for r in (nrows - tail_n)..nrows {
             let mut row = Vec::with_capacity(ncols);
             let mut nulls = Vec::with_capacity(ncols);
-            for &c in &col_indices {
-                let val = format_cell(table, c, r);
+            for (pos, &c) in col_indices.iter().enumerate() {
+                let dim = emb_dims.get(pos).copied().unwrap_or(0);
+                let val = format_cell(table, c, r, dim);
                 nulls.push(val == "NULL");
                 row.push(val);
             }
@@ -679,6 +695,7 @@ fn print_table(result: &teide::sql::SqlResult) {
 fn print_csv(result: &teide::sql::SqlResult) {
     let table = &result.table;
     let col_indices = resolve_col_indices(result);
+    let emb_dims = embedding_dims_for_columns(result);
 
     let headers: Vec<String> = col_indices
         .iter()
@@ -693,10 +710,14 @@ fn print_csv(result: &teide::sql::SqlResult) {
         .collect();
     println!("{}", headers.join(","));
 
-    for row in 0..table.nrows() as usize {
+    for row in 0..result.nrows {
         let cells: Vec<String> = col_indices
             .iter()
-            .map(|&col| format_cell(table, col, row))
+            .enumerate()
+            .map(|(pos, &col)| {
+                let dim = emb_dims.get(pos).copied().unwrap_or(0);
+                format_cell(table, col, row, dim)
+            })
             .collect();
         println!("{}", cells.join(","));
     }
@@ -704,8 +725,9 @@ fn print_csv(result: &teide::sql::SqlResult) {
 
 fn print_json(result: &teide::sql::SqlResult) {
     let table = &result.table;
-    let nrows = table.nrows() as usize;
+    let nrows = result.nrows;
     let col_indices = resolve_col_indices(result);
+    let emb_dims = embedding_dims_for_columns(result);
 
     let headers: Vec<String> = col_indices
         .iter()
@@ -724,7 +746,10 @@ fn print_json(result: &teide::sql::SqlResult) {
         let pairs: Vec<String> = col_indices
             .iter()
             .enumerate()
-            .map(|(i, &col)| format!("\"{}\": {}", headers[i], format_json_value(table, col, row)))
+            .map(|(i, &col)| {
+                let dim = emb_dims.get(i).copied().unwrap_or(0);
+                format!("\"{}\": {}", headers[i], format_json_value(table, col, row, dim))
+            })
             .collect();
         let comma = if row + 1 < nrows { "," } else { "" };
         println!("  {{{}}}{comma}", pairs.join(", "));
@@ -732,9 +757,30 @@ fn print_json(result: &teide::sql::SqlResult) {
     println!("]");
 }
 
-fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
+/// Format a single cell for display.
+///
+/// `emb_dim` is the embedding dimension for this column (0 = not an
+/// embedding).  For `dim > 1` the logical `row` is expanded into the
+/// `dim` consecutive f32 values starting at physical index `row * dim`.
+fn format_cell(table: &teide::Table, col: usize, row: usize, emb_dim: i32) -> String {
     let typ = table.col_type(col);
     match typ {
+        8 if emb_dim > 1 => {
+            let d = emb_dim as usize;
+            let base = row * d;
+            let mut parts = Vec::with_capacity(d);
+            for i in 0..d {
+                match table.get_f32(col, base + i) {
+                    Some(v) => parts.push(format!("{v}")),
+                    None => parts.push("NULL".to_string()),
+                }
+            }
+            format!("[{}]", parts.join(", "))
+        }
+        8 => match table.get_f32(col, row) {
+            Some(v) => format!("{v}"),
+            None => "NULL".to_string(),
+        },
         9 => match table.get_i64(col, row) {
             Some(d) => teide::Table::format_date(d as i32),
             None => "NULL".to_string(),
@@ -781,9 +827,25 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
     }
 }
 
-fn format_json_value(table: &teide::Table, col: usize, row: usize) -> String {
+fn format_json_value(table: &teide::Table, col: usize, row: usize, emb_dim: i32) -> String {
     let typ = table.col_type(col);
     match typ {
+        8 if emb_dim > 1 => {
+            let d = emb_dim as usize;
+            let base = row * d;
+            let mut parts = Vec::with_capacity(d);
+            for i in 0..d {
+                match table.get_f32(col, base + i) {
+                    Some(v) => parts.push(format!("{v}")),
+                    None => parts.push("null".to_string()),
+                }
+            }
+            format!("[{}]", parts.join(", "))
+        }
+        8 => match table.get_f32(col, row) {
+            Some(v) => format!("{v}"),
+            None => "null".to_string(),
+        },
         9 => match table.get_i64(col, row) {
             Some(d) => format!("\"{}\"", teide::Table::format_date(d as i32)),
             None => "null".to_string(),

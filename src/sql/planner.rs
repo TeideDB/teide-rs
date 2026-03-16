@@ -81,7 +81,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
             if let Some(query) = &create.query {
                 // CREATE TABLE ... AS SELECT
                 let result = plan_query(&session.ctx, query, Some(&session.tables))?;
-                let nrows = result.table.nrows();
+                let nrows = result.nrows as i64;
                 let ncols = result.columns.len();
 
                 let table = result.table.with_column_names(&result.columns)?;
@@ -263,19 +263,39 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         .as_ref()
         .ok_or_else(|| SqlError::Plan("INSERT INTO requires VALUES or SELECT".into()))?;
 
-    // Build source table from VALUES or SELECT
-    let (source_table, source_cols, source_emb_dims) = match source_query.body.as_ref() {
-        SetExpr::Values(values) => {
-            let tbl = build_table_from_values(values, &target_types, &target_cols)?;
-            let cols = target_cols.clone();
-            (tbl, cols, HashMap::new())
-        }
-        _ => {
-            // Treat as a subquery (SELECT ...)
-            let result = plan_query(&session.ctx, source_query, Some(&session.tables))?;
-            (result.table, result.columns, result.embedding_dims)
-        }
-    };
+    // Embedding columns are flat N*D F32 arrays created via td_embedding_new.
+    // VALUES rows produce scalar F32 vectors via td_vec_new, which are not
+    // dimension-aware.  Concatenating them would corrupt the embedding buffer.
+    // Exception: dim=1 embeddings have layout identical to plain F32 columns,
+    // so VALUES insertion is safe for them.
+    if matches!(source_query.body.as_ref(), SetExpr::Values(_)) {
+        let high_dim: HashMap<String, i32> = stored
+            .embedding_dims
+            .iter()
+            .filter(|(_, &d)| d > 1)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        reject_if_has_embeddings(&high_dim, "INSERT INTO ... VALUES")?;
+    }
+
+    // Build source table from VALUES or SELECT.
+    // `source_logical_nrows` is the true row count: for embedding tables,
+    // `table.nrows()` returns N*D but the logical count is N.
+    let (source_table, source_cols, source_emb_dims, source_logical_nrows) =
+        match source_query.body.as_ref() {
+            SetExpr::Values(values) => {
+                let tbl = build_table_from_values(values, &target_types, &target_cols)?;
+                let nrows = tbl.nrows() as usize;
+                let cols = target_cols.clone();
+                (tbl, cols, HashMap::new(), nrows)
+            }
+            _ => {
+                // Treat as a subquery (SELECT ...)
+                let result = plan_query(&session.ctx, source_query, Some(&session.tables))?;
+                let nrows = result.nrows;
+                (result.table, result.columns, result.embedding_dims, nrows)
+            }
+        };
 
     // Handle optional column list reordering
     let source_table = if !insert.columns.is_empty() {
@@ -286,6 +306,7 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
             &source_table,
             &source_cols,
             &stored.embedding_dims,
+            source_logical_nrows,
         )?
     } else {
         if source_table.ncols() != stored.table.ncols() {
@@ -332,13 +353,40 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
         map
     };
     for (col_name, &target_dim) in &stored.embedding_dims {
-        if let Some(&source_dim) = remapped_source_emb.get(col_name) {
-            if source_dim != target_dim {
-                return Err(SqlError::Plan(format!(
-                    "INSERT INTO: embedding column '{col_name}' dimension mismatch \
-                     (source has {source_dim}, target has {target_dim})"
-                )));
+        match remapped_source_emb.get(col_name) {
+            Some(&source_dim) => {
+                if source_dim != target_dim {
+                    return Err(SqlError::Plan(format!(
+                        "INSERT INTO: embedding column '{col_name}' dimension mismatch \
+                         (source has {source_dim}, target has {target_dim})"
+                    )));
+                }
             }
+            None => {
+                // Source has no embedding metadata for this target embedding
+                // column.  For dim > 1 this means the source column is a plain
+                // F32 vector whose flat layout would corrupt the N*D buffer.
+                // For dim = 1 the storage layout is identical to a plain F32
+                // column (one float per row), so we allow it.
+                if target_dim != 1 {
+                    return Err(SqlError::Plan(format!(
+                        "INSERT INTO: target column '{col_name}' is an embedding (dim={target_dim}) \
+                         but the source does not provide matching embedding metadata"
+                    )));
+                }
+            }
+        }
+    }
+
+    // Also check the reverse: source has a dim > 1 embedding but the target
+    // column is plain FLOAT.  The raw N*D buffer would be concatenated into a
+    // scalar column, changing row semantics instead of erroring.
+    for (src_col, &src_dim) in &remapped_source_emb {
+        if src_dim > 1 && !stored.embedding_dims.contains_key(src_col) {
+            return Err(SqlError::Plan(format!(
+                "INSERT INTO: source column '{src_col}' is an embedding (dim={src_dim}) \
+                 but the target column is a plain FLOAT — this would corrupt row semantics"
+            )));
         }
     }
 
@@ -404,8 +452,14 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
     // Embedding columns are flat N*D F32 arrays.  The C engine's filter
     // kernel operates element-wise and is not dimension-aware, so filtering
     // a table that contains embedding columns would corrupt their data.
+    // Exception: dim=1 embeddings have layout identical to plain F32 columns.
     if delete.selection.is_some() {
-        reject_if_has_embeddings(&stored.embedding_dims, "DELETE with WHERE")?;
+        let high_dim: HashMap<String, i32> = stored.embedding_dims
+            .iter()
+            .filter(|(_, &d)| d > 1)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        reject_if_has_embeddings(&high_dim, "DELETE with WHERE")?;
     }
 
     let new_table = if let Some(selection) = &delete.selection {
@@ -433,15 +487,11 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
     let new_table = new_table.with_column_names(&columns)?;
 
-    // When truncating (DELETE without WHERE), clear embedding dims since the
-    // new empty table has regular F32 vectors, not dimension-aware embeddings.
-    // Preserving stale dims would cause buffer overread if data is re-inserted
-    // via INSERT VALUES (which creates regular scalar columns).
-    let prev_embedding_dims = if delete.selection.is_some() {
-        stored.embedding_dims.clone()
-    } else {
-        HashMap::new()
-    };
+    // Preserve embedding dims on both paths.  The truncated table has
+    // zero-length F32 columns whose layout is compatible with later concat
+    // from INSERT … SELECT.  Keeping dims ensures reject_if_has_embeddings
+    // still blocks INSERT … VALUES on the empty table.
+    let prev_embedding_dims = stored.embedding_dims.clone();
     let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
@@ -512,7 +562,13 @@ fn plan_update(
     // if_then_else / select kernels operate element-wise and are not
     // dimension-aware, so UPDATE on a table with embedding columns would
     // corrupt their data.
-    reject_if_has_embeddings(&stored.embedding_dims, "UPDATE")?;
+    // Exception: dim=1 embeddings have layout identical to plain F32 columns.
+    let high_dim_update: HashMap<String, i32> = stored.embedding_dims
+        .iter()
+        .filter(|(_, &d)| d > 1)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    reject_if_has_embeddings(&high_dim_update, "UPDATE")?;
 
     let schema: HashMap<String, usize> = columns
         .iter()
@@ -856,10 +912,11 @@ fn reorder_insert_columns(
     source: &Table,
     source_cols: &[String],
     embedding_dims: &HashMap<String, i32>,
+    logical_nrows: usize,
 ) -> Result<Table, SqlError> {
     let _ = source_cols;
     let ncols = target_cols.len();
-    let nrows = source.nrows() as usize;
+    let nrows = logical_nrows;
 
     if insert_cols.len() != source.ncols() as usize {
         return Err(SqlError::Plan(format!(
@@ -1050,18 +1107,6 @@ fn plan_query(
             // Concatenate tables column by column
             let result = concat_tables(ctx, &left_result.table, &right_result.table)?;
 
-            // Without ALL: apply DISTINCT
-            let result = if !is_all {
-                let aliases: Vec<String> = (0..result.ncols() as usize)
-                    .map(|i| result.col_name_str(i).to_string())
-                    .collect();
-                let schema = build_schema(&result);
-                let (distinct_result, _) = plan_distinct(ctx, &result, &aliases, &schema)?;
-                distinct_result
-            } else {
-                result
-            };
-
             // Intersect embedding dims positionally: set operations are
             // positional, so match left/right columns by index, not name.
             // Error on dimension mismatch to prevent silent data corruption
@@ -1073,6 +1118,28 @@ fn plan_query(
                 &right_result.embedding_dims,
                 "UNION",
             )?;
+
+            // Without ALL: apply DISTINCT — reject if high-dim embeddings present
+            // (the C distinct kernel is not dimension-aware).
+            // dim=1 embeddings have scalar layout and are safe for DISTINCT.
+            if !is_all {
+                let high_dim: HashMap<String, i32> = merged_dims
+                    .iter()
+                    .filter(|(_, &d)| d > 1)
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                reject_if_has_embeddings(&high_dim, "UNION (implicit DISTINCT)")?;
+            }
+            let result = if !is_all {
+                let aliases: Vec<String> = (0..result.ncols() as usize)
+                    .map(|i| result.col_name_str(i).to_string())
+                    .collect();
+                let schema = build_schema(&result);
+                let (distinct_result, _) = plan_distinct(ctx, &result, &aliases, &schema)?;
+                distinct_result
+            } else {
+                result
+            };
 
             // Apply ORDER BY and LIMIT from the outer query
             return apply_post_processing(
@@ -1142,7 +1209,18 @@ fn plan_query(
             let result =
                 exec_set_operation(ctx, &left_result.table, &right_result.table, keep_matches, &merged_dims)?;
 
-            // Without ALL: apply DISTINCT
+            // Without ALL: apply DISTINCT — reject if high-dim embeddings present
+            // (the C distinct kernel is not dimension-aware).
+            // dim=1 embeddings have scalar layout and are safe for DISTINCT.
+            if !is_all {
+                let high_dim: HashMap<String, i32> = merged_dims
+                    .iter()
+                    .filter(|(_, &d)| d > 1)
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                let op_name = if keep_matches { "INTERSECT" } else { "EXCEPT" };
+                reject_if_has_embeddings(&high_dim, &format!("{op_name} (implicit DISTINCT)"))?;
+            }
             let result = if !is_all {
                 let aliases: Vec<String> = (0..result.ncols() as usize)
                     .map(|i| result.col_name_str(i).to_string())
@@ -1270,20 +1348,27 @@ fn plan_query(
     // are not dimension-aware, so filtering, ordering, limiting, grouping,
     // or deduplicating a table that contains embedding columns would corrupt
     // their data.
+    // Exception: dim=1 embeddings have layout identical to plain F32 columns
+    // (one float per row), so they are safe for these operations.
+    let high_dim_embeddings: HashMap<String, i32> = from_embedding_dims
+        .iter()
+        .filter(|(_, &d)| d > 1)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     if effective_where.is_some() {
-        reject_if_has_embeddings(&from_embedding_dims, "SELECT with WHERE")?;
+        reject_if_has_embeddings(&high_dim_embeddings, "SELECT with WHERE")?;
     }
     if !order_by_exprs.is_empty() {
-        reject_if_has_embeddings(&from_embedding_dims, "SELECT with ORDER BY")?;
+        reject_if_has_embeddings(&high_dim_embeddings, "SELECT with ORDER BY")?;
     }
     if limit_val.is_some() || offset_val.is_some() {
-        reject_if_has_embeddings(&from_embedding_dims, "SELECT with LIMIT/OFFSET")?;
+        reject_if_has_embeddings(&high_dim_embeddings, "SELECT with LIMIT/OFFSET")?;
     }
     if has_group_by || has_aggregates {
-        reject_if_has_embeddings(&from_embedding_dims, "SELECT with GROUP BY/aggregation")?;
+        reject_if_has_embeddings(&high_dim_embeddings, "SELECT with GROUP BY/aggregation")?;
     }
     if is_distinct {
-        reject_if_has_embeddings(&from_embedding_dims, "SELECT DISTINCT")?;
+        reject_if_has_embeddings(&high_dim_embeddings, "SELECT DISTINCT")?;
     }
 
     // Stage 1: WHERE filter (resolve subqueries first)
@@ -1318,7 +1403,8 @@ fn plan_query(
                 if can_fuse_where_limit {
                     // Fuse LIMIT into WHERE: HEAD(FILTER(table, pred), n)
                     let total = match (offset_val, limit_val) {
-                        (Some(off), Some(lim)) => off.saturating_add(lim),
+                        (Some(off), Some(lim)) => off.checked_add(lim)
+                            .ok_or_else(|| SqlError::Plan("OFFSET + LIMIT overflow".into()))?,
                         (_, Some(lim)) => lim,
                         _ => unreachable!(),
                     };
@@ -1353,7 +1439,8 @@ fn plan_query(
         if (has_group_by || has_aggregates) && order_by_exprs.is_empty() && select.having.is_none()
         {
             match (offset_val, limit_val) {
-                (Some(off), Some(lim)) => Some(off.saturating_add(lim)),
+                (Some(off), Some(lim)) => Some(off.checked_add(lim)
+                    .ok_or_else(|| SqlError::Plan("OFFSET + LIMIT overflow".into()))?),
                 (None, Some(lim)) => Some(lim),
                 _ => None,
             }
@@ -1443,7 +1530,8 @@ fn plan_query(
     } else {
         match (offset_val, limit_val) {
             (Some(off), Some(lim)) => {
-                let total = off.saturating_add(lim);
+                let total = off.checked_add(lim)
+                    .ok_or_else(|| SqlError::Plan("OFFSET + LIMIT overflow".into()))?;
                 let g = ctx.graph(&result_table)?;
                 let table_node = g.const_table(&result_table)?;
                 let head_node = g.head(table_node, total)?;
@@ -1464,7 +1552,6 @@ fn plan_query(
     // Drop hidden ORDER BY helper columns (if any) before exposing SQL result.
     let result_table = trim_to_visible_columns(ctx, result_table, &result_aliases)?;
 
-    validate_result_table(&result_table, &from_embedding_dims, &result_aliases)?;
     // Propagate embedding dimensions for columns that appear in the result.
     // This allows CTEs and derived tables to inherit dimension metadata.
     // Only propagate for columns that are direct passthroughs of source
@@ -1536,10 +1623,14 @@ fn plan_query(
             }
         })
         .collect();
+    // Validate using the filtered result embedding dims so that computed aliases
+    // (e.g. `SELECT 0.0 AS embedding`) are not mistakenly treated as embeddings.
+    let nrows = validate_result_table(&result_table, &result_embedding_dims, &result_aliases)?;
     Ok(SqlResult {
         table: result_table,
         columns: result_aliases,
         embedding_dims: result_embedding_dims,
+        nrows: nrows as usize,
     })
 }
 
@@ -1765,6 +1856,8 @@ fn resolve_from(
         // Process joins on first table
         for join in &from[0].joins {
             let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+            // Reject cross join if right side has embedding columns too
+            reject_if_has_embeddings(&right_emb, "CROSS JOIN")?;
             let left_ncols = result_table.ncols() as usize;
             result_table = exec_cross_join(ctx, &result_table, &right_table, &result_emb_dims)?;
             result_table = qualify_join_result(
@@ -1784,6 +1877,8 @@ fn resolve_from(
         // Cross join with subsequent FROM tables
         for twj in &from[1..] {
             let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
+            // Reject cross join if right side has embedding columns too
+            reject_if_has_embeddings(&right_emb, "CROSS JOIN")?;
             let left_ncols = result_table.ncols() as usize;
             result_table = exec_cross_join(ctx, &result_table, &right_table, &result_emb_dims)?;
             result_table = qualify_join_result(
@@ -1801,6 +1896,7 @@ fn resolve_from(
             merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
             for join in &twj.joins {
                 let (right_table2, right_schema2, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
+                reject_if_has_embeddings(&right_emb2, "CROSS JOIN")?;
                 let left_ncols2 = result_table.ncols() as usize;
                 result_table = exec_cross_join(ctx, &result_table, &right_table2, &result_emb_dims)?;
                 result_table = qualify_join_result(
@@ -1853,6 +1949,13 @@ fn resolve_from(
             right_emb
         };
         merge_embedding_dims(&mut from_emb_dims, right_emb, &mut join_poisoned);
+
+        // Reject non-CROSS JOINs when either side has embedding columns.
+        // The C join kernel copies elements one at a time and is not
+        // dimension-aware, so N*D embedding buffers would be corrupted.
+        if !matches!(&join.join_operator, JoinOperator::CrossJoin) {
+            reject_if_has_embeddings(&from_emb_dims, "JOIN")?;
+        }
 
         // Determine join type
         let join_type: u8 = match &join.join_operator {
@@ -3489,6 +3592,21 @@ fn apply_post_processing(
     let offset_val = extract_offset(query)?;
     let limit_val = extract_limit(query)?;
 
+    // Embedding columns are flat N*D F32 arrays; the C sort/head kernels
+    // are not dimension-aware and would scramble per-row vector grouping.
+    // dim=1 embeddings have scalar layout and are safe for these operations.
+    let high_dim: HashMap<String, i32> = embedding_dims
+        .iter()
+        .filter(|(_, &d)| d > 1)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    if !order_by_exprs.is_empty() {
+        reject_if_has_embeddings(&high_dim, "ORDER BY on set operation result")?;
+    }
+    if limit_val.is_some() || offset_val.is_some() {
+        reject_if_has_embeddings(&high_dim, "LIMIT/OFFSET on set operation result")?;
+    }
+
     let (result_table, limit_fused) = if !order_by_exprs.is_empty() {
         let table_col_names: Vec<String> = (0..result_table.ncols() as usize)
             .map(|i| result_table.col_name_str(i).to_string())
@@ -3530,7 +3648,8 @@ fn apply_post_processing(
     } else {
         match (offset_val, limit_val) {
             (Some(off), Some(lim)) => {
-                let total = off.saturating_add(lim);
+                let total = off.checked_add(lim)
+                    .ok_or_else(|| SqlError::Plan("OFFSET + LIMIT overflow".into()))?;
                 let g = ctx.graph(&result_table)?;
                 let table_node = g.const_table(&result_table)?;
                 let head_node = g.head(table_node, total)?;
@@ -3548,11 +3667,12 @@ fn apply_post_processing(
         }
     };
 
-    validate_result_table(&result_table, &embedding_dims, &result_aliases)?;
+    let nrows = validate_result_table(&result_table, &embedding_dims, &result_aliases)?;
     Ok(SqlResult {
         table: result_table,
         columns: result_aliases,
         embedding_dims,
+        nrows: nrows as usize,
     })
 }
 
@@ -3581,8 +3701,47 @@ fn validate_result_table(
     table: &Table,
     embedding_dims: &HashMap<String, i32>,
     result_aliases: &[String],
-) -> Result<(), SqlError> {
-    let nrows = table.nrows();
+) -> Result<i64, SqlError> {
+    // td_table_nrows() returns cols[0]->len, which is N*D when the first
+    // column is an embedding.  Derive the true row count from the first
+    // non-embedding column.  If every column is an embedding, compute N
+    // from the first column's len / dim.
+    let raw_nrows = table.nrows();
+    let nrows = 'nrows: {
+        for ci in 0..table.ncols() {
+            let name = table.col_name_str(ci as usize).to_lowercase();
+            let alias = result_aliases.get(ci as usize);
+            let is_emb = embedding_dims.contains_key(&name)
+                || alias.map_or(false, |a| embedding_dims.contains_key(a));
+            if !is_emb {
+                // First non-embedding column – its len equals the true row count.
+                if let Some(col) = table.get_col_idx(ci) {
+                    let col_type = unsafe { crate::raw::td_type(col) };
+                    if col_type > 0
+                        && !crate::ffi::td_is_parted(col_type)
+                        && col_type != crate::ffi::TD_MAPCOMMON
+                    {
+                        break 'nrows unsafe { crate::raw::td_len(col) };
+                    }
+                }
+                break 'nrows raw_nrows;
+            }
+        }
+        // All columns are embeddings — derive N from the first column.
+        if table.ncols() > 0 {
+            let name = table.col_name_str(0).to_lowercase();
+            let alias = result_aliases.first();
+            let dim = embedding_dims
+                .get(&name)
+                .or_else(|| alias.and_then(|a| embedding_dims.get(a)));
+            if let Some(&d) = dim {
+                if d > 0 {
+                    break 'nrows raw_nrows / d as i64;
+                }
+            }
+        }
+        raw_nrows
+    };
     for col_idx in 0..table.ncols() {
         let col = table.get_col_idx(col_idx).ok_or_else(|| {
             SqlError::Plan(format!("Result column at index {col_idx} is missing"))
@@ -3626,7 +3785,7 @@ fn validate_result_table(
             )));
         }
     }
-    Ok(())
+    Ok(nrows)
 }
 
 /// Convert ObjectName to a string.
@@ -3683,14 +3842,33 @@ fn intersect_embedding_dims_positional(
 ) -> Result<HashMap<String, i32>, SqlError> {
     let mut merged = HashMap::new();
     for (left_name, right_name) in left_cols.iter().zip(right_cols.iter()) {
-        if let (Some(&ld), Some(&rd)) = (left_dims.get(left_name), right_dims.get(right_name)) {
-            if ld != rd {
+        let l = left_dims.get(left_name).copied();
+        let r = right_dims.get(right_name).copied();
+        match (l, r) {
+            (Some(ld), Some(rd)) => {
+                if ld != rd {
+                    return Err(SqlError::Plan(format!(
+                        "{op_name}: embedding column '{left_name}' dimension mismatch \
+                         (left has {ld}, right has {rd})"
+                    )));
+                }
+                merged.insert(left_name.clone(), ld);
+            }
+            (Some(ld), None) if ld > 1 => {
                 return Err(SqlError::Plan(format!(
-                    "{op_name}: embedding column '{left_name}' dimension mismatch \
-                     (left has {ld}, right has {rd})"
+                    "{op_name}: left column '{left_name}' is an embedding (dim={ld}) \
+                     but right column '{right_name}' is not — the flat N*D buffer \
+                     would be misinterpreted as scalar rows"
                 )));
             }
-            merged.insert(left_name.clone(), ld);
+            (None, Some(rd)) if rd > 1 => {
+                return Err(SqlError::Plan(format!(
+                    "{op_name}: right column '{right_name}' is an embedding (dim={rd}) \
+                     but left column '{left_name}' is not — the flat N*D buffer \
+                     would be misinterpreted as scalar rows"
+                )));
+            }
+            _ => {}
         }
     }
     Ok(merged)
@@ -3733,7 +3911,7 @@ fn resolve_subqueries(
                     result.columns.len()
                 )));
             }
-            let nrows = result.table.nrows();
+            let nrows = result.nrows;
             if nrows != 1 {
                 return Err(SqlError::Plan(format!(
                     "Scalar subquery must return exactly 1 row, got {}",
@@ -3757,7 +3935,7 @@ fn resolve_subqueries(
                     result.columns.len()
                 )));
             }
-            let nrows = result.table.nrows() as usize;
+            let nrows = result.nrows;
             let mut values = Vec::with_capacity(nrows);
             for r in 0..nrows {
                 values.push(scalar_value_from_table(&result.table, 0, r)?);
@@ -3772,7 +3950,7 @@ fn resolve_subqueries(
         // EXISTS (subquery): evaluate and replace with boolean literal
         Expr::Exists { subquery, negated } => {
             let result = plan_query(ctx, subquery, tables)?;
-            let exists = result.table.nrows() > 0;
+            let exists = result.nrows > 0;
             Ok(Expr::Value(Value::Boolean(exists ^ negated)))
         }
 
@@ -4141,7 +4319,7 @@ fn trim_to_visible_columns(
         return Ok(table);
     }
 
-    let g = ctx.graph(&table)?;
+    let mut g = ctx.graph(&table)?;
     let table_node = g.const_table(&table)?;
     let proj_cols: Vec<Column> = visible_aliases
         .iter()

@@ -131,7 +131,7 @@ impl SessionBridge {
                 let result = match session.execute(&req.sql) {
                     Ok(ExecResult::Query(sql_result)) => {
                         let ncols = sql_result.table.ncols() as usize;
-                        let nrows = sql_result.table.nrows() as usize;
+                        let nrows = sql_result.nrows;
 
                         let columns: Vec<(String, i8)> = (0..ncols)
                             .map(|i| {
@@ -145,11 +145,23 @@ impl SessionBridge {
                             })
                             .collect();
 
+                        // Build per-column embedding dims for display
+                        let col_dims: Vec<i32> = (0..ncols)
+                            .map(|i| {
+                                let name = if i < sql_result.columns.len() {
+                                    &sql_result.columns[i]
+                                } else {
+                                    return 0;
+                                };
+                                sql_result.embedding_dims.get(name).copied().unwrap_or(0)
+                            })
+                            .collect();
+
                         let mut rows = Vec::with_capacity(nrows);
                         for r in 0..nrows {
                             let mut row = Vec::with_capacity(ncols);
                             for c in 0..ncols {
-                                row.push(super::types::format_cell(&sql_result.table, c, r));
+                                row.push(super::types::format_cell(&sql_result.table, c, r, col_dims[c]));
                             }
                             rows.push(row);
                         }

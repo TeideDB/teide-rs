@@ -80,6 +80,16 @@ pub(super) fn checked_nrows(table: &Table) -> Result<usize, SqlError> {
     Ok(n as usize)
 }
 
+/// Like `checked_nrows` but uses `StoredTable::logical_nrows()` to correct
+/// for embedding columns whose flat N*D F32 arrays inflate `table.nrows()`.
+pub(super) fn checked_logical_nrows(stored: &super::StoredTable) -> Result<usize, SqlError> {
+    let n = stored.logical_nrows();
+    if n < 0 {
+        return Err(SqlError::Plan(format!("logical_nrows() returned negative value ({n}); possible engine error")));
+    }
+    Ok(n as usize)
+}
+
 // ---------------------------------------------------------------------------
 // Property graph catalog types
 // ---------------------------------------------------------------------------
@@ -259,10 +269,10 @@ pub(crate) fn build_property_graph(
             ))
         })?;
 
-        let n_src_usize = checked_nrows(&src_stored.table).map_err(|_| SqlError::Plan(format!(
+        let n_src_usize = checked_logical_nrows(src_stored).map_err(|_| SqlError::Plan(format!(
             "Source vertex table '{}' has invalid row count", et.src_ref_table
         )))?;
-        let n_dst_usize = checked_nrows(&dst_stored.table).map_err(|_| SqlError::Plan(format!(
+        let n_dst_usize = checked_logical_nrows(dst_stored).map_err(|_| SqlError::Plan(format!(
             "Destination vertex table '{}' has invalid row count", et.dst_ref_table
         )))?;
         let n_src = n_src_usize as i64;
@@ -270,13 +280,9 @@ pub(crate) fn build_property_graph(
 
         // Validate that edge src/dst column values are 0-based row indices.
         // The C engine CSR treats these as row offsets into the vertex tables.
-        let n_edges_i64 = edge_stored.table.nrows();
-        if n_edges_i64 < 0 {
-            return Err(SqlError::Plan(format!(
-                "Edge table '{}' has invalid row count", et.table_name
-            )));
-        }
-        let n_edges = n_edges_i64 as usize;
+        let n_edges = checked_logical_nrows(edge_stored).map_err(|_| SqlError::Plan(format!(
+            "Edge table '{}' has invalid row count", et.table_name
+        )))?;
         let src_col_idx = find_col_idx(&edge_stored.table, &et.src_col).ok_or_else(|| {
             SqlError::Plan(format!(
                 "Column '{}' not found in edge table '{}'",
@@ -554,7 +560,7 @@ fn plan_single_hop(
     };
 
     // Build graph on the left-side node's table
-    let g = session.ctx.graph(&src_stored.table)?;
+    let mut g = session.ctx.graph(&src_stored.table)?;
 
     // Scan the appropriate reference column for the left-side node
     let src_ids = g.scan(scan_ref_col)?;
@@ -562,7 +568,7 @@ fn plan_single_hop(
     // Apply source node filter if present
     let src_ids = if let Some(filter_text) = &src_node.filter {
         apply_node_filter(
-            &g,
+            &mut g,
             src_ids,
             filter_text,
             src_node.variable.as_deref(),
@@ -634,7 +640,7 @@ fn validate_node_table_for_edge(
 /// Apply a WHERE filter from a node pattern.
 /// Parses filter text like "a.name = 'Alice'" and applies it.
 fn apply_node_filter(
-    g: &Graph,
+    g: &mut Graph,
     ids: Column,
     filter_text: &str,
     variable: Option<&str>,
@@ -823,7 +829,7 @@ pub(super) fn validate_key_column_is_rowid(
             "Key column '{key_col}' not found in vertex table '{table_name}'"
         ))
     })?;
-    let nrows = checked_nrows(&stored.table)?;
+    let nrows = checked_logical_nrows(stored)?;
     for row in 0..nrows {
         let val = stored.table.get_i64(col_idx, row).ok_or_else(|| {
             SqlError::Plan(format!(
@@ -979,11 +985,11 @@ fn plan_var_length(
         PathQuantifier::One => (1, 1),
     };
 
-    let g = session.ctx.graph(src_table)?;
+    let mut g = session.ctx.graph(src_table)?;
     let src_ids = g.scan(scan_ref_col)?;
 
     let src_ids = if let Some(filter_text) = &src_node.filter {
-        apply_node_filter(&g, src_ids, filter_text, src_node.variable.as_deref())?
+        apply_node_filter(&mut g, src_ids, filter_text, src_node.variable.as_deref())?
     } else {
         src_ids
     };
@@ -1424,7 +1430,7 @@ fn reconstruct_shortest_path(
         .ok_or_else(|| SqlError::Plan(format!("Column '{dst_col_name}' not found in edge table")))?;
 
     // Build adjacency list from edge table
-    let n_edges = checked_nrows(&edge_stored.table)?;
+    let n_edges = checked_logical_nrows(edge_stored)?;
     let mut adj: HM<i64, Vec<i64>> = HM::new();
     for row in 0..n_edges {
         let s = match edge_stored.table.get_i64(src_col_idx, row) {
@@ -1546,7 +1552,7 @@ fn extract_node_id(
         SqlError::Plan(format!("Table '{table_name}' not found"))
     })?;
 
-    let nrows = checked_nrows(&stored.table)?;
+    let nrows = checked_logical_nrows(stored)?;
     let col_idx = find_col_idx(&stored.table, &col_name).ok_or_else(|| {
         SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
     })?;
@@ -1657,7 +1663,7 @@ fn plan_algorithm_query(
     let vertex_stored = session.tables.get(&vertex_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", vertex_label.table_name))
     })?;
-    let nrows = checked_nrows(&vertex_stored.table)?;
+    let nrows = checked_logical_nrows(vertex_stored)?;
 
     // Determine edge label: use the only one, or require specification
     let default_edge_label = if graph.edge_labels.len() == 1 {

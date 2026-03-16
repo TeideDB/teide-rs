@@ -76,7 +76,7 @@ fn const_f64_in_arithmetic() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v3 = g.scan("v3").unwrap();
@@ -97,7 +97,7 @@ fn const_bool_in_filter() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // Filter with const_bool(true) — should return all rows
     let tbl = g.const_table(&table).unwrap();
@@ -113,7 +113,7 @@ fn const_str_in_comparison() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let id1 = g.scan("id1").unwrap();
@@ -136,7 +136,7 @@ fn binary_sub() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v2 = g.scan("v2").unwrap();
@@ -161,7 +161,7 @@ fn binary_mul() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -184,7 +184,7 @@ fn binary_div() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let id6 = g.scan("id6").unwrap();
@@ -210,7 +210,7 @@ fn binary_modulo() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -233,7 +233,7 @@ fn comparison_eq_ne() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // Filter id4 == 1
     let tbl = g.const_table(&table).unwrap();
@@ -258,7 +258,7 @@ fn comparison_lt_le_ge() {
     let table = ctx.read_csv(&path).unwrap();
 
     // lt: v1 < 3
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
     let three = g.const_i64(3).unwrap();
@@ -269,7 +269,7 @@ fn comparison_lt_le_ge() {
     assert_eq!(result.nrows(), 4);
 
     // le: v1 <= 3
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let tbl2 = g2.const_table(&table).unwrap();
     let v1b = g2.scan("v1").unwrap();
     let three_b = g2.const_i64(3).unwrap();
@@ -280,7 +280,7 @@ fn comparison_lt_le_ge() {
     assert_eq!(result2.nrows(), 6);
 
     // ge: v1 >= 9
-    let g3 = ctx.graph(&table).unwrap();
+    let mut g3 = ctx.graph(&table).unwrap();
     let tbl3 = g3.const_table(&table).unwrap();
     let v1c = g3.scan("v1").unwrap();
     let nine = g3.const_i64(9).unwrap();
@@ -299,7 +299,7 @@ fn logical_and_or() {
     let table = ctx.read_csv(&path).unwrap();
 
     // AND: id4 == 1 AND v1 > 5
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
     let tbl = g.const_table(&table).unwrap();
     let id4 = g.scan("id4").unwrap();
     let one = g.const_i64(1).unwrap();
@@ -317,7 +317,7 @@ fn logical_and_or() {
     }
 
     // OR: id4 == 1 OR id4 == 3
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let tbl2 = g2.const_table(&table).unwrap();
     let id4a = g2.scan("id4").unwrap();
     let one_b = g2.const_i64(1).unwrap();
@@ -345,7 +345,7 @@ fn unary_not() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // NOT(v1 > 5) → v1 <= 5
     let tbl = g.const_table(&table).unwrap();
@@ -369,7 +369,7 @@ fn unary_neg() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -391,7 +391,7 @@ fn math_abs() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // abs(neg(v1)) == v1
     let tbl = g.const_table(&table).unwrap();
@@ -415,7 +415,7 @@ fn math_sqrt_log_exp() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // Cast v3 to f64 (already f64), then sqrt
     let tbl = g.const_table(&table).unwrap();
@@ -431,7 +431,7 @@ fn math_sqrt_log_exp() {
     assert!((s0 - 1.5_f64.sqrt()).abs() < 1e-6, "sqrt(1.5) = {s0}");
 
     // exp then log should round-trip
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let tbl2 = g2.const_table(&table).unwrap();
     let v3b = g2.scan("v3").unwrap();
     let e = g2.exp(v3b).unwrap();
@@ -451,7 +451,7 @@ fn math_ceil_floor() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v3 = g.scan("v3").unwrap();
@@ -487,7 +487,7 @@ fn string_trim() {
 
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let name = g.scan("name").unwrap();
@@ -508,7 +508,7 @@ fn string_substr() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // substr(id1, 1, 2) → "id" for all rows (1-based start)
     let tbl = g.const_table(&table).unwrap();
@@ -532,7 +532,7 @@ fn string_replace() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // replace(id1, "id", "ID") → "ID001", "ID002", etc.
     let tbl = g.const_table(&table).unwrap();
@@ -556,7 +556,7 @@ fn string_like_ilike() {
     let table = ctx.read_csv(&path).unwrap();
 
     // LIKE: id1 LIKE 'id00%'
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
     let tbl = g.const_table(&table).unwrap();
     let id1 = g.scan("id1").unwrap();
     let pat = g.const_str("id00%").unwrap();
@@ -567,7 +567,7 @@ fn string_like_ilike() {
     assert_eq!(result.nrows(), 20);
 
     // ILIKE: case-insensitive
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let tbl2 = g2.const_table(&table).unwrap();
     let id1b = g2.scan("id1").unwrap();
     let pat2 = g2.const_str("ID00%").unwrap();
@@ -700,7 +700,7 @@ fn binary_min2_max2() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -727,7 +727,7 @@ fn if_then_else_op() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // IF v1 > 5 THEN v1 ELSE 0
     let tbl = g.const_table(&table).unwrap();
@@ -758,7 +758,7 @@ fn extract_year_month_day() {
     let (_file, path) = create_datetime_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let date_col = g.scan("date").unwrap();
@@ -790,7 +790,7 @@ fn date_trunc_month() {
     let (_file, path) = create_datetime_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let date_col = g.scan("date").unwrap();
@@ -981,7 +981,7 @@ fn rel_from_edges_and_expand() {
     let src_path = src_f.path().to_str().unwrap().to_string();
     let src_table = ctx.read_csv(&src_path).unwrap();
 
-    let g = ctx.graph(&src_table).unwrap();
+    let mut g = ctx.graph(&src_table).unwrap();
     let src_nodes = g.scan("node").unwrap();
     // direction=0 → outgoing edges
     let expanded = g.expand(src_nodes, &rel, 0).unwrap();
@@ -1007,7 +1007,7 @@ fn rel_var_expand() {
     let src_path = src_f.path().to_str().unwrap().to_string();
     let src_table = ctx.read_csv(&src_path).unwrap();
 
-    let g = ctx.graph(&src_table).unwrap();
+    let mut g = ctx.graph(&src_table).unwrap();
     let src_nodes = g.scan("node").unwrap();
     // Variable-length BFS from node 0, depth 1-3, outgoing
     let vexp = g.var_expand(src_nodes, &rel, 0, 1, 3, false).unwrap();
@@ -1034,7 +1034,7 @@ fn rel_shortest_path() {
     let src_path = src_f.path().to_str().unwrap().to_string();
     let src_table = ctx.read_csv(&src_path).unwrap();
 
-    let g = ctx.graph(&src_table).unwrap();
+    let mut g = ctx.graph(&src_table).unwrap();
     let src = g.const_i64(0).unwrap();
     let dst = g.const_i64(4).unwrap();
     // Shortest path from 0 to 4, max depth 10
@@ -1070,7 +1070,7 @@ fn rel_save_load_roundtrip() {
     let src_path = src_f.path().to_str().unwrap().to_string();
     let src_table = ctx.read_csv(&src_path).unwrap();
 
-    let g = ctx.graph(&src_table).unwrap();
+    let mut g = ctx.graph(&src_table).unwrap();
     let src_nodes = g.scan("node").unwrap();
     let expanded = g.expand(src_nodes, &rel2, 0).unwrap();
     let result = g.execute(expanded).unwrap();
@@ -1098,7 +1098,7 @@ fn graph_add_table_and_scan() {
     let path2 = f2.path().to_str().unwrap().to_string();
     let table2 = ctx.read_csv(&path2).unwrap();
 
-    let g = ctx.graph(&table1).unwrap();
+    let mut g = ctx.graph(&table1).unwrap();
     let t2_id = g.add_table(&table2);
     let extra_col = g.scan_table(t2_id, "extra").unwrap();
     // Just verify the scan succeeds — it creates a valid graph node
@@ -1115,7 +1115,7 @@ fn isnull_on_non_null_data() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -1139,7 +1139,7 @@ fn select_multiple_columns() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -1207,7 +1207,7 @@ fn graph_pagerank() {
 
     let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
 
-    let g = ctx.graph(&edges).unwrap();
+    let mut g = ctx.graph(&edges).unwrap();
     let pr = g.pagerank(&rel, 20, 0.85).unwrap();
     let result = g.execute(pr).unwrap();
 
@@ -1245,7 +1245,7 @@ fn graph_connected_comp() {
 
     let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
 
-    let g = ctx.graph(&edges).unwrap();
+    let mut g = ctx.graph(&edges).unwrap();
     let cc = g.connected_comp(&rel).unwrap();
     let result = g.execute(cc).unwrap();
 
@@ -1282,7 +1282,7 @@ fn graph_dijkstra() {
     // Attach edge properties (the edge table itself) so Dijkstra can read weights
     rel.set_props(&edges);
 
-    let g = ctx.graph(&edges).unwrap();
+    let mut g = ctx.graph(&edges).unwrap();
     let src = g.const_i64(0).unwrap();
     let dst = g.const_i64(4).unwrap();
     let dj = g.dijkstra(src, Some(dst), &rel, "weight", 255).unwrap();
@@ -1319,7 +1319,7 @@ fn graph_louvain() {
 
     let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
 
-    let g = ctx.graph(&edges).unwrap();
+    let mut g = ctx.graph(&edges).unwrap();
     let lv = g.louvain(&rel, 100).unwrap();
     let result = g.execute(lv).unwrap();
 
@@ -1636,7 +1636,7 @@ fn sql_cosine_similarity_dim_mismatch_qualified() {
 }
 
 #[test]
-fn sql_embedding_dims_preserved_after_insert() {
+fn sql_insert_values_rejected_on_embedding_table() {
     let _guard = lock();
     let mut session = Session::new().unwrap();
 
@@ -1644,8 +1644,29 @@ fn sql_embedding_dims_preserved_after_insert() {
     session.execute("INSERT INTO docs VALUES (0, 'math', 0.0)").unwrap();
     session.register_embedding_dim("docs", "embedding", 4).unwrap();
 
-    // Insert more rows — embedding_dims should be preserved
-    session.execute("INSERT INTO docs VALUES (1, 'science', 0.0)").unwrap();
+    // INSERT VALUES on embedding tables is rejected because VALUES produces
+    // scalar F32 vectors, not dimension-aware embedding buffers.
+    let result = session.execute("INSERT INTO docs VALUES (1, 'science', 0.0)");
+    assert!(result.is_err(), "INSERT VALUES should be rejected on embedding tables");
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
+}
+
+#[test]
+fn sql_embedding_dims_preserved_after_insert_select() {
+    let _guard = lock();
+    let mut session = Session::new().unwrap();
+
+    // Create source and target tables without embedding metadata initially
+    session.execute("CREATE TABLE src (id INTEGER, name VARCHAR, embedding FLOAT)").unwrap();
+    session.execute("INSERT INTO src VALUES (0, 'math', 0.0)").unwrap();
+
+    session.execute("CREATE TABLE docs AS SELECT * FROM src").unwrap();
+    session.register_embedding_dim("docs", "embedding", 4).unwrap();
+
+    // INSERT SELECT from a table that also has matching embedding dims should work
+    session.register_embedding_dim("src", "embedding", 4).unwrap();
+    session.execute("INSERT INTO docs SELECT * FROM src").unwrap();
 
     // Should still reject wrong dimension after insert
     let result = session.execute(

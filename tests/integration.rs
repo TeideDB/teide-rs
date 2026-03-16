@@ -131,7 +131,7 @@ fn scan_and_filter() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -151,7 +151,7 @@ fn arithmetic() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -426,7 +426,7 @@ fn head_tail() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     // head(5)
     let tbl = g.const_table(&table).unwrap();
@@ -439,7 +439,7 @@ fn head_tail() {
 
     // tail(5) — need a fresh graph
     drop(result);
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let df2 = g2.const_table(&table).unwrap();
     let t = g2.tail(df2, 5).unwrap();
     let result2 = g2.execute(t).unwrap();
@@ -454,7 +454,7 @@ fn project() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let id1 = g.scan("id1").unwrap();
@@ -474,7 +474,7 @@ fn alias_column() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -494,7 +494,7 @@ fn string_ops() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let id1 = g.scan("id1").unwrap();
@@ -531,7 +531,7 @@ fn concat_many_args() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let mut args = Vec::new();
@@ -557,7 +557,7 @@ fn cast_i64_to_f64() {
     let (_file, path) = create_test_csv();
     let ctx = Context::new().unwrap();
     let table = ctx.read_csv(&path).unwrap();
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
 
     let tbl = g.const_table(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
@@ -839,7 +839,7 @@ fn cancel_resets_between_queries() {
     // would fail and need updating.
     teide::cancel();
 
-    let g = ctx.graph(&table).unwrap();
+    let mut g = ctx.graph(&table).unwrap();
     let v1 = g.scan("v1").unwrap();
     let sum = g.sum(v1).unwrap();
     let result = g.execute(sum);
@@ -847,7 +847,7 @@ fn cancel_resets_between_queries() {
     assert!(result.is_ok());
 
     // Verify next query also works after cancel was consumed
-    let g2 = ctx.graph(&table).unwrap();
+    let mut g2 = ctx.graph(&table).unwrap();
     let v1b = g2.scan("v1").unwrap();
     let sum2 = g2.sum(v1b).unwrap();
     let result2 = g2.execute(sum2);

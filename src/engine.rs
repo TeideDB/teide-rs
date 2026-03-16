@@ -728,7 +728,7 @@ impl Table {
         dim: i32,
         data: &[f32],
     ) -> Result<*mut ffi::td_t> {
-        if nrows <= 0 || dim <= 0 {
+        if nrows < 0 || dim <= 0 {
             return Err(Error::InvalidInput);
         }
         let expected = (nrows as usize)
@@ -966,6 +966,41 @@ impl Table {
         }
     }
 
+    /// Read an f32 value from column `col` at physical index `row`.
+    ///
+    /// For embedding columns the physical length is `nrows * dim`, so callers
+    /// must compute the physical index themselves (e.g. `logical_row * dim + i`).
+    pub fn get_f32(&self, col: usize, row: usize) -> Option<f32> {
+        let vec = self.get_col_idx(col as i64)?;
+        let t = unsafe { ffi::td_type(vec) };
+
+        if t == ffi::TD_MAPCOMMON {
+            return None;
+        }
+
+        if ffi::td_is_parted(t) {
+            let base_t = ffi::td_parted_basetype(t);
+            if base_t != ffi::TD_F32 {
+                return None;
+            }
+            let (seg, local_row) = unsafe { Self::resolve_parted_row(vec, row)? };
+            let data = unsafe { ffi::td_data(seg) as *const f32 };
+            return Some(unsafe { *data.add(local_row) });
+        }
+
+        let len = unsafe { ffi::td_len(vec) } as usize;
+        if row >= len {
+            return None;
+        }
+        if t != ffi::TD_F32 {
+            return None;
+        }
+        unsafe {
+            let data = ffi::td_data(vec) as *const f32;
+            Some(*data.add(row))
+        }
+    }
+
     /// Read a string value from a SYM or MAPCOMMON column at `col`, `row`.
     pub fn get_str(&self, col: usize, row: usize) -> Option<String> {
         let vec = self.get_col_idx(col as i64)?;
@@ -1183,12 +1218,23 @@ impl<'a> Graph<'a> {
 
     /// Scan a column by name from the bound table.
     /// Returns `Error::InvalidInput` when `col_name` contains interior NUL bytes.
-    pub fn scan(&self, col_name: &str) -> Result<Column> {
+    ///
+    /// If `column_embedding_dims` contains a dimension for this column name,
+    /// the returned `Column` pointer is also registered in the pointer-based
+    /// `embedding_dims` map so that `validate_query_vec` / `check_embedding_dim`
+    /// can catch dimension mismatches for scan-based columns.
+    pub fn scan(&mut self, col_name: &str) -> Result<Column> {
         // SAFETY: C function copies/interns the string immediately. CString is
         // valid for the duration of the FFI call.
         let c_name = CString::new(col_name).map_err(|_| Error::InvalidInput)?;
         let raw = unsafe { ffi::td_scan(self.raw, c_name.as_ptr()) };
-        Self::check_op(raw)
+        let col = Self::check_op(raw)?;
+        // Propagate name-based embedding dimension to pointer-based map so
+        // that validate_query_vec works for scan-based columns.
+        if let Some(&dim) = self.column_embedding_dims.get(&col_name.to_lowercase()) {
+            self.embedding_dims.insert(col.raw, dim);
+        }
+        Ok(col)
     }
 
     /// Create a constant f64 node.
@@ -1741,9 +1787,20 @@ impl<'a> Graph<'a> {
     }
 
     /// Scan a column from a registered table (by table_id from `add_table`).
-    pub fn scan_table(&self, table_id: u16, col_name: &str) -> Result<Column> {
+    ///
+    /// If `column_embedding_dims` contains a dimension for this column name,
+    /// the returned `Column` pointer is also registered in the pointer-based
+    /// `embedding_dims` map (same as `scan()`).
+    pub fn scan_table(&mut self, table_id: u16, col_name: &str) -> Result<Column> {
         let c_name = CString::new(col_name).map_err(|_| Error::InvalidInput)?;
-        Self::check_op(unsafe { ffi::td_scan_table(self.raw, table_id, c_name.as_ptr()) })
+        let raw = unsafe { ffi::td_scan_table(self.raw, table_id, c_name.as_ptr()) };
+        let col = Self::check_op(raw)?;
+        // Propagate name-based embedding dimension to pointer-based map so
+        // that validate_query_vec works for scan_table-based columns too.
+        if let Some(&dim) = self.column_embedding_dims.get(&col_name.to_lowercase()) {
+            self.embedding_dims.insert(col.raw, dim);
+        }
+        Ok(col)
     }
 
     // ---- Graph traversal ops ------------------------------------------------

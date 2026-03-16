@@ -45,9 +45,29 @@ pub fn teide_to_pg_type(td_type: i8) -> Type {
 
 /// Format a single cell value as a text-protocol string for the PG wire.
 /// Returns `None` for NULL values.
-pub fn format_cell(table: &crate::Table, col: usize, row: usize) -> Option<String> {
+///
+/// `emb_dim` is the embedding dimension for this column (0 = not an
+/// embedding).  For `dim > 1` the logical `row` is expanded into the
+/// `dim` consecutive f32 values starting at physical index `row * dim`.
+pub fn format_cell(table: &crate::Table, col: usize, row: usize, emb_dim: i32) -> Option<String> {
     let typ = table.col_type(col);
     match typ {
+        ffi::TD_F32 if emb_dim > 1 => {
+            let d = emb_dim as usize;
+            let base = row * d;
+            let mut parts = Vec::with_capacity(d);
+            for i in 0..d {
+                match table.get_f32(col, base + i) {
+                    Some(v) => parts.push(format!("{v}")),
+                    None => parts.push("NULL".to_string()),
+                }
+            }
+            Some(format!("[{}]", parts.join(", ")))
+        }
+        ffi::TD_F32 => {
+            let v = table.get_f32(col, row)?;
+            Some(format!("{v}"))
+        }
         ffi::TD_BOOL => {
             let v = table.get_i64(col, row)?;
             Some(if v != 0 {
