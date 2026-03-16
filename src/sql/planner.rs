@@ -3713,7 +3713,7 @@ fn validate_result_table(
             let name = table.col_name_str(ci as usize).to_lowercase();
             let alias = result_aliases.get(ci as usize);
             let is_emb = embedding_dims.contains_key(&name)
-                || alias.map_or(false, |a| embedding_dims.contains_key(a));
+                || alias.is_some_and(|a| embedding_dims.contains_key(a));
             if !is_emb {
                 // First non-embedding column – its len equals the true row count.
                 if let Some(col) = table.get_col_idx(ci) {

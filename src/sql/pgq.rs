@@ -499,7 +499,7 @@ fn execute_create_vector_index(
     let ef_construction = parsed.ef_construction.unwrap_or(200);
 
     let index = HnswIndex::build(&session.ctx, vectors, n_nodes, dim, m, ef_construction)
-        .map_err(|e| SqlError::Engine(e))?;
+        .map_err(SqlError::Engine)?;
 
     session.vector_indexes.insert(
         name.clone(),

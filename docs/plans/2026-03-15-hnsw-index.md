@@ -835,17 +835,17 @@ git commit -m "feat(sql): add CREATE/DROP VECTOR INDEX with transparent KNN opti
 
 ## Task 6: Full Regression Test
 
-- [ ] **Step 1: Run complete test suite**
+- [x] **Step 1: Run complete test suite**
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: All PASS
 
-- [ ] **Step 2: Run clippy**
+- [x] **Step 2: Run clippy**
 
 Run: `cargo clippy --all-features -- -D warnings 2>&1 | tail -10`
 Expected: No warnings
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A

@@ -160,8 +160,8 @@ impl SessionBridge {
                         let mut rows = Vec::with_capacity(nrows);
                         for r in 0..nrows {
                             let mut row = Vec::with_capacity(ncols);
-                            for c in 0..ncols {
-                                row.push(super::types::format_cell(&sql_result.table, c, r, col_dims[c]));
+                            for (c, &dim) in col_dims.iter().enumerate().take(ncols) {
+                                row.push(super::types::format_cell(&sql_result.table, c, r, dim));
                             }
                             rows.push(row);
                         }
