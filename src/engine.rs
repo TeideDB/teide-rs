@@ -1865,6 +1865,27 @@ impl<'a> Graph<'a> {
         })
     }
 
+    // --- Vector similarity helpers ---
+
+    /// Validate a query vector: convert length to i32, reject empty, check
+    /// embedding dimension if registered.  Returns the dimension on success.
+    fn validate_query_vec(&self, emb_col: Column, query_vec: &[f32]) -> Result<i32> {
+        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
+        if dim == 0 {
+            return Err(Error::InvalidInput);
+        }
+        self.check_embedding_dim(emb_col, dim)?;
+        Ok(dim)
+    }
+
+    /// Pin a `Vec<f32>` into `_pinned` and return its data pointer.
+    /// The pointer remains valid until the `Graph` is dropped.
+    fn pin_query_vec(&mut self, query_vec: Vec<f32>) -> *const f32 {
+        let ptr = query_vec.as_ptr();
+        self._pinned.push(Box::new(query_vec));
+        ptr
+    }
+
     // --- Vector similarity ops ---
 
     /// Compute cosine similarity between an embedding column and a query vector.
@@ -1878,11 +1899,7 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: &[f32],
     ) -> Result<Column> {
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
+        let dim = self.validate_query_vec(emb_col, query_vec)?;
         Self::check_op(unsafe {
             ffi::td_cosine_sim(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
@@ -1898,13 +1915,8 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: Vec<f32>,
     ) -> Result<Column> {
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
-        let ptr = query_vec.as_ptr();
-        self._pinned.push(Box::new(query_vec));
+        let dim = self.validate_query_vec(emb_col, &query_vec)?;
+        let ptr = self.pin_query_vec(query_vec);
         Self::check_op(unsafe {
             ffi::td_cosine_sim(self.raw, emb_col.raw, ptr, dim)
         })
@@ -1921,11 +1933,7 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: &[f32],
     ) -> Result<Column> {
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
+        let dim = self.validate_query_vec(emb_col, query_vec)?;
         Self::check_op(unsafe {
             ffi::td_euclidean_dist(self.raw, emb_col.raw, query_vec.as_ptr(), dim)
         })
@@ -1940,13 +1948,8 @@ impl<'a> Graph<'a> {
         emb_col: Column,
         query_vec: Vec<f32>,
     ) -> Result<Column> {
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
-        let ptr = query_vec.as_ptr();
-        self._pinned.push(Box::new(query_vec));
+        let dim = self.validate_query_vec(emb_col, &query_vec)?;
+        let ptr = self.pin_query_vec(query_vec);
         Self::check_op(unsafe {
             ffi::td_euclidean_dist(self.raw, emb_col.raw, ptr, dim)
         })
@@ -1968,11 +1971,7 @@ impl<'a> Graph<'a> {
         if k <= 0 {
             return Err(Error::InvalidInput);
         }
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
+        let dim = self.validate_query_vec(emb_col, query_vec)?;
         Self::check_op(unsafe {
             ffi::td_knn(self.raw, emb_col.raw, query_vec.as_ptr(), dim, k)
         })
@@ -1991,13 +1990,8 @@ impl<'a> Graph<'a> {
         if k <= 0 {
             return Err(Error::InvalidInput);
         }
-        let dim = i32::try_from(query_vec.len()).map_err(|_| Error::InvalidInput)?;
-        if dim == 0 {
-            return Err(Error::InvalidInput);
-        }
-        self.check_embedding_dim(emb_col, dim)?;
-        let ptr = query_vec.as_ptr();
-        self._pinned.push(Box::new(query_vec));
+        let dim = self.validate_query_vec(emb_col, &query_vec)?;
+        let ptr = self.pin_query_vec(query_vec);
         Self::check_op(unsafe {
             ffi::td_knn(self.raw, emb_col.raw, ptr, dim, k)
         })

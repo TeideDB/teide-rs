@@ -1668,7 +1668,7 @@ fn sql_delete_rejected_on_embedding_table() {
     let result = session.execute("DELETE FROM docs WHERE id = 0");
     assert!(result.is_err(), "DELETE WHERE should be rejected on embedding tables");
     let err = format!("{}", result.err().unwrap());
-    assert!(err.contains("not supported"), "error should mention not supported: {err}");
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
 
     // DELETE without WHERE (truncate) should still work
     session.execute("DELETE FROM docs").unwrap();
@@ -1688,7 +1688,7 @@ fn sql_update_rejected_on_embedding_table() {
     let result = session.execute("UPDATE docs SET name = 'mathematics' WHERE id = 0");
     assert!(result.is_err(), "UPDATE should be rejected on embedding tables");
     let err = format!("{}", result.err().unwrap());
-    assert!(err.contains("not supported"), "error should mention not supported: {err}");
+    assert!(err.contains("not yet supported"), "error should mention not yet supported: {err}");
 }
 
 #[test]

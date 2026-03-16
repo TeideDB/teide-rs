@@ -404,17 +404,8 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
     // Embedding columns are flat N*D F32 arrays.  The C engine's filter
     // kernel operates element-wise and is not dimension-aware, so filtering
     // a table that contains embedding columns would corrupt their data.
-    if delete.selection.is_some() && !stored.embedding_dims.is_empty() {
-        return Err(SqlError::Plan(format!(
-            "DELETE with WHERE is not supported on tables with embedding columns \
-             (table '{table_name}' has embedding columns: {})",
-            stored
-                .embedding_dims
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+    if delete.selection.is_some() {
+        reject_if_has_embeddings(&stored.embedding_dims, "DELETE with WHERE")?;
     }
 
     let new_table = if let Some(selection) = &delete.selection {
@@ -521,18 +512,7 @@ fn plan_update(
     // if_then_else / select kernels operate element-wise and are not
     // dimension-aware, so UPDATE on a table with embedding columns would
     // corrupt their data.
-    if !stored.embedding_dims.is_empty() {
-        return Err(SqlError::Plan(format!(
-            "UPDATE is not supported on tables with embedding columns \
-             (table '{table_name}' has embedding columns: {})",
-            stored
-                .embedding_dims
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
+    reject_if_has_embeddings(&stored.embedding_dims, "UPDATE")?;
 
     let schema: HashMap<String, usize> = columns
         .iter()
@@ -1290,39 +1270,20 @@ fn plan_query(
     // are not dimension-aware, so filtering, ordering, limiting, grouping,
     // or deduplicating a table that contains embedding columns would corrupt
     // their data.
-    if !from_embedding_dims.is_empty() {
-        let emb_cols: Vec<_> = from_embedding_dims.keys().cloned().collect();
-        let emb_list = emb_cols.join(", ");
-        if effective_where.is_some() {
-            return Err(SqlError::Plan(format!(
-                "SELECT with WHERE is not yet supported on tables with embedding columns \
-                 (source has embedding columns: {emb_list})"
-            )));
-        }
-        if !order_by_exprs.is_empty() {
-            return Err(SqlError::Plan(format!(
-                "SELECT with ORDER BY is not yet supported on tables with embedding columns \
-                 (source has embedding columns: {emb_list})"
-            )));
-        }
-        if limit_val.is_some() || offset_val.is_some() {
-            return Err(SqlError::Plan(format!(
-                "SELECT with LIMIT/OFFSET is not yet supported on tables with embedding columns \
-                 (source has embedding columns: {emb_list})"
-            )));
-        }
-        if has_group_by || has_aggregates {
-            return Err(SqlError::Plan(format!(
-                "SELECT with GROUP BY/aggregation is not yet supported on tables with embedding columns \
-                 (source has embedding columns: {emb_list})"
-            )));
-        }
-        if is_distinct {
-            return Err(SqlError::Plan(format!(
-                "SELECT DISTINCT is not yet supported on tables with embedding columns \
-                 (source has embedding columns: {emb_list})"
-            )));
-        }
+    if effective_where.is_some() {
+        reject_if_has_embeddings(&from_embedding_dims, "SELECT with WHERE")?;
+    }
+    if !order_by_exprs.is_empty() {
+        reject_if_has_embeddings(&from_embedding_dims, "SELECT with ORDER BY")?;
+    }
+    if limit_val.is_some() || offset_val.is_some() {
+        reject_if_has_embeddings(&from_embedding_dims, "SELECT with LIMIT/OFFSET")?;
+    }
+    if has_group_by || has_aggregates {
+        reject_if_has_embeddings(&from_embedding_dims, "SELECT with GROUP BY/aggregation")?;
+    }
+    if is_distinct {
+        reject_if_has_embeddings(&from_embedding_dims, "SELECT DISTINCT")?;
     }
 
     // Stage 1: WHERE filter (resolve subqueries first)
@@ -3544,7 +3505,10 @@ fn apply_post_processing(
         )?;
 
         let total_limit = match (offset_val, limit_val) {
-            (Some(off), Some(lim)) => Some(off.saturating_add(lim)),
+            (Some(off), Some(lim)) => Some(
+                off.checked_add(lim)
+                    .ok_or_else(|| SqlError::Plan("OFFSET + LIMIT overflow".into()))?,
+            ),
             (None, Some(lim)) => Some(lim),
             _ => None,
         };
@@ -3595,6 +3559,23 @@ fn apply_post_processing(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Return an error if `dims` is non-empty, indicating that the operation is
+/// not supported on tables with embedding columns.
+fn reject_if_has_embeddings(
+    dims: &HashMap<String, i32>,
+    operation: &str,
+) -> Result<(), SqlError> {
+    if !dims.is_empty() {
+        let emb_list: Vec<_> = dims.keys().cloned().collect();
+        return Err(SqlError::Plan(format!(
+            "{operation} is not yet supported on tables with embedding columns \
+             (source has embedding columns: {})",
+            emb_list.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 fn validate_result_table(
     table: &Table,

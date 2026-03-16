@@ -140,6 +140,35 @@ impl Session {
         column_name: &str,
         dim: i32,
     ) -> Result<(), SqlError> {
+        self.register_embedding_dim_inner(table_name, column_name, dim, true)
+    }
+
+    /// Register an embedding dimension for a column without checking its type.
+    ///
+    /// Unlike [`register_embedding_column`], this method does not verify that
+    /// the column is TD_F32.  It is intended for internal use (e.g., when the
+    /// planner propagates embedding metadata through query results whose
+    /// intermediate columns may not be typed TD_F32).
+    ///
+    /// Prefer [`register_embedding_column`] when registering user-facing
+    /// embedding columns, as it enforces the TD_F32 invariant.
+    #[doc(hidden)]
+    pub fn register_embedding_dim(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        dim: i32,
+    ) -> Result<(), SqlError> {
+        self.register_embedding_dim_inner(table_name, column_name, dim, false)
+    }
+
+    fn register_embedding_dim_inner(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        dim: i32,
+        check_type: bool,
+    ) -> Result<(), SqlError> {
         if dim <= 0 {
             return Err(SqlError::Plan(format!(
                 "Embedding dimension must be positive, got {dim}"
@@ -159,55 +188,21 @@ impl Session {
                     "Column '{column_name}' not found in table '{table_name}'"
                 ))
             })?;
-        // Check the raw type tag (not the normalized one from col_type(),
-        // which maps parted columns to their base type).  Parted F32 columns
-        // have a different physical layout and are not valid embedding storage.
-        let raw_type = stored.table.get_col_idx(col_idx as i64)
-            .map(|p| unsafe { crate::ffi::td_type(p) })
-            .unwrap_or(0);
-        if raw_type != crate::ffi::TD_F32 {
-            return Err(SqlError::Plan(format!(
-                "Column '{column_name}' in table '{table_name}' has type {raw_type}, \
-                 expected TD_F32={} for embedding columns \
-                 (use Table::create_embedding_column to create proper embedding columns)",
-                crate::ffi::TD_F32,
-            )));
-        }
-        stored.embedding_dims.insert(col_key, dim);
-        Ok(())
-    }
-
-    /// Register an embedding dimension for a column without checking its type.
-    ///
-    /// Unlike [`register_embedding_column`], this method does not verify that
-    /// the column is TD_F32.  It is intended for internal use (e.g., when the
-    /// planner propagates embedding metadata through query results whose
-    /// intermediate columns may not be typed TD_F32).
-    ///
-    /// Prefer [`register_embedding_column`] when registering user-facing
-    /// embedding columns, as it enforces the TD_F32 invariant.
-    #[doc(hidden)]
-    pub fn register_embedding_dim(
-        &mut self,
-        table_name: &str,
-        column_name: &str,
-        dim: i32,
-    ) -> Result<(), SqlError> {
-        if dim <= 0 {
-            return Err(SqlError::Plan(format!(
-                "Embedding dimension must be positive, got {dim}"
-            )));
-        }
-        let table_key = table_name.to_lowercase();
-        let col_key = column_name.to_lowercase();
-        let stored = self.tables.get_mut(&table_key).ok_or_else(|| {
-            SqlError::Plan(format!("Table '{table_name}' not found"))
-        })?;
-        // Validate column exists
-        if !stored.columns.iter().any(|c| c.to_lowercase() == col_key) {
-            return Err(SqlError::Plan(format!(
-                "Column '{column_name}' not found in table '{table_name}'"
-            )));
+        if check_type {
+            // Check the raw type tag (not the normalized one from col_type(),
+            // which maps parted columns to their base type).  Parted F32 columns
+            // have a different physical layout and are not valid embedding storage.
+            let raw_type = stored.table.get_col_idx(col_idx as i64)
+                .map(|p| unsafe { crate::ffi::td_type(p) })
+                .unwrap_or(0);
+            if raw_type != crate::ffi::TD_F32 {
+                return Err(SqlError::Plan(format!(
+                    "Column '{column_name}' in table '{table_name}' has type {raw_type}, \
+                     expected TD_F32={} for embedding columns \
+                     (use Table::create_embedding_column to create proper embedding columns)",
+                    crate::ffi::TD_F32,
+                )));
+            }
         }
         stored.embedding_dims.insert(col_key, dim);
         Ok(())
