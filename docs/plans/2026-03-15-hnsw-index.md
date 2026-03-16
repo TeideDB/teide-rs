@@ -393,7 +393,7 @@ Wire HNSW search into the execution DAG as `OP_HNSW_KNN`.
 - Modify: `vendor/teide/src/ops/exec.c`
 - Modify: `vendor/teide/src/ops/dump.c`
 
-- [ ] **Step 1: Add opcode and declaration to `td.h`**
+- [x] **Step 1: Add opcode and declaration to `td.h`**
 
 ```c
 #define OP_HNSW_KNN  91   /* HNSW approximate K nearest neighbors */
@@ -417,7 +417,7 @@ struct {  /* OP_HNSW_KNN */
 } hnsw;
 ```
 
-- [ ] **Step 2: Add builder and kernel**
+- [x] **Step 2: Add builder and kernel**
 
 Builder in `graph.c`:
 ```c
@@ -501,7 +501,7 @@ static td_t* exec_hnsw_knn(td_graph_t* g, td_op_t* op) {
 }
 ```
 
-- [ ] **Step 3: Add dispatch and dump**
+- [x] **Step 3: Add dispatch and dump**
 
 ```c
 case OP_HNSW_KNN: return exec_hnsw_knn(g, op);
@@ -511,12 +511,12 @@ case OP_HNSW_KNN: return exec_hnsw_knn(g, op);
 case OP_HNSW_KNN: return "HNSW_KNN";
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
 
 Run: `cargo build --all-features 2>&1 | tail -5`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -f vendor/teide/
