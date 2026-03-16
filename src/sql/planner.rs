@@ -442,7 +442,15 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
 
     let new_table = new_table.with_column_names(&columns)?;
 
-    let prev_embedding_dims = stored.embedding_dims.clone();
+    // When truncating (DELETE without WHERE), clear embedding dims since the
+    // new empty table has regular F32 vectors, not dimension-aware embeddings.
+    // Preserving stale dims would cause buffer overread if data is re-inserted
+    // via INSERT VALUES (which creates regular scalar columns).
+    let prev_embedding_dims = if delete.selection.is_some() {
+        stored.embedding_dims.clone()
+    } else {
+        HashMap::new()
+    };
     let old_table = session.tables.insert(
         table_name.clone(),
         StoredTable {
@@ -3561,8 +3569,10 @@ fn validate_result_table(
                 .get(&col_name)
                 .or_else(|| alias_name.and_then(|a| embedding_dims.get(a)));
             if let Some(&dim) = dim {
-                if len == nrows * dim as i64 {
-                    continue;
+                if let Some(expected) = nrows.checked_mul(dim as i64) {
+                    if len == expected {
+                        continue;
+                    }
                 }
             }
             return Err(SqlError::Plan(format!(
