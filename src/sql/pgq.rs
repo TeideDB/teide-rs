@@ -654,15 +654,6 @@ fn plan_single_hop(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    // Destination node WHERE filters are not yet supported in single-hop
-    if dst_node.filter.is_some() {
-        return Err(SqlError::Plan(
-            "WHERE filters on destination nodes are not yet supported in single-hop patterns. \
-             Use a WHERE clause in the outer SELECT instead."
-                .into(),
-        ));
-    }
-
     // Resolve edge label
     let edge_label = edge.label.as_deref().ok_or_else(|| {
         SqlError::Plan("Edge pattern must specify a label: -[:Label]->".into())
@@ -737,6 +728,13 @@ fn plan_single_hop(
     let expanded = g.expand(src_ids, &stored_rel.rel, direction)?;
     let expand_result = g.execute(expanded)?;
 
+    // Post-filter destination node
+    let expand_result = if let Some(filter_text) = &dst_node.filter {
+        post_filter_expand_result(session, &expand_result, filter_text, dst_node, &dst_stored.table, false)?
+    } else {
+        expand_result
+    };
+
     // Project requested columns
     project_columns(
         session,
@@ -750,6 +748,47 @@ fn plan_single_hop(
         graph,
         is_reverse,
     )
+}
+
+/// Post-filter an expand result by evaluating a WHERE filter on the destination
+/// (or source, via `filter_on_src`) node for each row. Returns a new table with
+/// only matching rows.
+fn post_filter_expand_result(
+    session: &Session,
+    expand_result: &Table,
+    filter_text: &str,
+    filter_node: &NodePattern,
+    filter_table: &Table,
+    filter_on_src: bool,
+) -> Result<Table, SqlError> {
+    let expr = parse_filter_expr(filter_text)?;
+    let var_name = filter_node.variable.as_deref().unwrap_or("");
+    let nrows = checked_nrows(expand_result)?;
+
+    let src_col = find_col_idx(expand_result, "_src")
+        .ok_or_else(|| SqlError::Plan("expand result missing _src column".into()))?;
+    let dst_col = find_col_idx(expand_result, "_dst")
+        .ok_or_else(|| SqlError::Plan("expand result missing _dst column".into()))?;
+
+    let filter_col = if filter_on_src { src_col } else { dst_col };
+
+    let mut csv = String::from("_src,_dst\n");
+    for row in 0..nrows {
+        let filter_row_id = expand_result.get_i64(filter_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL index at row {row}")))?;
+        if filter_row_id < 0 {
+            continue;
+        }
+        if evaluate_filter(&expr, filter_table, filter_row_id as usize, var_name)?.unwrap_or(false) {
+            let src_val = expand_result.get_i64(src_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _src at row {row}")))?;
+            let dst_val = expand_result.get_i64(dst_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _dst at row {row}")))?;
+            csv.push_str(&format!("{src_val},{dst_val}\n"));
+        }
+    }
+
+    csv_to_table(session, &csv, &["_src".to_string(), "_dst".to_string()])
 }
 
 /// Build a 1-column table of I64 row indices for use as expand input.
@@ -2027,15 +2066,12 @@ fn plan_multi_hop_variable(
         _ => false,
     };
 
-    // Reject WHERE filters on intermediate/destination nodes
-    for node in &nodes[1..] {
-        if node.filter.is_some() {
-            return Err(SqlError::Plan(
-                "WHERE filters on intermediate or destination nodes are not yet supported \
-                 in multi-hop variable-length patterns."
-                    .into(),
-            ));
-        }
+    // --- Build table name for each position (needed for both post-filtering and projection) ---
+    let n_positions = segments.len() + 1;
+    let mut pos_table_names: Vec<String> = Vec::with_capacity(n_positions);
+    pos_table_names.push(segments[0].src_table_name.clone());
+    for seg in &segments {
+        pos_table_names.push(seg.dst_table_name.clone());
     }
 
     // --- Determine start nodes ---
@@ -2054,20 +2090,65 @@ fn plan_multi_hop_variable(
     // --- Run BFS ---
     let bfs_result = multi_segment_bfs(&segments, &start_nodes, mode, is_cyclic)?;
 
+    // Post-filter intermediate/destination nodes
+    let bfs_result = {
+        let mut keep = vec![true; bfs_result.nrows];
+        for (node_pos, node) in nodes.iter().enumerate().skip(1) {
+            if let Some(filter_text) = node.filter.as_deref() {
+                let expr = parse_filter_expr(filter_text)?;
+                let var_name = node.variable.as_deref().unwrap_or("");
+                let table_name = &pos_table_names[node_pos];
+                let stored_table = session.tables.get(table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Table '{table_name}' not found"))
+                })?;
+                for row in 0..bfs_result.nrows {
+                    if keep[row] {
+                        let node_id = bfs_result.node_ids[node_pos][row];
+                        if node_id < 0 {
+                            keep[row] = false;
+                        } else {
+                            keep[row] = evaluate_filter(
+                                &expr,
+                                &stored_table.table,
+                                node_id as usize,
+                                var_name,
+                            )?.unwrap_or(false);
+                        }
+                    }
+                }
+            }
+        }
+        // Rebuild BFS result with only matching rows
+        if keep.iter().all(|&k| k) {
+            bfs_result
+        } else {
+            let new_nrows = keep.iter().filter(|&&k| k).count();
+            let mut new_node_ids: Vec<Vec<i64>> = (0..bfs_result.node_ids.len())
+                .map(|_| Vec::with_capacity(new_nrows))
+                .collect();
+            let mut new_path_lengths = Vec::with_capacity(new_nrows);
+            for row in 0..bfs_result.nrows {
+                if keep[row] {
+                    for (pos, ids) in bfs_result.node_ids.iter().enumerate() {
+                        new_node_ids[pos].push(ids[row]);
+                    }
+                    new_path_lengths.push(bfs_result.path_lengths[row]);
+                }
+            }
+            BfsResult {
+                node_ids: new_node_ids,
+                path_lengths: new_path_lengths,
+                nrows: new_nrows,
+            }
+        }
+    };
+
     // --- Build variable map: node variable name -> position index ---
-    let n_positions = segments.len() + 1;
     let mut var_map: HashMap<String, usize> = HashMap::new();
     for (i, node) in nodes.iter().enumerate() {
         if let Some(ref var) = node.variable {
             var_map.entry(var.clone()).or_insert(i);
         }
-    }
-
-    // Build table name for each position
-    let mut pos_table_names: Vec<String> = Vec::with_capacity(n_positions);
-    pos_table_names.push(segments[0].src_table_name.clone());
-    for seg in &segments {
-        pos_table_names.push(seg.dst_table_name.clone());
     }
 
     // Build edge variable map: edge variable name -> edge index
@@ -2376,16 +2457,6 @@ fn plan_multi_hop_fixed(
         return plan_multi_hop_variable(session, graph, pattern, columns, mode);
     }
 
-    // Reject WHERE filters on intermediate/destination nodes — not yet supported.
-    for node in &nodes[1..] {
-        if node.filter.is_some() {
-            return Err(SqlError::Plan(
-                "WHERE filters on intermediate or destination nodes are not yet supported \
-                 in multi-hop patterns. Use a WHERE clause in the outer SELECT instead.".into(),
-            ));
-        }
-    }
-
     // n_vars: number of distinct node positions
     let n_nodes = nodes.len();
     let n_vars = n_nodes;
@@ -2452,8 +2523,17 @@ fn plan_multi_hop_fixed(
         node_ids.push(ids);
     }
 
+    // Build a lookup: for each node variable position, which vertex table does it reference?
+    let mut var_table_names: Vec<String> = Vec::with_capacity(n_vars);
+    var_table_names.push(segments[0].src_table_name.clone());
+    for seg in &segments {
+        var_table_names.push(seg.dst_table_name.clone());
+    }
+    // If cyclic, the last entry maps back to var 0 (already handled by truncating to n_vars)
+    var_table_names.truncate(n_vars);
+
     // Apply source node (v0) WHERE filter if present
-    let row_mask: Vec<bool> = if let Some(filter_text) = nodes[0].filter.as_deref() {
+    let mut row_mask: Vec<bool> = if let Some(filter_text) = nodes[0].filter.as_deref() {
         let expr = parse_filter_expr(filter_text)?;
         let var_name = nodes[0].variable.as_deref().unwrap_or("");
         let src_table = session
@@ -2479,14 +2559,34 @@ fn plan_multi_hop_fixed(
         vec![true; nrows]
     };
 
-    // Build a lookup: for each node variable position, which vertex table does it reference?
-    let mut var_table_names: Vec<String> = Vec::with_capacity(n_vars);
-    var_table_names.push(segments[0].src_table_name.clone());
-    for seg in &segments {
-        var_table_names.push(seg.dst_table_name.clone());
+    // Apply WHERE filters on intermediate/destination nodes (nodes[1..])
+    for (node_pos, node) in nodes.iter().enumerate().skip(1) {
+        if let Some(filter_text) = node.filter.as_deref() {
+            let expr = parse_filter_expr(filter_text)?;
+            let var_name = node.variable.as_deref().unwrap_or("");
+            // For cyclic patterns, the last node maps to var 0
+            let var_idx = if is_cyclic && node_pos == n_nodes - 1 { 0 } else { node_pos };
+            let table_name = &var_table_names[var_idx];
+            let stored_table = session.tables.get(table_name).ok_or_else(|| {
+                SqlError::Plan(format!("Table '{table_name}' not found"))
+            })?;
+            for row in 0..nrows {
+                if row_mask[row] {
+                    let node_id = node_ids[var_idx][row];
+                    if node_id < 0 {
+                        row_mask[row] = false;
+                    } else {
+                        row_mask[row] = evaluate_filter(
+                            &expr,
+                            &stored_table.table,
+                            node_id as usize,
+                            var_name,
+                        )?.unwrap_or(false);
+                    }
+                }
+            }
+        }
     }
-    // If cyclic, the last entry maps back to var 0 (already handled by truncating to n_vars)
-    var_table_names.truncate(n_vars);
 
     // Build edge variable map: edge variable name -> edge index
     let mut edge_var_map: HashMap<String, usize> = HashMap::new();
@@ -2649,15 +2749,6 @@ fn plan_var_length(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    // Destination-node filters are not supported in variable-length patterns
-    if dst_node.filter.is_some() {
-        return Err(SqlError::Plan(
-            "WHERE filters on destination nodes are not yet supported in variable-length patterns. \
-             Use a WHERE clause in the outer SELECT instead."
-                .into(),
-        ));
-    }
-
     let edge_label = edge.label.as_deref().ok_or_else(|| {
         SqlError::Plan("Edge pattern must specify a label".into())
     })?;
@@ -2732,6 +2823,39 @@ fn plan_var_length(
 
     let var_exp = g.var_expand(src_ids, &stored_rel.rel, direction, min_depth, max_depth, false)?;
     let result = g.execute(var_exp)?;
+
+    // Post-filter destination node on var_expand result
+    let result = if let Some(filter_text) = &dst_node.filter {
+        let expr = parse_filter_expr(filter_text)?;
+        let var_name = dst_node.variable.as_deref().unwrap_or("");
+        let dst_stored_table = session.tables.get(&dst_label.table_name).ok_or_else(|| {
+            SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
+        })?;
+        let nrows = checked_nrows(&result)?;
+        let start_col = find_col_idx(&result, "_start")
+            .ok_or_else(|| SqlError::Plan("var_expand result missing _start column".into()))?;
+        let end_col = find_col_idx(&result, "_end")
+            .ok_or_else(|| SqlError::Plan("var_expand result missing _end column".into()))?;
+        let depth_col = find_col_idx(&result, "_depth");
+
+        let mut csv = String::from("_start,_end,_depth\n");
+        for row in 0..nrows {
+            let end_val = result.get_i64(end_col, row)
+                .ok_or_else(|| SqlError::Plan(format!("NULL _end at row {row}")))?;
+            if end_val < 0 { continue; }
+            if evaluate_filter(&expr, &dst_stored_table.table, end_val as usize, var_name)?.unwrap_or(false) {
+                let start_val = result.get_i64(start_col, row)
+                    .ok_or_else(|| SqlError::Plan(format!("NULL _start at row {row}")))?;
+                let depth_val = depth_col
+                    .and_then(|ci| result.get_i64(ci, row))
+                    .unwrap_or(0);
+                csv.push_str(&format!("{start_val},{end_val},{depth_val}\n"));
+            }
+        }
+        csv_to_table(session, &csv, &["_start".to_string(), "_end".to_string(), "_depth".to_string()])?
+    } else {
+        result
+    };
 
     // var_expand result has: _start, _end, _depth
     project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table, edge)

@@ -271,3 +271,8 @@ fn slt_pgq_filters() {
 fn slt_pgq_edge_props() {
     run_slt("tests/slt/pgq_edge_props.slt");
 }
+
+#[test]
+fn slt_pgq_dst_filters() {
+    run_slt("tests/slt/pgq_dst_filters.slt");
+}

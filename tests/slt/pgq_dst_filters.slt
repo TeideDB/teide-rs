@@ -1,0 +1,52 @@
+# SQL/PGQ: WHERE on destination/intermediate nodes
+
+statement ok
+CREATE TABLE df_persons (id INTEGER, name VARCHAR, city VARCHAR)
+
+statement ok
+INSERT INTO df_persons VALUES (0, 'Alice', 'NYC'), (1, 'Bob', 'SF'), (2, 'Carol', 'NYC'), (3, 'Dave', 'LA')
+
+statement ok
+CREATE TABLE df_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO df_knows VALUES (0, 1), (0, 2), (0, 3), (1, 2)
+
+statement ok
+CREATE PROPERTY GRAPH df_graph VERTEX TABLES (df_persons LABEL Person) EDGE TABLES (df_knows SOURCE KEY (src) REFERENCES df_persons (id) DESTINATION KEY (dst) REFERENCES df_persons (id) LABEL Knows)
+
+# Destination filter: Alice knows someone in NYC
+query TT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person WHERE b.city = 'NYC') COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Carol
+
+# Destination filter only (no source filter)
+query TT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person)-[:Knows]->(b:Person WHERE b.city = 'NYC') COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Carol
+Bob Carol
+
+# Multi-hop fixed: (a)->(b WHERE ...)->(c)
+query TTT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person WHERE b.city = 'SF')-[:Knows]->(c:Person) COLUMNS (a.name AS an, b.name AS bn, c.name AS cn)) ORDER BY cn
+----
+Alice Bob Carol
+
+# Destination filter on multi-hop fixed: (a)->(b)->(c WHERE ...)
+query TTT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person)-[:Knows]->(c:Person WHERE c.city = 'NYC') COLUMNS (a.name AS an, b.name AS bn, c.name AS cn))
+----
+Alice Bob Carol
+
+# Variable-length destination filter
+query TT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->{1,2}(b:Person WHERE b.city = 'NYC') COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Carol
+
+# Destination filter matching no rows
+query TT
+SELECT * FROM GRAPH_TABLE (df_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person WHERE b.city = 'Tokyo') COLUMNS (a.name AS src, b.name AS dst))
+----
