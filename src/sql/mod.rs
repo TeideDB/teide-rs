@@ -29,7 +29,7 @@ pub mod pgq;
 pub mod pgq_parser;
 pub mod planner;
 
-use crate::{Context, HnswIndex, Rel, Table};
+use crate::{Context, HnswIndex, Table};
 use std::collections::HashMap;
 
 /// Errors produced by the SQL layer.
@@ -446,70 +446,23 @@ impl Session {
                     ))
                 })?;
 
-                // Re-validate vertex key columns are still valid rowid sequences
-                pgq::validate_key_column_is_rowid(
-                    src_stored,
-                    &el.src_ref_col,
-                    &el.src_ref_table,
-                )?;
-                pgq::validate_key_column_is_rowid(
-                    dst_stored,
-                    &el.dst_ref_col,
-                    &el.dst_ref_table,
-                )?;
-
-                // Re-validate edge endpoint values are within vertex table bounds
                 let n_src = pgq::checked_nrows(&src_stored.table)? as i64;
                 let n_dst = pgq::checked_nrows(&dst_stored.table)? as i64;
-                let n_edges = pgq::checked_nrows(&edge_stored.table)?;
-                let src_col_idx =
-                    pgq::find_col_idx(&edge_stored.table, &el.src_col).ok_or_else(|| {
-                        SqlError::Plan(format!(
-                            "Column '{}' not found in edge table '{}'",
-                            el.src_col, el.table_name
-                        ))
-                    })?;
-                let dst_col_idx =
-                    pgq::find_col_idx(&edge_stored.table, &el.dst_col).ok_or_else(|| {
-                        SqlError::Plan(format!(
-                            "Column '{}' not found in edge table '{}'",
-                            el.dst_col, el.table_name
-                        ))
-                    })?;
-                for row in 0..n_edges {
-                    if let Some(v) = edge_stored.table.get_i64(src_col_idx, row) {
-                        if v < 0 || v >= n_src {
-                            return Err(SqlError::Plan(format!(
-                                "Graph '{}' integrity violation: edge table '{}' column '{}' \
-                                 row {}: value {} is out of range for vertex table '{}' \
-                                 (0..{}). DML on referenced vertex tables can invalidate \
-                                 edge endpoints.",
-                                graph_name, el.table_name, el.src_col, row, v,
-                                el.src_ref_table, n_src
-                            )));
-                        }
-                    }
-                    if let Some(v) = edge_stored.table.get_i64(dst_col_idx, row) {
-                        if v < 0 || v >= n_dst {
-                            return Err(SqlError::Plan(format!(
-                                "Graph '{}' integrity violation: edge table '{}' column '{}' \
-                                 row {}: value {} is out of range for vertex table '{}' \
-                                 (0..{}). DML on referenced vertex tables can invalidate \
-                                 edge endpoints.",
-                                graph_name, el.table_name, el.dst_col, row, v,
-                                el.dst_ref_table, n_dst
-                            )));
-                        }
-                    }
-                }
 
-                let rel = Rel::from_edges(
-                    &edge_stored.table,
-                    &el.src_col,
-                    &el.dst_col,
-                    n_src,
-                    n_dst,
-                    true,
+                // Look up vertex labels for key maps
+                let src_vl = graph.vertex_labels.values()
+                    .find(|vl| vl.table_name == el.src_ref_table)
+                    .ok_or_else(|| SqlError::Plan(format!(
+                        "No vertex label found for source table '{}'", el.src_ref_table
+                    )))?;
+                let dst_vl = graph.vertex_labels.values()
+                    .find(|vl| vl.table_name == el.dst_ref_table)
+                    .ok_or_else(|| SqlError::Plan(format!(
+                        "No vertex label found for destination table '{}'", el.dst_ref_table
+                    )))?;
+
+                let rel = pgq::remap_and_build_rel(
+                    self, edge_stored, src_vl, dst_vl, el, n_src, n_dst,
                 )?;
                 new_edges.push((
                     label.clone(),

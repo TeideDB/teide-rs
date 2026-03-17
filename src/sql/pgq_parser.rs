@@ -37,6 +37,7 @@ fn temp_nonce() -> u64 {
 pub(crate) struct ParsedVertexTable {
     pub table_name: String,
     pub label: Option<String>,
+    pub key_column: Option<String>,
 }
 
 #[derive(Debug)]
@@ -368,11 +369,24 @@ fn parse_vertex_tables(t: &mut Tokens) -> Result<Vec<ParsedVertexTable>, SqlErro
     loop {
         let table_name = t.next()?.to_lowercase();
         let mut label = None;
-        if t.peek().map(|s| s.to_uppercase()) == Some("LABEL".into()) {
-            t.next()?; // consume LABEL
-            label = Some(t.next()?);
+        let mut key_column = None;
+        // KEY and LABEL can appear in either order
+        for _ in 0..2 {
+            match t.peek().map(|s| s.to_uppercase()).as_deref() {
+                Some("LABEL") => {
+                    t.next()?;
+                    label = Some(t.next()?);
+                }
+                Some("KEY") => {
+                    t.next()?;
+                    t.expect("(")?;
+                    key_column = Some(t.next()?.to_lowercase());
+                    t.expect(")")?;
+                }
+                _ => break,
+            }
         }
-        tables.push(ParsedVertexTable { table_name, label });
+        tables.push(ParsedVertexTable { table_name, label, key_column });
         if t.peek() == Some(",") {
             t.next()?; // consume comma
         } else {

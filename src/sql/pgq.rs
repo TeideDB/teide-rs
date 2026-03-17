@@ -94,11 +94,24 @@ pub(super) fn checked_logical_nrows(stored: &super::StoredTable) -> Result<usize
 // Property graph catalog types
 // ---------------------------------------------------------------------------
 
-/// A vertex label mapping: label name -> session table name.
+/// A user-facing key value (integer or string) for natural key mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum KeyValue {
+    Int(i64),
+    Str(String),
+}
+
+/// A vertex label mapping: label name -> session table name, with key maps
+/// for translating between user-facing key values and internal row indices.
 pub(crate) struct VertexLabel {
     pub table_name: String,
     #[allow(dead_code)]
     pub label: String,
+    #[allow(dead_code)]
+    pub key_column: String,
+    pub user_to_row: HashMap<KeyValue, usize>,
+    #[allow(dead_code)]
+    pub row_to_user: Vec<KeyValue>,
 }
 
 /// An edge label mapping: label name -> edge table with source/dest references.
@@ -221,12 +234,12 @@ pub(crate) fn build_property_graph(
     let mut vertex_labels = HashMap::new();
 
     for vt in &parsed.vertex_tables {
-        if !session.tables.contains_key(&vt.table_name) {
-            return Err(SqlError::Plan(format!(
+        let stored = session.tables.get(&vt.table_name).ok_or_else(|| {
+            SqlError::Plan(format!(
                 "Vertex table '{}' not found in session",
                 vt.table_name
-            )));
-        }
+            ))
+        })?;
         let label = vt
             .label
             .as_deref()
@@ -237,11 +250,60 @@ pub(crate) fn build_property_graph(
                 "Duplicate vertex label '{label}' in property graph"
             )));
         }
+
+        // Build key maps: user-facing key values <-> row indices
+        let key_col_name = vt.key_column.as_deref().unwrap_or("id");
+        let key_col_idx = find_col_idx(&stored.table, key_col_name).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Key column '{}' not found in vertex table '{}'",
+                key_col_name, vt.table_name
+            ))
+        })?;
+        let nrows = checked_logical_nrows(stored)?;
+        let mut user_to_row = HashMap::with_capacity(nrows);
+        let mut row_to_user = Vec::with_capacity(nrows);
+        let key_type = stored.table.col_type(key_col_idx);
+        for row in 0..nrows {
+            let key_val = match key_type {
+                ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
+                    let v = stored.table.get_i64(key_col_idx, row).ok_or_else(|| {
+                        SqlError::Plan(format!(
+                            "NULL key at row {row} in '{}'", vt.table_name
+                        ))
+                    })?;
+                    KeyValue::Int(v)
+                }
+                ffi::TD_SYM => {
+                    let s = stored.table.get_str(key_col_idx, row).ok_or_else(|| {
+                        SqlError::Plan(format!(
+                            "NULL key at row {row} in '{}'", vt.table_name
+                        ))
+                    })?;
+                    KeyValue::Str(s)
+                }
+                t => {
+                    return Err(SqlError::Plan(format!(
+                        "Unsupported key column type {t} in '{}'", vt.table_name
+                    )));
+                }
+            };
+            if user_to_row.contains_key(&key_val) {
+                return Err(SqlError::Plan(format!(
+                    "Duplicate key {:?} in vertex table '{}'", key_val, vt.table_name
+                )));
+            }
+            user_to_row.insert(key_val.clone(), row);
+            row_to_user.push(key_val);
+        }
+
         vertex_labels.insert(
             label.clone(),
             VertexLabel {
                 table_name: vt.table_name.clone(),
                 label: label.clone(),
+                key_column: key_col_name.to_string(),
+                user_to_row,
+                row_to_user,
             },
         );
     }
@@ -269,77 +331,22 @@ pub(crate) fn build_property_graph(
             ))
         })?;
 
-        let n_src_usize = checked_logical_nrows(src_stored).map_err(|_| SqlError::Plan(format!(
+        let n_src = checked_logical_nrows(src_stored).map_err(|_| SqlError::Plan(format!(
             "Source vertex table '{}' has invalid row count", et.src_ref_table
-        )))?;
-        let n_dst_usize = checked_logical_nrows(dst_stored).map_err(|_| SqlError::Plan(format!(
+        )))? as i64;
+        let n_dst = checked_logical_nrows(dst_stored).map_err(|_| SqlError::Plan(format!(
             "Destination vertex table '{}' has invalid row count", et.dst_ref_table
-        )))?;
-        let n_src = n_src_usize as i64;
-        let n_dst = n_dst_usize as i64;
+        )))? as i64;
 
-        // Validate that edge src/dst column values are 0-based row indices.
-        // The C engine CSR treats these as row offsets into the vertex tables.
-        let n_edges = checked_logical_nrows(edge_stored).map_err(|_| SqlError::Plan(format!(
-            "Edge table '{}' has invalid row count", et.table_name
-        )))?;
-        let src_col_idx = find_col_idx(&edge_stored.table, &et.src_col).ok_or_else(|| {
-            SqlError::Plan(format!(
-                "Column '{}' not found in edge table '{}'",
-                et.src_col, et.table_name
-            ))
-        })?;
-        let dst_col_idx = find_col_idx(&edge_stored.table, &et.dst_col).ok_or_else(|| {
-            SqlError::Plan(format!(
-                "Column '{}' not found in edge table '{}'",
-                et.dst_col, et.table_name
-            ))
-        })?;
-        for row in 0..n_edges {
-            let v = edge_stored.table.get_i64(src_col_idx, row).ok_or_else(|| {
-                SqlError::Plan(format!(
-                    "Edge table '{}' column '{}' row {}: value is NULL. \
-                     Edge src/dst values must be non-NULL 0-based row indices.",
-                    et.table_name, et.src_col, row
-                ))
-            })?;
-            if v < 0 || v >= n_src {
-                return Err(SqlError::Plan(format!(
-                    "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
-                     into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
-                    et.table_name, et.src_col, row, v, et.src_ref_table, n_src
-                )));
-            }
-            let v = edge_stored.table.get_i64(dst_col_idx, row).ok_or_else(|| {
-                SqlError::Plan(format!(
-                    "Edge table '{}' column '{}' row {}: value is NULL. \
-                     Edge src/dst values must be non-NULL 0-based row indices.",
-                    et.table_name, et.dst_col, row
-                ))
-            })?;
-            if v < 0 || v >= n_dst {
-                return Err(SqlError::Plan(format!(
-                    "Edge table '{}' column '{}' row {}: value {} is not a valid row index \
-                     into '{}' (expected 0..{}). Edge src/dst values must be 0-based row indices.",
-                    et.table_name, et.dst_col, row, v, et.dst_ref_table, n_dst
-                )));
-            }
-        }
-
-        // Validate that vertex key columns contain 0-based sequential row indices.
-        // The traversal code (expand, shortest path BFS) uses key column values as
-        // CSR node indices, so they must match row positions.
-        validate_key_column_is_rowid(src_stored, &et.src_ref_col, &et.src_ref_table)?;
-        validate_key_column_is_rowid(dst_stored, &et.dst_ref_col, &et.dst_ref_table)?;
-
-        let rel = Rel::from_edges(
-            &edge_stored.table,
-            &et.src_col,
-            &et.dst_col,
-            n_src,
-            n_dst,
-            true,
-        )?;
+        // Look up vertex labels for source and destination to get key maps
+        let src_vl = vertex_labels.values().find(|vl| vl.table_name == et.src_ref_table)
+            .ok_or_else(|| SqlError::Plan(format!(
+                "No vertex label found for source table '{}'", et.src_ref_table
+            )))?;
+        let dst_vl = vertex_labels.values().find(|vl| vl.table_name == et.dst_ref_table)
+            .ok_or_else(|| SqlError::Plan(format!(
+                "No vertex label found for destination table '{}'", et.dst_ref_table
+            )))?;
 
         let label = et
             .label
@@ -357,6 +364,11 @@ pub(crate) fn build_property_graph(
             dst_ref_table: et.dst_ref_table.clone(),
             dst_ref_col: et.dst_ref_col.clone(),
         };
+
+        // Remap edge FK values through vertex key maps and build CSR
+        let rel = remap_and_build_rel(
+            session, edge_stored, src_vl, dst_vl, &edge_label, n_src, n_dst,
+        )?;
 
         if edge_labels.contains_key(&label) {
             return Err(SqlError::Plan(format!(
@@ -664,10 +676,10 @@ fn plan_single_hop(
     // For reverse edges, the left node in the pattern is the edge destination
     // and the right node is the edge source, so swap the default table references.
     let is_reverse = edge.direction == MatchDirection::Reverse;
-    let (left_default_table, right_default_table, scan_ref_col) = if is_reverse {
-        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_col)
+    let (left_default_table, right_default_table) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table)
     } else {
-        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_col)
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table)
     };
 
     // Resolve source and destination vertex tables
@@ -706,23 +718,24 @@ fn plan_single_hop(
         MatchDirection::Undirected => 2,
     };
 
-    // Build graph on the left-side node's table
-    let mut g = session.ctx.graph(&src_stored.table)?;
-
-    // Scan the appropriate reference column for the left-side node
-    let src_ids = g.scan(scan_ref_col)?;
-
-    // Apply source node filter if present
-    let src_ids = if let Some(filter_text) = &src_node.filter {
-        apply_node_filter(
-            &mut g,
-            src_ids,
+    // Determine source node row indices
+    let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
+        let row = extract_node_id_from_filter(
+            src_node,
+            &src_label.table_name,
             filter_text,
-            src_node.variable.as_deref(),
-        )?
+            session,
+        )?;
+        vec![row]
     } else {
-        src_ids
+        let nrows = checked_logical_nrows(src_stored)?;
+        (0..nrows as i64).collect()
     };
+
+    // Build a 1-column table of source row indices for expand
+    let rowid_table = build_rowid_table(session, &src_row_indices)?;
+    let mut g = session.ctx.graph(&rowid_table)?;
+    let src_ids = g.scan("_rowid")?;
 
     // Expand via CSR
     let expanded = g.expand(src_ids, &stored_rel.rel, direction)?;
@@ -738,6 +751,16 @@ fn plan_single_hop(
         &src_stored.table,
         &dst_stored.table,
     )
+}
+
+/// Build a 1-column table of I64 row indices for use as expand input.
+fn build_rowid_table(session: &Session, ids: &[i64]) -> Result<Table, SqlError> {
+    let mut csv = String::from("_rowid\n");
+    for id in ids {
+        csv.push_str(&id.to_string());
+        csv.push('\n');
+    }
+    csv_to_table(session, &csv, &["_rowid".to_string()])
 }
 
 /// Resolve which vertex label a node pattern refers to.
@@ -786,6 +809,7 @@ fn validate_node_table_for_edge(
 
 /// Apply a WHERE filter from a node pattern.
 /// Parses filter text like "a.name = 'Alice'" and applies it.
+#[allow(dead_code)]
 fn apply_node_filter(
     g: &mut Graph,
     ids: Column,
@@ -963,36 +987,88 @@ pub(super) fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
     (0..ncols).find(|&i| table.col_name_str(i).to_lowercase() == name)
 }
 
-/// Validate that a vertex table's key column contains values 0..n-1 matching row indices.
-/// The CSR and traversal code use key column values as node indices, so they must
-/// be 0-based sequential integers matching row positions.
-pub(super) fn validate_key_column_is_rowid(
-    stored: &super::StoredTable,
-    key_col: &str,
+/// Read a key value (integer or string) from a table cell.
+fn read_key_value(
+    table: &Table,
+    col_idx: usize,
+    row: usize,
+    col_name: &str,
     table_name: &str,
-) -> Result<(), SqlError> {
-    let col_idx = find_col_idx(&stored.table, key_col).ok_or_else(|| {
+) -> Result<KeyValue, SqlError> {
+    let typ = table.col_type(col_idx);
+    match typ {
+        ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
+            let v = table.get_i64(col_idx, row).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "NULL value at row {row} in column '{col_name}' of '{table_name}'"
+                ))
+            })?;
+            Ok(KeyValue::Int(v))
+        }
+        ffi::TD_SYM => {
+            let s = table.get_str(col_idx, row).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "NULL value at row {row} in column '{col_name}' of '{table_name}'"
+                ))
+            })?;
+            Ok(KeyValue::Str(s))
+        }
+        _ => Err(SqlError::Plan(format!(
+            "Unsupported key column type {typ} in '{table_name}'"
+        ))),
+    }
+}
+
+/// Remap edge FK values through vertex key maps and build a CSR `Rel`.
+/// Used during initial graph construction and graph rebuild after DML.
+pub(super) fn remap_and_build_rel(
+    session: &Session,
+    edge_stored: &super::StoredTable,
+    src_vl: &VertexLabel,
+    dst_vl: &VertexLabel,
+    el: &EdgeLabel,
+    n_src: i64,
+    n_dst: i64,
+) -> Result<Rel, SqlError> {
+    let n_edges = checked_logical_nrows(edge_stored)?;
+    let src_col_idx = find_col_idx(&edge_stored.table, &el.src_col).ok_or_else(|| {
         SqlError::Plan(format!(
-            "Key column '{key_col}' not found in vertex table '{table_name}'"
+            "Column '{}' not found in edge table '{}'",
+            el.src_col, el.table_name
         ))
     })?;
-    let nrows = checked_logical_nrows(stored)?;
-    for row in 0..nrows {
-        let val = stored.table.get_i64(col_idx, row).ok_or_else(|| {
+    let dst_col_idx = find_col_idx(&edge_stored.table, &el.dst_col).ok_or_else(|| {
+        SqlError::Plan(format!(
+            "Column '{}' not found in edge table '{}'",
+            el.dst_col, el.table_name
+        ))
+    })?;
+
+    let mut csv = String::from("_src,_dst\n");
+    for row in 0..n_edges {
+        let src_key = read_key_value(&edge_stored.table, src_col_idx, row, &el.src_col, &el.table_name)?;
+        let src_row = src_vl.user_to_row.get(&src_key).ok_or_else(|| {
             SqlError::Plan(format!(
-                "Vertex table '{table_name}' key column '{key_col}' has NULL at row {row}. \
-                 Key column must contain 0-based sequential row indices."
+                "Edge table '{}' column '{}' row {}: key {:?} not found in vertex table '{}'",
+                el.table_name, el.src_col, row, src_key, el.src_ref_table
             ))
         })?;
-        if val != row as i64 {
-            return Err(SqlError::Plan(format!(
-                "Vertex table '{table_name}' key column '{key_col}' row {row}: value {val} \
-                 does not match row index. Key column must contain 0-based sequential row \
-                 indices (0, 1, 2, ...) for CSR graph traversal."
-            )));
-        }
+        let dst_key = read_key_value(&edge_stored.table, dst_col_idx, row, &el.dst_col, &el.table_name)?;
+        let dst_row = dst_vl.user_to_row.get(&dst_key).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Edge table '{}' column '{}' row {}: key {:?} not found in vertex table '{}'",
+                el.table_name, el.dst_col, row, dst_key, el.dst_ref_table
+            ))
+        })?;
+        csv.push_str(&src_row.to_string());
+        csv.push(',');
+        csv.push_str(&dst_row.to_string());
+        csv.push('\n');
     }
-    Ok(())
+    let col_names = vec!["_src".to_string(), "_dst".to_string()];
+    let remapped_edge_table = csv_to_table(session, &csv, &col_names)?;
+    let rel = Rel::from_edges(&remapped_edge_table, "_src", "_dst", n_src, n_dst, true)?;
+    Ok(rel)
 }
 
 /// Get a cell value as a string for CSV output.
@@ -2065,10 +2141,10 @@ fn plan_var_length(
 
     // For reverse edges, swap default table/column references (same as plan_single_hop)
     let is_reverse = edge.direction == MatchDirection::Reverse;
-    let (left_default_table, right_default_table, scan_ref_col) = if is_reverse {
-        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_col)
+    let (left_default_table, right_default_table) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table)
     } else {
-        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_col)
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table)
     };
 
     // Multi-hop traversals require src and dst to reference the same vertex table
@@ -2108,14 +2184,23 @@ fn plan_var_length(
         PathQuantifier::One => (1, 1),
     };
 
-    let mut g = session.ctx.graph(src_table)?;
-    let src_ids = g.scan(scan_ref_col)?;
-
-    let src_ids = if let Some(filter_text) = &src_node.filter {
-        apply_node_filter(&mut g, src_ids, filter_text, src_node.variable.as_deref())?
+    // Determine source row indices
+    let src_stored = session.tables.get(&src_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
+    })?;
+    let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
+        let row = extract_node_id_from_filter(
+            src_node, &src_label.table_name, filter_text, session,
+        )?;
+        vec![row]
     } else {
-        src_ids
+        let nrows = checked_logical_nrows(src_stored)?;
+        (0..nrows as i64).collect()
     };
+
+    let rowid_table = build_rowid_table(session, &src_row_indices)?;
+    let mut g = session.ctx.graph(&rowid_table)?;
+    let src_ids = g.scan("_rowid")?;
 
     let var_exp = g.var_expand(src_ids, &stored_rel.rel, direction, min_depth, max_depth, false)?;
     let result = g.execute(var_exp)?;

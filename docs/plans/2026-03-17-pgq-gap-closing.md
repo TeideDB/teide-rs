@@ -39,7 +39,7 @@ git checkout -b pgq-gap-closing
 - Modify: `src/sql/pgq.rs:851-954` — `project_columns` (reverse-map row indices to user keys)
 - Test: `tests/slt/pgq_natural_keys.slt` — new SLT test file
 
-### Step 1.1: Write the failing SLT test
+### Step 1.1: Write the failing SLT test [x]
 
 Create `tests/slt/pgq_natural_keys.slt`:
 
@@ -78,12 +78,12 @@ fn slt_pgq_natural_keys() {
 }
 ```
 
-### Step 1.2: Run test to verify it fails
+### Step 1.2: Run test to verify it fails [x]
 
 Run: `cargo test --all-features -- slt_pgq_natural_keys`
 Expected: FAIL — current validation rejects non-0-based keys
 
-### Step 1.3: Update `ParsedVertexTable` to accept KEY clause
+### Step 1.3: Update `ParsedVertexTable` to accept KEY clause [x]
 
 In `src/sql/pgq_parser.rs`, the `ParsedVertexTable` struct (line 37-39) needs a `key_column` field:
 
@@ -112,7 +112,7 @@ tables.push(ParsedVertexTable { table_name, label, key_column });
 
 **Important:** The KEY clause can appear before or after LABEL. Handle both orderings.
 
-### Step 1.4: Add key mapping types to `VertexLabel`
+### Step 1.4: Add key mapping types to `VertexLabel` [x]
 
 In `src/sql/pgq.rs`, update `VertexLabel` (lines 98-102):
 
@@ -132,7 +132,7 @@ pub(crate) struct VertexLabel {
 }
 ```
 
-### Step 1.5: Build key maps in `build_property_graph`
+### Step 1.5: Build key maps in `build_property_graph` [x]
 
 Replace `validate_key_column_is_rowid` calls with key-map construction. In `build_property_graph` (line 217), after looking up the stored table for each vertex:
 
@@ -168,7 +168,7 @@ for row in 0..nrows {
 }
 ```
 
-### Step 1.6: Remap edge FK values through key maps during CSR construction
+### Step 1.6: Remap edge FK values through key maps during CSR construction [x]
 
 In `build_property_graph` where edge tables are processed (around line 298), instead of directly using FK column values as row indices, look them up through `user_to_row`:
 
@@ -176,23 +176,23 @@ For each edge row, resolve `src_col` value → `src_vertex_label.user_to_row[val
 
 **Strategy:** Build a temporary remapped edge table with 0-based row indices, then pass that to `Rel::from_edges`. Alternatively, build the Rel manually from a `Vec<(i64, i64)>` of `(src_row_idx, dst_row_idx)` pairs.
 
-### Step 1.7: Update `extract_node_id_from_filter` to use key maps
+### Step 1.7: Update `extract_node_id_from_filter` to use key maps [x]
 
 Replace the current logic that parses `col = value` and returns the value directly. Instead:
 1. Parse the filter as before to get column name and value
 2. Look up `value` in the vertex label's `user_to_row` to get the row index
 3. Return the row index
 
-### Step 1.8: Update `project_columns` for key column reverse mapping
+### Step 1.8: Update `project_columns` for key column reverse mapping [x]
 
 When projecting `var.col` and the column is the key column, use `row_to_user[row_idx]` to return the original user-facing key value.
 
-### Step 1.9: Run test and iterate
+### Step 1.9: Run test and iterate [x]
 
 Run: `cargo test --all-features -- slt_pgq_natural_keys`
 Expected: PASS
 
-### Step 1.10: Add more SLT tests for natural keys
+### Step 1.10: Add more SLT tests for natural keys [x]
 
 Add tests to `tests/slt/pgq_natural_keys.slt`:
 - String keys (VARCHAR key column)
@@ -201,12 +201,12 @@ Add tests to `tests/slt/pgq_natural_keys.slt`:
 - Variable-length with natural keys
 - Key column projection (SELECT id should show original values)
 
-### Step 1.11: Run full test suite
+### Step 1.11: Run full test suite [x]
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: ALL tests pass (including all existing PGQ tests — backward compat)
 
-### Step 1.12: Commit
+### Step 1.12: Commit [x]
 
 ```bash
 git add src/sql/pgq.rs src/sql/pgq_parser.rs tests/slt/pgq_natural_keys.slt tests/slt_runner.rs

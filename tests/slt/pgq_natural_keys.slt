@@ -1,0 +1,155 @@
+# SQL/PGQ: Natural key support (non-sequential integer keys)
+
+# === Test 1: Non-sequential integer keys ===
+
+statement ok
+CREATE TABLE nk_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO nk_persons VALUES (100, 'Alice'), (200, 'Bob'), (300, 'Carol')
+
+statement ok
+CREATE TABLE nk_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO nk_knows VALUES (100, 200), (200, 300)
+
+statement ok
+CREATE PROPERTY GRAPH nk_graph VERTEX TABLES (nk_persons KEY (id) LABEL Person) EDGE TABLES (nk_knows SOURCE KEY (src) REFERENCES nk_persons (id) DESTINATION KEY (dst) REFERENCES nk_persons (id) LABEL Knows)
+
+# 1-hop: Alice knows Bob
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name))
+----
+Alice	Bob
+
+# All edges
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name)) ORDER BY src_name
+----
+Alice	Bob
+Bob	Carol
+
+# Key column projection: id should show original values
+query IT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (b.id AS dst_id, b.name AS dst_name))
+----
+200	Bob
+
+# === Test 2: Large and negative integer keys ===
+
+statement ok
+DROP PROPERTY GRAPH nk_graph
+
+statement ok
+DROP TABLE nk_persons
+
+statement ok
+DROP TABLE nk_knows
+
+statement ok
+CREATE TABLE nk_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO nk_persons VALUES (-50, 'Xena'), (0, 'Yuri'), (999999, 'Zara')
+
+statement ok
+CREATE TABLE nk_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO nk_knows VALUES (-50, 0), (0, 999999)
+
+statement ok
+CREATE PROPERTY GRAPH nk_graph VERTEX TABLES (nk_persons KEY (id) LABEL Person) EDGE TABLES (nk_knows SOURCE KEY (src) REFERENCES nk_persons (id) DESTINATION KEY (dst) REFERENCES nk_persons (id) LABEL Knows)
+
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Xena')-[:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name))
+----
+Xena	Yuri
+
+# === Test 3: Multi-hop with natural keys ===
+
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Xena')-[:Knows]->(b:Person)-[:Knows]->(c:Person) COLUMNS (a.name AS src_name, c.name AS dst_name))
+----
+Xena	Zara
+
+# === Test 4: Variable-length with natural keys ===
+
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Xena')-[:Knows]->{1,2}(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name)) ORDER BY dst_name
+----
+Xena	Yuri
+Xena	Zara
+
+# === Test 5: String keys ===
+
+statement ok
+DROP PROPERTY GRAPH nk_graph
+
+statement ok
+DROP TABLE nk_persons
+
+statement ok
+DROP TABLE nk_knows
+
+statement ok
+CREATE TABLE nk_persons (code VARCHAR, name VARCHAR)
+
+statement ok
+INSERT INTO nk_persons VALUES ('US', 'United States'), ('GB', 'United Kingdom'), ('JP', 'Japan')
+
+statement ok
+CREATE TABLE nk_flights (origin VARCHAR, dest VARCHAR)
+
+statement ok
+INSERT INTO nk_flights VALUES ('US', 'GB'), ('GB', 'JP')
+
+statement ok
+CREATE PROPERTY GRAPH nk_graph VERTEX TABLES (nk_persons KEY (code) LABEL Country) EDGE TABLES (nk_flights SOURCE KEY (origin) REFERENCES nk_persons (code) DESTINATION KEY (dest) REFERENCES nk_persons (code) LABEL Flight)
+
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Country WHERE a.code = 'US')-[:Flight]->(b:Country) COLUMNS (a.name AS origin, b.name AS destination))
+----
+United States	United Kingdom
+
+# Multi-hop with string keys
+query TT
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Country WHERE a.code = 'US')-[:Flight]->(b:Country)-[:Flight]->(c:Country) COLUMNS (a.name AS origin, c.name AS destination))
+----
+United States	Japan
+
+# === Test 6: KEY before LABEL (parser ordering) ===
+
+statement ok
+DROP PROPERTY GRAPH nk_graph
+
+statement ok
+DROP TABLE nk_persons
+
+statement ok
+DROP TABLE nk_flights
+
+statement ok
+CREATE TABLE nk_items (sku INTEGER, title VARCHAR)
+
+statement ok
+INSERT INTO nk_items VALUES (10, 'Widget'), (20, 'Gadget')
+
+statement ok
+CREATE TABLE nk_deps (from_sku INTEGER, to_sku INTEGER)
+
+statement ok
+INSERT INTO nk_deps VALUES (10, 20)
+
+# KEY before LABEL
+statement ok
+CREATE PROPERTY GRAPH dep_graph VERTEX TABLES (nk_items KEY (sku) LABEL Item) EDGE TABLES (nk_deps SOURCE KEY (from_sku) REFERENCES nk_items (sku) DESTINATION KEY (to_sku) REFERENCES nk_items (sku) LABEL DependsOn)
+
+query TT
+SELECT * FROM GRAPH_TABLE (dep_graph MATCH (a:Item WHERE a.title = 'Widget')-[:DependsOn]->(b:Item) COLUMNS (a.title AS from_title, b.title AS to_title))
+----
+Widget	Gadget
+
+statement ok
+DROP PROPERTY GRAPH dep_graph
