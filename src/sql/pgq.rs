@@ -1312,7 +1312,7 @@ fn compare_scalars(
     }
     match op {
         BinaryOperator::Eq => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Equal)),
-        BinaryOperator::NotEq => Ok(lhs.partial_cmp(rhs) != Some(std::cmp::Ordering::Equal)),
+        BinaryOperator::NotEq => Ok(lhs.partial_cmp(rhs).map_or(false, |o| o != std::cmp::Ordering::Equal)),
         BinaryOperator::Lt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Less)),
         BinaryOperator::LtEq => Ok(matches!(
             lhs.partial_cmp(rhs),
