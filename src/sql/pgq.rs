@@ -3021,6 +3021,99 @@ fn project_var_length_columns(
 // Shortest path planner
 // ---------------------------------------------------------------------------
 
+/// Column specification for shortest-path COLUMNS clause.
+enum SpColKind {
+    /// `_node` — path node ID (user key) at this depth
+    Node,
+    /// `_depth` — integer depth in the path
+    Depth,
+    /// `path_length(p)` — total path length (constant per row)
+    PathLength,
+    /// Source variable property lookup — column index in the left vertex table
+    SrcProp(usize),
+    /// Destination variable property lookup — column index in the right vertex table
+    DstProp(usize),
+}
+
+/// Parse the COLUMNS clause for a shortest-path query, producing column names
+/// and `SpColKind` descriptors.  This is shared by the 0-hop, empty-path, and
+/// normal-path code paths in `plan_shortest_path`.
+fn parse_sp_columns(
+    columns: &[ColumnEntry],
+    src_var: &str,
+    dst_var: &str,
+    left_table: &str,
+    right_table: &str,
+    session: &Session,
+) -> Result<(Vec<String>, Vec<SpColKind>), SqlError> {
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_kinds: Vec<SpColKind> = Vec::new();
+
+    for entry in columns {
+        let lower = entry.expr.to_lowercase();
+        let alias = entry.alias.as_deref();
+
+        if lower.contains("path_length") {
+            col_names.push(alias.unwrap_or("path_length").to_string());
+            col_kinds.push(SpColKind::PathLength);
+        } else if lower == "_node" || lower == "node" {
+            col_names.push(
+                alias
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| lower.clone()),
+            );
+            col_kinds.push(SpColKind::Node);
+        } else if lower == "_depth" || lower == "depth" {
+            col_names.push(
+                alias
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| lower.clone()),
+            );
+            col_kinds.push(SpColKind::Depth);
+        } else if let Some(dot_pos) = lower.find('.') {
+            let var = lower[..dot_pos].trim();
+            let prop = lower[dot_pos + 1..].trim();
+            if var == src_var {
+                let stored = session.tables.get(left_table).ok_or_else(|| {
+                    SqlError::Plan(format!("Table '{left_table}' not found"))
+                })?;
+                let col_idx = find_col_idx(&stored.table, prop).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{prop}' not found in vertex table '{left_table}'"
+                    ))
+                })?;
+                col_names.push(alias.unwrap_or(prop).to_string());
+                col_kinds.push(SpColKind::SrcProp(col_idx));
+            } else if var == dst_var {
+                let stored = session.tables.get(right_table).ok_or_else(|| {
+                    SqlError::Plan(format!("Table '{right_table}' not found"))
+                })?;
+                let col_idx = find_col_idx(&stored.table, prop).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{prop}' not found in vertex table '{right_table}'"
+                    ))
+                })?;
+                col_names.push(alias.unwrap_or(prop).to_string());
+                col_kinds.push(SpColKind::DstProp(col_idx));
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
+                )));
+            }
+        } else {
+            return Err(SqlError::Plan(format!(
+                "COLUMNS: unsupported expression '{}'",
+                entry.expr
+            )));
+        }
+    }
+
+    if col_names.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+    Ok((col_names, col_kinds))
+}
+
 /// Plan an ANY SHORTEST MATCH using BFS.
 ///
 /// Reconstructs the shortest path by doing BFS over the edge table's
@@ -3179,61 +3272,40 @@ fn plan_shortest_path(
 
     // Handle 0-hop match: if min_depth is 0 and src == dst, return immediately
     if min_depth == 0 && src_id == dst_id {
-        // Validate columns the same way as the normal path
-        let mut col_names: Vec<String> = Vec::new();
-        // 0 = _node, 1 = _depth, 2 = path_length (total)
-        let mut col_indices: Vec<usize> = Vec::new();
-        for entry in columns {
-            let lower = entry.expr.to_lowercase();
-            let alias = entry.alias.as_deref();
-            if lower.contains("path_length") {
-                col_names.push(alias.unwrap_or("path_length").to_string());
-                col_indices.push(2); // total path length
-            } else if lower == "_node" || lower == "node" {
-                col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| lower.clone()));
-                col_indices.push(0);
-            } else if lower == "_depth" || lower == "depth" {
-                col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| lower.clone()));
-                col_indices.push(1);
-            } else if let Some(dot_pos) = lower.find('.') {
-                let var = lower[..dot_pos].trim();
-                let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
-                if var == dst_var {
-                    return Err(SqlError::Plan(
-                        "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
-                         Property lookups on path nodes are not yet supported."
-                            .into(),
-                    ));
-                }
-                return Err(SqlError::Plan(format!(
-                    "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
-                )));
-            } else {
-                return Err(SqlError::Plan(format!(
-                    "COLUMNS: unsupported expression '{}'",
-                    entry.expr
-                )));
-            }
-        }
-        if col_names.is_empty() {
-            return Err(SqlError::Plan("COLUMNS clause is empty".into()));
-        }
+        let src_var = src_node.variable.as_deref().unwrap_or("__src");
+        let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+        let (col_names, col_kinds) =
+            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
+
         // Build CSV with correct values: node=user_key, depth=0, path_length=0
         let src_key = left_vertex_label.row_to_user.get(src_id as usize)
             .ok_or_else(|| SqlError::Plan(format!(
                 "Row index {src_id} out of bounds in vertex table '{left_table}'"
             )))?;
+        let left_stored = session.tables.get(left_table.as_str());
+        let right_stored = session.tables.get(right_table.as_str());
         let csv_col_names: Vec<String> = (0..col_names.len())
             .map(|i| format!("__c{i}"))
             .collect();
         let mut csv = csv_col_names.join(",");
         csv.push('\n');
-        for (i, &col_idx) in col_indices.iter().enumerate() {
+        for (i, kind) in col_kinds.iter().enumerate() {
             if i > 0 { csv.push(','); }
-            match col_idx {
-                0 => csv.push_str(&src_key.to_csv()),
-                1 | 2 => csv.push('0'), // depth and path_length are both 0 for 0-hop
-                _ => {}
+            match kind {
+                SpColKind::Node => csv.push_str(&src_key.to_csv()),
+                SpColKind::Depth | SpColKind::PathLength => csv.push('0'),
+                SpColKind::SrcProp(idx) => {
+                    let t = left_stored.ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{left_table}' not found"))
+                    })?;
+                    csv.push_str(&get_cell_string(&t.table, *idx, src_id as usize)?);
+                }
+                SpColKind::DstProp(idx) => {
+                    let t = right_stored.ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{right_table}' not found"))
+                    })?;
+                    csv.push_str(&get_cell_string(&t.table, *idx, dst_id as usize)?);
+                }
             }
         }
         csv.push('\n');
@@ -3255,40 +3327,11 @@ fn plan_shortest_path(
     if path.is_empty() {
         // No path found → return empty result table with proper column names
         // so that the outer query can resolve column references (e.g. ORDER BY _depth).
-        // Validate columns the same way as the non-empty branch below.
-        let mut display_names: Vec<String> = Vec::new();
-        for entry in columns {
-            let lower = entry.expr.to_lowercase();
-            let alias = entry.alias.as_deref();
-            if lower.contains("path_length") {
-                display_names.push(alias.unwrap_or("path_length").to_string());
-            } else if lower == "_node" || lower == "node"
-                || lower == "_depth" || lower == "depth"
-            {
-                display_names.push(alias.unwrap_or(&lower).to_string());
-            } else if let Some(dot_pos) = lower.find('.') {
-                let var = lower[..dot_pos].trim();
-                let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
-                if var == dst_var {
-                    return Err(SqlError::Plan(
-                        "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
-                         Property lookups on path nodes are not yet supported."
-                            .into(),
-                    ));
-                }
-                return Err(SqlError::Plan(format!(
-                    "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
-                )));
-            } else {
-                return Err(SqlError::Plan(format!(
-                    "COLUMNS: unsupported expression '{}'",
-                    entry.expr
-                )));
-            }
-        }
-        if display_names.is_empty() {
-            return Err(SqlError::Plan("COLUMNS clause is empty".into()));
-        }
+        let src_var = src_node.variable.as_deref().unwrap_or("__src");
+        let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+        let (display_names, _col_kinds) =
+            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
+
         let csv_col_names: Vec<String> = (0..display_names.len())
             .map(|i| format!("__c{i}"))
             .collect();
@@ -3299,51 +3342,18 @@ fn plan_shortest_path(
 
     path.reverse(); // path is built backwards, reverse to get src -> dst order
 
-    // Build result as CSV with _node and _depth columns
-    let mut col_names: Vec<String> = Vec::new();
-    // 0 = _node, 1 = _depth, 2 = path_length (total)
-    let mut col_indices: Vec<usize> = Vec::new();
-
-    for entry in columns {
-        let lower = entry.expr.to_lowercase();
-        let alias = entry.alias.as_deref();
-
-        if lower.contains("path_length") {
-            col_names.push(alias.unwrap_or("path_length").to_string());
-            col_indices.push(2); // total path length (constant per row)
-        } else if lower == "_node" || lower == "node" {
-            col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| entry.expr.to_lowercase()));
-            col_indices.push(0); // node
-        } else if lower == "_depth" || lower == "depth" {
-            col_names.push(alias.map(|s| s.to_string()).unwrap_or_else(|| entry.expr.to_lowercase()));
-            col_indices.push(1); // depth
-        } else if let Some(dot_pos) = lower.find('.') {
-            let var = lower[..dot_pos].trim();
-            let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
-            if var == dst_var {
-                return Err(SqlError::Plan(
-                    "SHORTEST_PATH COLUMNS: use _node, _depth, or path_length(p). \
-                     Property lookups on path nodes are not yet supported."
-                        .into(),
-                ));
-            }
-            return Err(SqlError::Plan(format!(
-                "Unknown variable '{var}' in SHORTEST_PATH COLUMNS"
-            )));
-        } else {
-            return Err(SqlError::Plan(format!(
-                "COLUMNS: unsupported expression '{}'",
-                entry.expr
-            )));
-        }
-    }
-
-    if col_names.is_empty() {
-        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
-    }
+    // Parse COLUMNS clause
+    let src_var = src_node.variable.as_deref().unwrap_or("__src");
+    let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+    let (col_names, col_kinds) =
+        parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
 
     // Total path length = number of edges = number of nodes - 1
     let total_path_length = if path.is_empty() { 0 } else { path.len() - 1 };
+
+    // Pre-fetch table references for property lookups (only if needed)
+    let left_stored = session.tables.get(left_table.as_str());
+    let right_stored = session.tables.get(right_table.as_str());
 
     // Build CSV
     let csv_col_names: Vec<String> = (0..col_names.len())
@@ -3371,13 +3381,24 @@ fn plan_shortest_path(
             .ok_or_else(|| SqlError::Plan(format!(
                 "Row index {node_id} out of bounds in vertex table '{decode_table}'"
             )))?;
-        for (i, &col_idx) in col_indices.iter().enumerate() {
+        for (i, kind) in col_kinds.iter().enumerate() {
             if i > 0 { csv.push(','); }
-            match col_idx {
-                0 => csv.push_str(&user_key.to_csv()),
-                1 => csv.push_str(&depth.to_string()),
-                2 => csv.push_str(&total_path_length.to_string()),
-                _ => {}
+            match kind {
+                SpColKind::Node => csv.push_str(&user_key.to_csv()),
+                SpColKind::Depth => csv.push_str(&depth.to_string()),
+                SpColKind::PathLength => csv.push_str(&total_path_length.to_string()),
+                SpColKind::SrcProp(idx) => {
+                    let t = left_stored.ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{left_table}' not found"))
+                    })?;
+                    csv.push_str(&get_cell_string(&t.table, *idx, src_id as usize)?);
+                }
+                SpColKind::DstProp(idx) => {
+                    let t = right_stored.ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{right_table}' not found"))
+                    })?;
+                    csv.push_str(&get_cell_string(&t.table, *idx, dst_id as usize)?);
+                }
             }
         }
         csv.push('\n');

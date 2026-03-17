@@ -47,3 +47,23 @@ SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a:Person WHERE a.id = 
 1 1
 3 2
 4 3
+
+# --- Property lookups on path nodes ---
+
+# Source and destination property in shortest path COLUMNS
+query TT
+SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[:Knows]->+(b:Person WHERE b.id = 4) COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Eve
+Alice Eve
+Alice Eve
+Alice Eve
+
+# Mix property lookups with _node and _depth
+query TIIT
+SELECT * FROM GRAPH_TABLE (social MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[:Knows]->+(b:Person WHERE b.id = 4) COLUMNS (a.name AS src, _node, _depth, b.name AS dst)) ORDER BY _depth
+----
+Alice 0 0 Eve
+Alice 1 1 Eve
+Alice 3 2 Eve
+Alice 4 3 Eve
