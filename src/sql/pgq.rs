@@ -1051,17 +1051,565 @@ fn csv_quote(s: &str) -> String {
 // Multi-hop fixed-length path planner (wco_join)
 // ---------------------------------------------------------------------------
 
-/// Stub: multi-hop patterns where at least one edge has a variable-length quantifier.
+/// Describes one segment in a multi-hop BFS pattern.
+struct BfsSegment<'a> {
+    stored_rel: &'a StoredRel,
+    direction: u8,
+    min_depth: u8,
+    max_depth: u8,
+    src_table_name: String,
+    dst_table_name: String,
+}
+
+/// Holds BFS output: node IDs at each position boundary and total path lengths.
+struct BfsResult {
+    /// `node_ids[position][row]` = node_id at that position in the path.
+    /// position 0 = start node, position 1 = node after segment 0, etc.
+    node_ids: Vec<Vec<i64>>,
+    /// Total path length (sum of hops across all segments) per result row.
+    path_lengths: Vec<i64>,
+    /// Number of result rows.
+    nrows: usize,
+}
+
+/// Safety limits for the multi-segment BFS.
+const MAX_BFS_STATES: usize = 10_000_000;
+const MAX_RESULTS: usize = 1_000_000;
+
+/// Core fused BFS across multiple segments.
+///
+/// Each BFS state is `(segment_index, node_id, depth_in_segment, path_so_far, total_depth)`.
+/// `path_so_far` stores node IDs at each position boundary (between segments).
+/// When a segment reaches its `min_depth`, the node can "exit" that segment.
+/// If it exits the last segment, a result is recorded. Otherwise, the node
+/// transitions to the next segment at depth 0.
+fn multi_segment_bfs(
+    segments: &[BfsSegment],
+    start_nodes: &[i64],
+    mode: &PathMode,
+    is_cyclic: bool,
+) -> Result<BfsResult, SqlError> {
+    use std::collections::VecDeque;
+
+    let n_positions = segments.len() + 1; // one position per segment boundary
+
+    let mut result_node_ids: Vec<Vec<i64>> = vec![Vec::new(); n_positions];
+    let mut result_path_lengths: Vec<i64> = Vec::new();
+    let mut nrows: usize = 0;
+
+    // For AnyShortest: track minimum total_depth found so we can prune longer paths
+    let mut best_depth: Option<i64> = None;
+
+    // BFS state: (segment_index, node_id, depth_in_segment, path_so_far, total_depth)
+    // path_so_far has n_positions entries; path_so_far[0] = start_node, etc.
+    struct BfsState {
+        seg_idx: usize,
+        node_id: i64,
+        depth_in_seg: u8,
+        path: Vec<i64>,      // node IDs at position boundaries filled so far
+        total_depth: i64,
+    }
+
+    let mut queue: VecDeque<BfsState> = VecDeque::new();
+    let mut n_states: usize = 0;
+
+    // Initialize queue with start nodes
+    for &start in start_nodes {
+        let mut path = vec![-1i64; n_positions];
+        path[0] = start;
+        queue.push_back(BfsState {
+            seg_idx: 0,
+            node_id: start,
+            depth_in_seg: 0,
+            path,
+            total_depth: 0,
+        });
+        n_states += 1;
+    }
+
+    while let Some(state) = queue.pop_front() {
+        if n_states > MAX_BFS_STATES {
+            return Err(SqlError::Plan(format!(
+                "Multi-segment BFS exceeded {MAX_BFS_STATES} states — graph too large or \
+                 path quantifier range too wide. Try narrowing the hop range."
+            )));
+        }
+        if nrows >= MAX_RESULTS {
+            break;
+        }
+
+        let seg = &segments[state.seg_idx];
+
+        // AnyShortest pruning: if we already found a result, skip states that
+        // are already longer.
+        if *mode == PathMode::AnyShortest {
+            if let Some(best) = best_depth {
+                if state.total_depth > best {
+                    continue;
+                }
+            }
+        }
+
+        // Check if current depth_in_seg is within [min_depth, max_depth] for exit
+        if state.depth_in_seg >= seg.min_depth {
+            // This node can exit the current segment.
+            let next_position = state.seg_idx + 1;
+            let mut exit_path = state.path.clone();
+            exit_path[next_position] = state.node_id;
+
+            if next_position == segments.len() {
+                // Last segment — record result
+                // For cyclic binding: filter results where first node != last node
+                if is_cyclic && exit_path[0] != exit_path[n_positions - 1] {
+                    // Not a cycle — skip
+                } else {
+                    // AnyShortest check
+                    if *mode == PathMode::AnyShortest {
+                        if let Some(best) = best_depth {
+                            if state.total_depth > best {
+                                continue; // longer than best — skip
+                            }
+                        }
+                        best_depth = Some(state.total_depth);
+                    }
+
+                    for (pos, ids) in result_node_ids.iter_mut().enumerate() {
+                        ids.push(exit_path[pos]);
+                    }
+                    result_path_lengths.push(state.total_depth);
+                    nrows += 1;
+                }
+            } else {
+                // Transition to next segment at depth 0
+                // The node exiting segment[seg_idx] becomes the start of segment[next_position]
+                // It enters at depth_in_seg=0 with the same node_id.
+                queue.push_back(BfsState {
+                    seg_idx: next_position,
+                    node_id: state.node_id,
+                    depth_in_seg: 0,
+                    path: exit_path,
+                    total_depth: state.total_depth,
+                });
+                n_states += 1;
+            }
+        }
+
+        // Expand neighbors within the current segment if depth < max_depth
+        if state.depth_in_seg < seg.max_depth {
+            let neighbors = if seg.direction == 2 {
+                // Undirected: merge forward and reverse neighbors
+                let fwd = seg.stored_rel.rel.neighbors(state.node_id, 0);
+                let rev = seg.stored_rel.rel.neighbors(state.node_id, 1);
+                let mut merged = Vec::with_capacity(fwd.len() + rev.len());
+                merged.extend_from_slice(fwd);
+                merged.extend_from_slice(rev);
+                merged
+            } else {
+                seg.stored_rel.rel.neighbors(state.node_id, seg.direction).to_vec()
+            };
+
+            for &next_node in &neighbors {
+                queue.push_back(BfsState {
+                    seg_idx: state.seg_idx,
+                    node_id: next_node,
+                    depth_in_seg: state.depth_in_seg + 1,
+                    path: state.path.clone(),
+                    total_depth: state.total_depth + 1,
+                });
+                n_states += 1;
+            }
+        }
+    }
+
+    Ok(BfsResult {
+        node_ids: result_node_ids,
+        path_lengths: result_path_lengths,
+        nrows,
+    })
+}
+
+/// Plan multi-hop patterns where at least one edge has a variable-length quantifier.
+///
+/// Builds `BfsSegment`s from the pattern, resolves start nodes, calls
+/// `multi_segment_bfs`, then projects the COLUMNS clause.
 fn plan_multi_hop_variable(
-    _session: &Session,
-    _graph: &PropertyGraph,
-    _pattern: &PathPattern,
-    _columns: &[ColumnEntry],
-    _mode: &PathMode,
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    columns: &[ColumnEntry],
+    mode: &PathMode,
 ) -> Result<(Table, Vec<String>), SqlError> {
-    Err(SqlError::Plan(
-        "Multi-hop patterns with variable-length edges are not yet supported.".into(),
-    ))
+    let nodes = &pattern.nodes;
+    let edges = &pattern.edges;
+
+    // --- Build BfsSegments ---
+    let mut segments: Vec<BfsSegment> = Vec::with_capacity(edges.len());
+
+    for (i, edge) in edges.iter().enumerate() {
+        let left_node = &nodes[i];
+        let right_node = &nodes[i + 1];
+
+        let edge_label = edge.label.as_deref().ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Edge {} in multi-hop pattern must specify a label: -[:Label]->",
+                i
+            ))
+        })?;
+        let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
+            SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+        })?;
+
+        // Determine left/right default tables based on edge direction
+        let is_reverse = edge.direction == MatchDirection::Reverse;
+        let (left_default_table, right_default_table) = if is_reverse {
+            (
+                &stored_rel.edge_label.dst_ref_table,
+                &stored_rel.edge_label.src_ref_table,
+            )
+        } else {
+            (
+                &stored_rel.edge_label.src_ref_table,
+                &stored_rel.edge_label.dst_ref_table,
+            )
+        };
+
+        let left_label = resolve_node_label(left_node, left_default_table, graph)?;
+        let right_label = resolve_node_label(right_node, right_default_table, graph)?;
+
+        // Validate explicit node labels match edge expectations
+        validate_node_table_for_edge(
+            left_node,
+            &left_label.table_name,
+            left_default_table,
+            edge_label,
+            "source",
+        )?;
+        validate_node_table_for_edge(
+            right_node,
+            &right_label.table_name,
+            right_default_table,
+            edge_label,
+            "destination",
+        )?;
+
+        // Verify vertex table continuity: segment[i].dst == segment[i+1].src
+        if let Some(prev) = segments.last() {
+            if prev.dst_table_name != left_label.table_name {
+                return Err(SqlError::Plan(format!(
+                    "Vertex table mismatch between segment {} and {}: '{}' vs '{}'. \
+                     Adjacent segments must share a vertex table.",
+                    i - 1,
+                    i,
+                    prev.dst_table_name,
+                    left_label.table_name
+                )));
+            }
+        }
+
+        // Reject undirected edges on heterogeneous segments
+        if edge.direction == MatchDirection::Undirected
+            && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+        {
+            return Err(SqlError::Plan(
+                "Undirected traversals are not supported on edges with different source and \
+                 destination vertex tables (heterogeneous graphs). Use directed patterns instead."
+                    .into(),
+            ));
+        }
+
+        // Variable-length edges must have same src/dst vertex table (CSR node IDs
+        // must be in the same domain across multiple hops).
+        let is_variable = !matches!(edge.quantifier, PathQuantifier::One);
+        let is_single_range = matches!(edge.quantifier, PathQuantifier::Range { min: 1, max: 1 });
+        if is_variable
+            && !is_single_range
+            && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+        {
+            return Err(SqlError::Plan(
+                "Variable-length edges within a segment must have the same source and \
+                 destination vertex table (CSR node IDs must be in the same domain)."
+                    .into(),
+            ));
+        }
+
+        let direction: u8 = match edge.direction {
+            MatchDirection::Forward => 0,
+            MatchDirection::Reverse => 1,
+            MatchDirection::Undirected => 2,
+        };
+
+        let (min_depth, max_depth) = match edge.quantifier {
+            PathQuantifier::Range { min, max } => (min, max),
+            PathQuantifier::Plus => (1, 255),
+            PathQuantifier::Star => (0, 255),
+            PathQuantifier::One => (1, 1),
+        };
+
+        segments.push(BfsSegment {
+            stored_rel,
+            direction,
+            min_depth,
+            max_depth,
+            src_table_name: left_label.table_name.clone(),
+            dst_table_name: right_label.table_name.clone(),
+        });
+    }
+
+    // Detect cyclic variable binding
+    let is_cyclic = match (&nodes[0].variable, &nodes[nodes.len() - 1].variable) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+
+    // Reject WHERE filters on intermediate/destination nodes
+    for node in &nodes[1..] {
+        if node.filter.is_some() {
+            return Err(SqlError::Plan(
+                "WHERE filters on intermediate or destination nodes are not yet supported \
+                 in multi-hop variable-length patterns."
+                    .into(),
+            ));
+        }
+    }
+
+    // --- Determine start nodes ---
+    let first_src_table_name = &segments[0].src_table_name;
+    let first_src_stored = session.tables.get(first_src_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{first_src_table_name}' not found"))
+    })?;
+
+    let start_nodes: Vec<i64> = if let Some(ref filter_text) = nodes[0].filter {
+        // Try to extract a single node ID from the WHERE filter
+        let src_id = extract_node_id_from_filter(
+            &nodes[0],
+            first_src_table_name,
+            filter_text,
+            session,
+        )?;
+        vec![src_id]
+    } else {
+        // All nodes in the first vertex table
+        let nrows = checked_logical_nrows(first_src_stored)?;
+        (0..nrows as i64).collect()
+    };
+
+    // --- Run BFS ---
+    let bfs_result = multi_segment_bfs(&segments, &start_nodes, mode, is_cyclic)?;
+
+    // --- Build variable map: node variable name -> position index ---
+    let n_positions = segments.len() + 1;
+    let mut var_map: HashMap<String, usize> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(ref var) = node.variable {
+            var_map.entry(var.clone()).or_insert(i);
+        }
+    }
+
+    // Build table name for each position
+    let mut pos_table_names: Vec<String> = Vec::with_capacity(n_positions);
+    pos_table_names.push(segments[0].src_table_name.clone());
+    for seg in &segments {
+        pos_table_names.push(seg.dst_table_name.clone());
+    }
+
+    // --- Project COLUMNS ---
+    enum MhVarColKind {
+        Property { var_idx: usize, table_col_idx: usize, table_name: String },
+        PathLength,
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_specs: Vec<MhVarColKind> = Vec::new();
+
+    for entry in columns {
+        let expr = &entry.expr;
+        let alias = entry.alias.as_deref();
+
+        if let Some(dot_pos) = expr.find('.') {
+            let var = expr[..dot_pos].trim().to_lowercase();
+            let col = expr[dot_pos + 1..].trim().to_lowercase();
+            // Use "var_col" as default name to disambiguate columns from
+            // different node variables that share the same property name.
+            let default_name = format!("{var}_{col}");
+            let out_name = alias.unwrap_or(&default_name).to_string();
+
+            let var_idx = var_map.get(&var).ok_or_else(|| {
+                let available: Vec<_> = var_map.keys().collect();
+                SqlError::Plan(format!(
+                    "Unknown variable '{var}' in COLUMNS. Available: {available:?}"
+                ))
+            })?;
+
+            let table_name = &pos_table_names[*var_idx];
+            let vtable = session.tables.get(table_name).ok_or_else(|| {
+                SqlError::Plan(format!("Table '{table_name}' not found"))
+            })?;
+            let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Column '{col}' not found in vertex table '{table_name}'"
+                ))
+            })?;
+
+            col_names.push(out_name);
+            col_specs.push(MhVarColKind::Property {
+                var_idx: *var_idx,
+                table_col_idx,
+                table_name: table_name.clone(),
+            });
+        } else {
+            let lower = expr.to_lowercase();
+            if lower.contains("path_length") || lower == "_depth" {
+                col_names.push(alias.unwrap_or("path_length").to_string());
+                col_specs.push(MhVarColKind::PathLength);
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "COLUMNS: unsupported expression '{expr}'"
+                )));
+            }
+        }
+    }
+
+    if col_specs.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Handle empty results
+    if bfs_result.nrows == 0 {
+        let csv_col_names: Vec<String> = (0..col_names.len())
+            .map(|i| format!("__c{i}"))
+            .collect();
+        let csv = format!("{}\n", csv_col_names.join(","));
+        let result = csv_to_table(session, &csv, &col_names)?;
+        return Ok((result, col_names));
+    }
+
+    // Build result via CSV
+    let csv_col_names: Vec<String> = (0..col_names.len())
+        .map(|i| format!("__c{i}"))
+        .collect();
+
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    for row in 0..bfs_result.nrows {
+        for (i, spec) in col_specs.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            match spec {
+                MhVarColKind::Property { var_idx, table_col_idx, table_name } => {
+                    let node_id = bfs_result.node_ids[*var_idx][row];
+                    if node_id < 0 {
+                        return Err(SqlError::Plan(format!(
+                            "Negative node index {} at position {} row {}",
+                            node_id, var_idx, row
+                        )));
+                    }
+                    let vtable = session.tables.get(table_name).ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{table_name}' not found"))
+                    })?;
+                    csv.push_str(&get_cell_string(
+                        &vtable.table,
+                        *table_col_idx,
+                        node_id as usize,
+                    )?);
+                }
+                MhVarColKind::PathLength => {
+                    csv.push_str(&bfs_result.path_lengths[row].to_string());
+                }
+            }
+        }
+        csv.push('\n');
+    }
+
+    let result = csv_to_table(session, &csv, &col_names)?;
+    Ok((result, col_names))
+}
+
+/// Extract a single node row index from a WHERE filter text.
+/// Similar to `extract_node_id` but takes a filter string directly rather
+/// than requiring the node to have a filter.
+fn extract_node_id_from_filter(
+    node: &NodePattern,
+    table_name: &str,
+    filter_text: &str,
+    session: &Session,
+) -> Result<i64, SqlError> {
+    let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(SqlError::Plan(format!(
+            "Cannot extract node ID from filter: {filter_text}"
+        )));
+    }
+    let lhs = parts[0].trim();
+    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
+        return Err(SqlError::Plan(format!(
+            "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
+        )));
+    }
+    let var = node.variable.as_deref().unwrap_or("");
+    let col_name = if !var.is_empty() {
+        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
+        let mut s = lhs.to_string();
+        for p in &prefixes {
+            if let Some(stripped) = s.strip_prefix(p.as_str()) {
+                s = stripped.to_string();
+                break;
+            }
+        }
+        s.trim().to_lowercase()
+    } else {
+        lhs.to_lowercase()
+    };
+    let value = parts[1].trim();
+    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let stored = session.tables.get(table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{table_name}' not found"))
+    })?;
+
+    let nrows = checked_logical_nrows(stored)?;
+    let col_idx = find_col_idx(&stored.table, &col_name).ok_or_else(|| {
+        SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
+    })?;
+
+    let str_val = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        Some(value[1..value.len() - 1].replace("''", "'"))
+    } else {
+        None
+    };
+
+    let int_val = if str_val.is_none() { value_nospace.parse::<i64>().ok() } else { None };
+    let float_val = if str_val.is_none() && int_val.is_none() {
+        value_nospace.parse::<f64>().ok()
+    } else {
+        None
+    };
+
+    let mut found_row: Option<usize> = None;
+    for row in 0..nrows {
+        let matched = if let Some(ref sv) = str_val {
+            stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
+        } else if let Some(iv) = int_val {
+            stored.table.get_i64(col_idx, row) == Some(iv)
+        } else if let Some(fv) = float_val {
+            stored.table.get_f64(col_idx, row) == Some(fv)
+        } else {
+            false
+        };
+
+        if matched {
+            if found_row.is_some() {
+                return Err(SqlError::Plan(format!(
+                    "Ambiguous node filter: '{filter_text}' matches multiple rows in '{table_name}'."
+                )));
+            }
+            found_row = Some(row);
+        }
+    }
+
+    found_row.map(|r| r as i64).ok_or_else(|| {
+        SqlError::Plan(format!("No matching row for filter: {filter_text}"))
+    })
 }
 
 /// Plan a multi-hop fixed MATCH: (a)-[e1]->(b)-[e2]->(c) ... where all edges

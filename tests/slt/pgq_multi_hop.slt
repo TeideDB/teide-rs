@@ -34,3 +34,41 @@ SELECT * FROM GRAPH_TABLE (mh_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Kn
 ----
 Bob SF
 Carol NYC
+
+# --- Variable-length multi-hop ---
+
+# Setup: financial graph
+# Person -[Owns]-> Account -[Transfer]->+ Account
+statement ok
+CREATE TABLE fin_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO fin_persons VALUES (0, 'Alice'), (1, 'Bob')
+
+statement ok
+CREATE TABLE fin_accounts (id INTEGER, acct_name VARCHAR)
+
+statement ok
+INSERT INTO fin_accounts VALUES (0, 'Checking_A'), (1, 'Savings_A'), (2, 'Checking_B')
+
+statement ok
+CREATE TABLE fin_owns (person_id INTEGER, account_id INTEGER)
+
+statement ok
+INSERT INTO fin_owns VALUES (0, 0), (0, 1), (1, 2)
+
+statement ok
+CREATE TABLE fin_transfers (src_acct INTEGER, dst_acct INTEGER)
+
+statement ok
+INSERT INTO fin_transfers VALUES (0, 2), (2, 1)
+
+statement ok
+CREATE PROPERTY GRAPH fin_graph VERTEX TABLES (fin_persons LABEL Person, fin_accounts LABEL Account) EDGE TABLES (fin_owns SOURCE KEY (person_id) REFERENCES fin_persons (id) DESTINATION KEY (account_id) REFERENCES fin_accounts (id) LABEL Owns, fin_transfers SOURCE KEY (src_acct) REFERENCES fin_accounts (id) DESTINATION KEY (dst_acct) REFERENCES fin_accounts (id) LABEL Transfer)
+
+# Multi-hop: Alice's accounts that transferred to any account in 1+ hops
+query TT
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH (p:Person WHERE p.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->+(a2:Account) COLUMNS (a1.acct_name, a2.acct_name)) ORDER BY 1, 2
+----
+Checking_A Checking_B
+Checking_A Savings_A
