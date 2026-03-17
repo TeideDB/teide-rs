@@ -2039,30 +2039,28 @@ fn test_rel_neighbors() {
     let rel = Rel::from_edges(&edges, "src", "dst", 3, 3, true).unwrap();
 
     // Forward: node 0 has neighbors [1, 2]
-    let (ptr, count) = rel.neighbors(0, 0); // direction 0 = forward
-    assert_eq!(count, 2);
-    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    let neighbors = rel.neighbors(0, 0); // direction 0 = forward
+    assert_eq!(neighbors.len(), 2);
     assert!(neighbors.contains(&1));
     assert!(neighbors.contains(&2));
 
     // Forward: node 1 has neighbors [2]
-    let (ptr, count) = rel.neighbors(1, 0);
-    assert_eq!(count, 1);
-    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    let neighbors = rel.neighbors(1, 0);
+    assert_eq!(neighbors.len(), 1);
     assert_eq!(neighbors[0], 2);
 
     // Forward: node 2 has no outgoing neighbors
-    let (_, count) = rel.neighbors(2, 0);
-    assert_eq!(count, 0);
+    assert!(rel.neighbors(2, 0).is_empty());
 
     // Reverse: node 2 has incoming from [0, 1]
-    let (ptr, count) = rel.neighbors(2, 1); // direction 1 = reverse
-    assert_eq!(count, 2);
-    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    let neighbors = rel.neighbors(2, 1); // direction 1 = reverse
+    assert_eq!(neighbors.len(), 2);
     assert!(neighbors.contains(&0));
     assert!(neighbors.contains(&1));
 
-    // n_nodes
-    assert_eq!(rel.n_nodes(0), 3); // forward: n_src_nodes
-    assert_eq!(rel.n_nodes(1), 3); // reverse: n_dst_nodes
+    // n_nodes — use asymmetric counts to verify direction matters
+    // Re-build with n_src=3, n_dst=4 so the two directions differ
+    let rel2 = Rel::from_edges(&edges, "src", "dst", 3, 4, true).unwrap();
+    assert_eq!(rel2.n_nodes(0), 3); // forward: n_src_nodes
+    assert_eq!(rel2.n_nodes(1), 4); // reverse: n_dst_nodes
 }

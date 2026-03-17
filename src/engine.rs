@@ -2195,15 +2195,18 @@ impl Rel {
     }
 
     /// Get direct read-only access to a node's CSR neighbor list.
-    /// Returns (pointer, count). The pointer is into the CSR's internal
-    /// targets array and is valid as long as this `Rel` is alive.
+    /// Returns a slice into the CSR's internal targets array, valid as long
+    /// as this `Rel` is alive. Returns an empty slice for out-of-range nodes.
     /// direction: 0=fwd (src->dst), 1=rev (dst->src).
-    pub fn neighbors(&self, node: i64, direction: u8) -> (*const i64, i64) {
+    pub fn neighbors(&self, node: i64, direction: u8) -> &[i64] {
         let mut count: i64 = 0;
         let ptr = unsafe {
             ffi::td_rel_neighbors(self.ptr, node, direction, &mut count)
         };
-        (ptr, count)
+        if ptr.is_null() || count <= 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(ptr, count as usize) }
     }
 
     /// Number of nodes on one side of the relationship.
