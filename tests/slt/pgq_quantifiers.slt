@@ -1,0 +1,30 @@
+# SQL/PGQ: Quantifier shorthands
+
+statement ok
+CREATE TABLE qs_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO qs_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE qs_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO qs_knows VALUES (0, 1), (1, 2), (2, 3)
+
+statement ok
+CREATE PROPERTY GRAPH qs_graph VERTEX TABLES (qs_persons LABEL Person) EDGE TABLES (qs_knows SOURCE KEY (src) REFERENCES qs_persons (id) DESTINATION KEY (dst) REFERENCES qs_persons (id) LABEL Knows)
+
+# {,2} means {0,2}: paths of length 0, 1, or 2 from Alice
+query TT
+SELECT * FROM GRAPH_TABLE (qs_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->{,2}(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+
+# {2,} means {2,255}: paths of length 2 or more from Alice
+query TT
+SELECT * FROM GRAPH_TABLE (qs_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->{2,}(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Carol
+Alice Dave

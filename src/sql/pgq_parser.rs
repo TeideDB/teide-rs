@@ -952,22 +952,38 @@ fn parse_edge_and_node(
         }
         Some("{") => {
             t.next()?; // consume '{'
-            let min_str = t.next()?;
-            let min: u8 = min_str
-                .parse()
-                .map_err(|_| SqlError::Parse(format!("Invalid min depth: {min_str}")))?;
-            t.expect(",")?;
-            let max_str = t.next()?;
-            let max: u8 = max_str
-                .parse()
-                .map_err(|_| SqlError::Parse(format!("Invalid max depth: {max_str}")))?;
-            t.expect("}")?;
-            if min > max {
-                return Err(SqlError::Parse(format!(
-                    "Invalid path quantifier: min ({min}) > max ({max})"
-                )));
+            let first_tok = t.next()?;
+            if first_tok == "," {
+                // {,max} shorthand: min defaults to 0
+                let max_str = t.next()?;
+                let max: u8 = max_str
+                    .parse()
+                    .map_err(|_| SqlError::Parse(format!("Invalid max depth: {max_str}")))?;
+                t.expect("}")?;
+                quantifier = PathQuantifier::Range { min: 0, max };
+            } else {
+                let min: u8 = first_tok
+                    .parse()
+                    .map_err(|_| SqlError::Parse(format!("Invalid min depth: {first_tok}")))?;
+                t.expect(",")?;
+                if t.peek() == Some("}") {
+                    // {min,} shorthand: max defaults to 255
+                    t.next()?; // consume '}'
+                    quantifier = PathQuantifier::Range { min, max: 255 };
+                } else {
+                    let max_str = t.next()?;
+                    let max: u8 = max_str
+                        .parse()
+                        .map_err(|_| SqlError::Parse(format!("Invalid max depth: {max_str}")))?;
+                    t.expect("}")?;
+                    if min > max {
+                        return Err(SqlError::Parse(format!(
+                            "Invalid path quantifier: min ({min}) > max ({max})"
+                        )));
+                    }
+                    quantifier = PathQuantifier::Range { min, max };
+                }
             }
-            quantifier = PathQuantifier::Range { min, max };
         }
         _ => {}
     }

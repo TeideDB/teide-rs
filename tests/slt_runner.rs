@@ -296,3 +296,8 @@ fn slt_pgq_ddl_ext() {
 fn slt_pgq_bidir() {
     run_slt("tests/slt/pgq_bidir.slt");
 }
+
+#[test]
+fn slt_pgq_quantifiers() {
+    run_slt("tests/slt/pgq_quantifiers.slt");
+}
