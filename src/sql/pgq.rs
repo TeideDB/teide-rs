@@ -1165,15 +1165,33 @@ fn plan_multi_hop_fixed(
         });
     }
 
-    // Detect cyclic variable binding: first and last node share the same variable name
+    // Detect cyclic variable binding: first and last node share the same variable name.
+    // Cyclic patterns require special handling in wco_join (a closing edge) which is
+    // not yet implemented — reject for now (handled by Task 4 / plan_multi_hop_variable).
     let is_cyclic = match (&nodes[0].variable, &nodes[nodes.len() - 1].variable) {
         (Some(a), Some(b)) => a == b,
         _ => false,
     };
+    if is_cyclic {
+        return Err(SqlError::Plan(
+            "Cyclic variable binding in fixed-hop multi-edge patterns is not yet supported. \
+             Use variable-length patterns for cycles.".into(),
+        ));
+    }
+
+    // Reject WHERE filters on intermediate/destination nodes — not yet supported.
+    for node in &nodes[1..] {
+        if node.filter.is_some() {
+            return Err(SqlError::Plan(
+                "WHERE filters on intermediate or destination nodes are not yet supported \
+                 in multi-hop patterns. Use a WHERE clause in the outer SELECT instead.".into(),
+            ));
+        }
+    }
 
     // n_vars: number of distinct node positions
     let n_nodes = nodes.len();
-    let n_vars = if is_cyclic { n_nodes - 1 } else { n_nodes };
+    let n_vars = n_nodes;
 
     // Build the wco_join Rel references.
     // For a chain pattern, rel[i] connects var i -> var i+1 (as the C LFTJ expects).
@@ -1287,7 +1305,11 @@ fn plan_multi_hop_fixed(
         // For each row in wco_result, check if the source node's column matches the filter value
         let mut mask = Vec::with_capacity(nrows);
         for row in 0..nrows {
-            let node_row = node_ids[0][row] as usize;
+            let val = node_ids[0][row];
+            if val < 0 {
+                return Err(SqlError::Plan(format!("Negative node index {val} for _v0 at row {row}")));
+            }
+            let node_row = val as usize;
             let matches = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
                 let s = value[1..value.len() - 1].replace("''", "'");
                 src_table
@@ -1397,7 +1419,13 @@ fn plan_multi_hop_fixed(
             if i > 0 {
                 csv.push(',');
             }
-            let node_row = node_ids[spec.var_idx][row] as usize;
+            let val = node_ids[spec.var_idx][row];
+            if val < 0 {
+                return Err(SqlError::Plan(format!(
+                    "Negative node index {} for _v{} at row {}", val, spec.var_idx, row
+                )));
+            }
+            let node_row = val as usize;
             let vtable = session.tables.get(&spec.table_name).ok_or_else(|| {
                 SqlError::Plan(format!("Table '{}' not found", spec.table_name))
             })?;
