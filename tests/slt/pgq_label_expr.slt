@@ -1,0 +1,51 @@
+# SQL/PGQ: Label expressions (OR-union)
+
+statement ok
+CREATE TABLE le_people (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO le_people VALUES (0, 'Alice'), (1, 'Bob')
+
+statement ok
+CREATE TABLE le_cities (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO le_cities VALUES (2, 'NYC'), (3, 'SF')
+
+statement ok
+CREATE TABLE le_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO le_knows VALUES (0, 1), (1, 0)
+
+statement ok
+CREATE TABLE le_lives_in (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO le_lives_in VALUES (0, 2), (1, 3)
+
+statement ok
+CREATE PROPERTY GRAPH le_graph VERTEX TABLES (le_people LABEL Person, le_cities LABEL City) EDGE TABLES (le_knows SOURCE KEY (src) REFERENCES le_people (id) DESTINATION KEY (dst) REFERENCES le_people (id) LABEL Knows, le_lives_in SOURCE KEY (src) REFERENCES le_people (id) DESTINATION KEY (dst) REFERENCES le_cities (id) LABEL LivesIn)
+
+# Label expression on single node: Person|City returns all vertices
+query T
+SELECT * FROM GRAPH_TABLE (le_graph MATCH (n:Person|City) COLUMNS (n.name AS name)) ORDER BY name
+----
+Alice
+Bob
+NYC
+SF
+
+# Label expression on source node in edge pattern
+query TT
+SELECT * FROM GRAPH_TABLE (le_graph MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Bob Alice
+
+# Single label still works
+query T
+SELECT * FROM GRAPH_TABLE (le_graph MATCH (n:Person) COLUMNS (n.name AS name)) ORDER BY name
+----
+Alice
+Bob

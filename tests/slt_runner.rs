@@ -316,3 +316,8 @@ fn slt_pgq_multi_match() {
 fn slt_pgq_describe() {
     run_slt("tests/slt/pgq_describe.slt");
 }
+
+#[test]
+fn slt_pgq_label_expr() {
+    run_slt("tests/slt/pgq_label_expr.slt");
+}

@@ -372,7 +372,7 @@ fn tokenize(sql: &str) -> Vec<String> {
                 // Store unquoted content - callers compare case-insensitively
                 tokens.push(s);
             }
-            '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '/' | '.' => {
+            '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | ':' | '=' | '-' | '<' | '>' | '+' | '*' | '/' | '.' | '|' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -884,18 +884,25 @@ fn parse_single_path(t: &mut Tokens) -> Result<PathPattern, SqlError> {
 }
 
 /// Parse a node pattern: (var:Label WHERE condition)
+/// Supports label expressions with pipe: (var:Label1|Label2)
 fn parse_node_pattern(t: &mut Tokens) -> Result<NodePattern, SqlError> {
     t.expect("(")?;
 
     let mut variable = None;
-    let mut label = None;
+    let mut label_list: Option<Vec<String>> = None;
     let mut filter = None;
 
     if t.peek() != Some(")") {
         let first = t.next()?;
         if first == ":" {
             // :Label (no variable)
-            label = Some(t.next()?.to_lowercase());
+            let first_label = t.next()?.to_lowercase();
+            let mut labels = vec![first_label];
+            while t.peek() == Some("|") {
+                t.next()?; // consume '|'
+                labels.push(t.next()?.to_lowercase());
+            }
+            label_list = Some(labels);
         } else if t.peek() == Some(":") {
             // var:Label
             variable = Some(first.to_lowercase());
@@ -903,7 +910,13 @@ fn parse_node_pattern(t: &mut Tokens) -> Result<NodePattern, SqlError> {
             if t.peek() != Some(")")
                 && t.peek().map(|s| s.to_uppercase()) != Some("WHERE".into())
             {
-                label = Some(t.next()?.to_lowercase());
+                let first_label = t.next()?.to_lowercase();
+                let mut labels = vec![first_label];
+                while t.peek() == Some("|") {
+                    t.next()?; // consume '|'
+                    labels.push(t.next()?.to_lowercase());
+                }
+                label_list = Some(labels);
             }
         } else {
             // Just a variable name
@@ -944,7 +957,7 @@ fn parse_node_pattern(t: &mut Tokens) -> Result<NodePattern, SqlError> {
 
     Ok(NodePattern {
         variable,
-        label,
+        labels: label_list,
         filter,
     })
 }

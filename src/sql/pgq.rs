@@ -210,11 +210,14 @@ pub(crate) enum PathQuantifier {
 }
 
 /// A node pattern: (var:Label WHERE condition)
+/// Labels support OR-union via pipe syntax: (n:Person|Company)
 #[derive(Debug, Clone)]
 pub(crate) struct NodePattern {
     #[allow(dead_code)]
     pub variable: Option<String>,
-    pub label: Option<String>,
+    /// One or more vertex labels (OR-union). `None` means unspecified (use default).
+    /// Single-element vec is the common case; multiple elements mean label expression.
+    pub labels: Option<Vec<String>>,
     pub filter: Option<String>, // raw SQL predicate text
 }
 
@@ -714,11 +717,11 @@ fn merge_patterns(patterns: &[PathPattern]) -> Result<PathPattern, SqlError> {
             ));
         }
 
-        // Merge labels: if both specify a label, they must agree.
-        let merged_label = match (&last_node.label, &first_node.label) {
+        // Merge labels: if both specify labels, they must agree.
+        let merged_labels = match (&last_node.labels, &first_node.labels) {
             (Some(a), Some(b)) if a != b => {
                 return Err(SqlError::Plan(format!(
-                    "Conflicting labels on shared variable '{}': '{}' vs '{}'",
+                    "Conflicting labels on shared variable '{}': '{:?}' vs '{:?}'",
                     last_node.variable.as_deref().unwrap_or("?"),
                     a,
                     b
@@ -738,9 +741,9 @@ fn merge_patterns(patterns: &[PathPattern]) -> Result<PathPattern, SqlError> {
         };
 
         // Update the junction node in the merged pattern with the combined
-        // label and filter.
+        // labels and filter.
         let junction = merged.nodes.last_mut().unwrap();
-        junction.label = merged_label;
+        junction.labels = merged_labels;
         junction.filter = merged_filter;
 
         // Append the new pattern's edges and remaining nodes (skip the
@@ -750,6 +753,94 @@ fn merge_patterns(patterns: &[PathPattern]) -> Result<PathPattern, SqlError> {
     }
 
     Ok(merged)
+}
+
+/// Check whether any node in a pattern has multiple labels (label expression).
+fn has_multi_label_nodes(pattern: &PathPattern) -> bool {
+    pattern.nodes.iter().any(|n| {
+        n.labels.as_ref().map_or(false, |v| v.len() > 1)
+    })
+}
+
+/// Expand a pattern with multi-label nodes into all single-label combinations.
+/// For example, if node 0 has labels [A, B] and node 1 has labels [C, D],
+/// this produces 4 patterns: (A,C), (A,D), (B,C), (B,D).
+fn expand_multi_label_patterns(pattern: &PathPattern) -> Vec<PathPattern> {
+    // Collect per-node label lists. Nodes without labels or with a single
+    // label produce a one-element list of None or Some(single).
+    let per_node: Vec<Vec<Option<Vec<String>>>> = pattern.nodes.iter().map(|n| {
+        match &n.labels {
+            Some(labels) if labels.len() > 1 => {
+                labels.iter().map(|l| Some(vec![l.clone()])).collect()
+            }
+            other => vec![other.clone()],
+        }
+    }).collect();
+
+    // Cartesian product of all per-node label alternatives.
+    let mut combos: Vec<Vec<Option<Vec<String>>>> = vec![vec![]];
+    for node_alts in &per_node {
+        let mut new_combos = Vec::new();
+        for existing in &combos {
+            for alt in node_alts {
+                let mut combo = existing.clone();
+                combo.push(alt.clone());
+                new_combos.push(combo);
+            }
+        }
+        combos = new_combos;
+    }
+
+    // Build one pattern per combination.
+    combos.into_iter().map(|combo| {
+        let mut p = pattern.clone();
+        for (i, label_opt) in combo.into_iter().enumerate() {
+            p.nodes[i].labels = label_opt;
+        }
+        p
+    }).collect()
+}
+
+/// Union multiple result tables into a single table via CSV reconstruction.
+/// All component tables must have the same column structure.
+fn union_result_tables(
+    session: &Session,
+    results: Vec<(Table, Vec<String>)>,
+) -> Result<(Table, Vec<String>), SqlError> {
+    if results.is_empty() {
+        return Err(SqlError::Plan("No results to union".into()));
+    }
+    if results.len() == 1 {
+        return Ok(results.into_iter().next().unwrap());
+    }
+
+    let col_names = results[0].1.clone();
+    let ncols = col_names.len();
+
+    // Build CSV header
+    let mut csv = col_names
+        .iter()
+        .map(|n| csv_quote(n))
+        .collect::<Vec<_>>()
+        .join(",");
+    csv.push('\n');
+
+    // Append rows from each result table
+    for (table, _) in &results {
+        let nrows = checked_nrows(table)?;
+        for row in 0..nrows {
+            for col in 0..ncols {
+                if col > 0 {
+                    csv.push(',');
+                }
+                csv.push_str(&get_cell_string(table, col, row)?);
+            }
+            csv.push('\n');
+        }
+    }
+
+    let result = csv_to_table(session, &csv, &col_names)?;
+    Ok((result, col_names))
 }
 
 /// Plan and execute a GRAPH_TABLE expression.
@@ -779,6 +870,46 @@ pub(crate) fn plan_graph_table(
     } else {
         &match_clause.patterns[0]
     };
+
+    // If any node has a multi-label expression (e.g. Person|Company), expand
+    // into separate single-label patterns and union the results.
+    if has_multi_label_nodes(pattern) {
+        let expanded = expand_multi_label_patterns(pattern);
+        let mut results = Vec::with_capacity(expanded.len());
+        for variant in &expanded {
+            // Build a temporary GraphTableExpr with the single-label variant pattern.
+            let variant_expr = GraphTableExpr {
+                graph_name: expr.graph_name.clone(),
+                match_clause: MatchClause {
+                    path_variable: match_clause.path_variable.clone(),
+                    mode: match_clause.mode,
+                    patterns: vec![variant.clone()],
+                },
+                columns: expr.columns.clone(),
+            };
+            match plan_graph_table(session, &variant_expr) {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    // If a specific label combination fails (e.g. edge doesn't
+                    // connect to that label), skip it rather than failing the
+                    // entire query.  This is expected for heterogeneous graphs
+                    // where not all labels participate in all edge types.
+                    if e.to_string().contains("not found")
+                        || e.to_string().contains("expects")
+                    {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        if results.is_empty() {
+            return Err(SqlError::Plan(
+                "No matching label combination found for multi-label pattern".into(),
+            ));
+        }
+        return union_result_tables(session, results);
+    }
 
     // Check for variable-length edge first.
     let is_var_length = pattern.edges.len() == 1
@@ -1074,12 +1205,17 @@ fn build_rowid_table(session: &Session, ids: &[i64]) -> Result<Table, SqlError> 
 }
 
 /// Resolve which vertex label a node pattern refers to.
+/// For multi-label nodes this returns the first label; multi-label union is
+/// handled at a higher level by expanding into separate single-label patterns.
 fn resolve_node_label<'a>(
     node: &NodePattern,
     default_table: &str,
     graph: &'a PropertyGraph,
 ) -> Result<&'a VertexLabel, SqlError> {
-    if let Some(label) = &node.label {
+    if let Some(labels) = &node.labels {
+        let label = labels.first().ok_or_else(|| {
+            SqlError::Plan("Empty label list in node pattern".into())
+        })?;
         graph.vertex_labels.get(label).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
         })
@@ -1108,7 +1244,8 @@ fn validate_node_table_for_edge(
     resolved_key_col: Option<&str>,
     expected_ref_col: Option<&str>,
 ) -> Result<(), SqlError> {
-    if let Some(label) = &node.label {
+    if let Some(labels) = &node.labels {
+        let label = labels.first().map(|s| s.as_str()).unwrap_or("?");
         if resolved_table != expected_table {
             return Err(SqlError::Plan(format!(
                 "Node label '{label}' resolves to table '{resolved_table}', but edge \
@@ -2378,8 +2515,8 @@ fn plan_multi_hop_variable(
 
     // Build per-position vertex label names for PROPERTIES visibility checks.
     let pos_label_names: Vec<String> = nodes.iter().enumerate().map(|(i, node)| {
-        if let Some(label) = &node.label {
-            label.clone()
+        if let Some(labels) = &node.labels {
+            labels.first().cloned().unwrap_or_default()
         } else if i < pos_table_names.len() {
             graph.vertex_labels.values()
                 .find(|vl| vl.table_name == pos_table_names[i])
@@ -2857,8 +2994,8 @@ fn plan_multi_hop_fixed(
 
     // Build per-node-position vertex label names for PROPERTIES visibility checks.
     let var_label_names: Vec<String> = nodes.iter().enumerate().map(|(i, node)| {
-        if let Some(label) = &node.label {
-            label.clone()
+        if let Some(labels) = &node.labels {
+            labels.first().cloned().unwrap_or_default()
         } else if i < var_table_names.len() {
             // Find the label name from the graph that matches this table
             graph.vertex_labels.values()
@@ -3519,7 +3656,8 @@ fn plan_shortest_path(
     } else {
         &stored_rel.edge_label.dst_ref_col
     };
-    if let Some(label) = &src_node.label {
+    if let Some(labels) = &src_node.labels {
+        let label = labels.first().map(|s| s.as_str()).unwrap_or("?");
         let src_vl = graph.vertex_labels.get(label).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
         })?;
@@ -3538,7 +3676,8 @@ fn plan_shortest_path(
             )));
         }
     }
-    if let Some(label) = &dst_node.label {
+    if let Some(labels) = &dst_node.labels {
+        let label = labels.first().map(|s| s.as_str()).unwrap_or("?");
         let dst_vl = graph.vertex_labels.get(label).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
         })?;
@@ -4264,8 +4403,11 @@ fn plan_algorithm_query(
     }
 
     // Resolve vertex label for the node
-    let vertex_label = if let Some(label) = &node.label {
-        graph.vertex_labels.get(label).ok_or_else(|| {
+    let vertex_label = if let Some(labels) = &node.labels {
+        let label = labels.first().ok_or_else(|| {
+            SqlError::Plan("Empty label list in node pattern".into())
+        })?;
+        graph.vertex_labels.get(label.as_str()).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
         })?
     } else if graph.vertex_labels.len() == 1 {
