@@ -165,9 +165,10 @@ pub(crate) struct PropertyGraph {
 /// Direction of an edge in a MATCH pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MatchDirection {
-    Forward,    // ->
-    Reverse,    // <-
-    Undirected, // - (either direction)
+    Forward,       // ->
+    Reverse,       // <-
+    Undirected,    // - (either direction)
+    Bidirectional, // <-..-> (edge exists in both directions)
 }
 
 /// Quantifier on an edge pattern.
@@ -717,21 +718,21 @@ fn plan_single_hop(
         SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
     })?;
 
-    // Undirected traversals on heterogeneous edges (different src/dst tables)
-    // would mix node IDs from different tables in the _dst column, producing
-    // wrong results when project_columns looks up rows in dst_table.
-    if edge.direction == MatchDirection::Undirected
+    // Undirected/bidirectional traversals on heterogeneous edges (different src/dst
+    // tables) would mix node IDs from different tables in the _dst column.
+    if (edge.direction == MatchDirection::Undirected
+        || edge.direction == MatchDirection::Bidirectional)
         && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
     {
         return Err(SqlError::Plan(
-            "Undirected traversals are not supported on edges with different source and \
+            "Undirected/bidirectional traversals are not supported on edges with different source and \
              destination vertex tables (heterogeneous graphs). Use a directed pattern instead."
                 .into(),
         ));
     }
 
     let direction: u8 = match edge.direction {
-        MatchDirection::Forward => 0,
+        MatchDirection::Forward | MatchDirection::Bidirectional => 0,
         MatchDirection::Reverse => 1,
         MatchDirection::Undirected => 2,
     };
@@ -753,6 +754,14 @@ fn plan_single_hop(
     let expanded = g.expand(src_ids, &stored_rel.rel, direction)?;
     let expand_result = g.execute(expanded)?;
 
+    // For bidirectional edges, filter to keep only (src, dst) pairs where the
+    // reverse edge (dst -> src) also exists.
+    let expand_result = if edge.direction == MatchDirection::Bidirectional {
+        filter_bidirectional(session, &expand_result, &stored_rel.rel)?
+    } else {
+        expand_result
+    };
+
     // Post-filter destination node
     let expand_result = if let Some(filter_text) = &dst_node.filter {
         post_filter_expand_result(session, &expand_result, filter_text, dst_node, &dst_stored.table, false)?
@@ -773,6 +782,73 @@ fn plan_single_hop(
         graph,
         is_reverse,
     )
+}
+
+/// Filter a forward expand result for bidirectional edges: keep only (src, dst)
+/// pairs where the reverse edge (dst -> src) also exists.
+fn filter_bidirectional(
+    session: &Session,
+    expand_result: &Table,
+    rel: &Rel,
+) -> Result<Table, SqlError> {
+    use std::collections::HashSet;
+
+    let nrows = checked_nrows(expand_result)?;
+    let src_col_idx = find_col_idx(expand_result, "_src")
+        .ok_or_else(|| SqlError::Plan("expand result missing _src column".into()))?;
+    let dst_col_idx = find_col_idx(expand_result, "_dst")
+        .ok_or_else(|| SqlError::Plan("expand result missing _dst column".into()))?;
+
+    // Collect unique dst values and expand forward from them to find all (dst -> ?) edges
+    let mut dst_values: Vec<i64> = Vec::new();
+    let mut dst_set: HashSet<i64> = HashSet::new();
+    for row in 0..nrows {
+        if let Some(dst) = expand_result.get_i64(dst_col_idx, row) {
+            if dst >= 0 && dst_set.insert(dst) {
+                dst_values.push(dst);
+            }
+        }
+    }
+
+    // Expand forward from dst nodes to find reverse edges (dst -> src edges)
+    let dst_rowid_table = build_rowid_table(session, &dst_values)?;
+    let mut g = session.ctx.graph(&dst_rowid_table)?;
+    let dst_ids = g.scan("_rowid")?;
+    let reverse_expanded = g.expand(dst_ids, rel, 0)?; // forward expand from dst nodes
+    let reverse_result = g.execute(reverse_expanded)?;
+
+    // Build a set of (original_dst, target) from the reverse expansion
+    // If (dst, src) exists in this set, then the edge dst->src exists
+    let reverse_nrows = checked_nrows(&reverse_result)?;
+    let rev_src_col = find_col_idx(&reverse_result, "_src")
+        .ok_or_else(|| SqlError::Plan("reverse expand missing _src column".into()))?;
+    let rev_dst_col = find_col_idx(&reverse_result, "_dst")
+        .ok_or_else(|| SqlError::Plan("reverse expand missing _dst column".into()))?;
+
+    let mut reverse_edges: HashSet<(i64, i64)> = HashSet::new();
+    for row in 0..reverse_nrows {
+        if let (Some(s), Some(d)) = (
+            reverse_result.get_i64(rev_src_col, row),
+            reverse_result.get_i64(rev_dst_col, row),
+        ) {
+            reverse_edges.insert((s, d));
+        }
+    }
+
+    // Filter original pairs: keep (src, dst) only if (dst, src) exists in reverse_edges
+    let mut csv = String::from("_src,_dst\n");
+    for row in 0..nrows {
+        if let (Some(src), Some(dst)) = (
+            expand_result.get_i64(src_col_idx, row),
+            expand_result.get_i64(dst_col_idx, row),
+        ) {
+            if reverse_edges.contains(&(dst, src)) {
+                csv.push_str(&format!("{src},{dst}\n"));
+            }
+        }
+    }
+
+    csv_to_table(session, &csv, &["_src".to_string(), "_dst".to_string()])
 }
 
 /// Post-filter an expand result by evaluating a WHERE filter on the destination
@@ -2066,6 +2142,11 @@ fn plan_multi_hop_variable(
             MatchDirection::Forward => 0,
             MatchDirection::Reverse => 1,
             MatchDirection::Undirected => 2,
+            MatchDirection::Bidirectional => {
+                return Err(SqlError::Plan(
+                    "Bidirectional edges (<-[:]->)  are not supported with variable-length paths".into(),
+                ));
+            }
         };
 
         let (min_depth, max_depth) = match edge.quantifier {
@@ -2822,6 +2903,11 @@ fn plan_var_length(
         MatchDirection::Forward => 0,
         MatchDirection::Reverse => 1,
         MatchDirection::Undirected => 2,
+        MatchDirection::Bidirectional => {
+            return Err(SqlError::Plan(
+                "Bidirectional edges (<-[:]->)  are not supported with variable-length paths".into(),
+            ));
+        }
     };
 
     let (min_depth, max_depth) = match edge.quantifier {
@@ -3347,6 +3433,11 @@ fn plan_shortest_path(
         MatchDirection::Forward => 0,
         MatchDirection::Reverse => 1,
         MatchDirection::Undirected => 2,
+        MatchDirection::Bidirectional => {
+            return Err(SqlError::Plan(
+                "Bidirectional edges (<-[:]->)  are not supported with shortest path queries".into(),
+            ));
+        }
     };
 
     // BFS over the CSR to find the shortest qualifying path

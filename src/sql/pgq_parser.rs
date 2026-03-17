@@ -930,9 +930,10 @@ fn parse_edge_and_node(
     let direction = if t.peek() == Some(">") {
         t.next()?; // consume '>'
         if starts_reverse {
-            return Err(SqlError::Parse("Invalid edge direction: <-..->".into()));
+            MatchDirection::Bidirectional
+        } else {
+            MatchDirection::Forward
         }
-        MatchDirection::Forward
     } else if starts_reverse {
         MatchDirection::Reverse
     } else {

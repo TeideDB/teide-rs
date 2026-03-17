@@ -1,0 +1,23 @@
+# SQL/PGQ: Bidirectional edges
+
+statement ok
+CREATE TABLE bd_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO bd_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')
+
+statement ok
+CREATE TABLE bd_knows (src INTEGER, dst INTEGER)
+
+# Alice knows Bob (mutual), Alice knows Carol (one-way)
+statement ok
+INSERT INTO bd_knows VALUES (0, 1), (1, 0), (0, 2)
+
+statement ok
+CREATE PROPERTY GRAPH bd_graph VERTEX TABLES (bd_persons LABEL Person) EDGE TABLES (bd_knows SOURCE KEY (src) REFERENCES bd_persons (id) DESTINATION KEY (dst) REFERENCES bd_persons (id) LABEL Knows)
+
+# Bidirectional: Alice <-> Bob (mutual), but NOT Alice <-> Carol (one-way only)
+query TT
+SELECT * FROM GRAPH_TABLE (bd_graph MATCH (a:Person WHERE a.name = 'Alice')<-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Bob
