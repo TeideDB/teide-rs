@@ -120,7 +120,6 @@ pub(crate) struct VertexLabel {
     pub table_name: String,
     #[allow(dead_code)]
     pub label: String,
-    #[allow(dead_code)]
     pub key_column: String,
     pub user_to_row: HashMap<KeyValue, usize>,
     pub row_to_user: Vec<KeyValue>,
@@ -1090,13 +1089,28 @@ fn csv_quote(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// A scalar value produced during filter expression evaluation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum ScalarValue {
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
     Null,
+}
+
+impl PartialEq for ScalarValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ScalarValue::Int(a), ScalarValue::Int(b)) => a == b,
+            (ScalarValue::Float(a), ScalarValue::Float(b)) => a == b,
+            (ScalarValue::Int(a), ScalarValue::Float(b)) => (*a as f64) == *b,
+            (ScalarValue::Float(a), ScalarValue::Int(b)) => *a == (*b as f64),
+            (ScalarValue::Str(a), ScalarValue::Str(b)) => a == b,
+            (ScalarValue::Bool(a), ScalarValue::Bool(b)) => a == b,
+            (ScalarValue::Null, ScalarValue::Null) => true,
+            _ => false,
+        }
+    }
 }
 
 impl PartialOrd for ScalarValue {
@@ -2805,7 +2819,11 @@ fn reconstruct_shortest_path(
             let mut cur_node = dst_id;
             let mut cur_depth = depth;
             while cur_depth > 0 {
-                let prev = pred_map[&(cur_node, cur_depth)];
+                let prev = *pred_map.get(&(cur_node, cur_depth)).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "BFS path reconstruction failed: no predecessor for node {cur_node} at depth {cur_depth}"
+                    ))
+                })?;
                 path.push(prev);
                 cur_node = prev;
                 cur_depth -= 1;
@@ -3174,12 +3192,6 @@ fn execute_dijkstra_algorithm(
         SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
     })?;
 
-    let user_src_id: i64 = args[1].parse().map_err(|_| {
-        SqlError::Plan(format!("Invalid source node ID: '{}'", args[1]))
-    })?;
-    let user_dst_id: i64 = args[2].parse().map_err(|_| {
-        SqlError::Plan(format!("Invalid destination node ID: '{}'", args[2]))
-    })?;
     // Strip surrounding quotes from weight column name
     let weight_col = args[3].trim_matches('\'').trim_matches('"');
 
@@ -3201,13 +3213,26 @@ fn execute_dijkstra_algorithm(
         .ok_or_else(|| {
             SqlError::Plan(format!("No vertex label found for table '{src_table_name}'"))
         })?;
-    let src_key = KeyValue::Int(user_src_id);
-    let dst_key = KeyValue::Int(user_dst_id);
+    // Determine key type from vertex label and construct appropriate KeyValue
+    let uses_string_keys = src_vl.row_to_user.first()
+        .map(|k| matches!(k, KeyValue::Str(_)))
+        .unwrap_or(false);
+    let (src_key, dst_key) = if uses_string_keys {
+        (KeyValue::Str(args[1].clone()), KeyValue::Str(args[2].clone()))
+    } else {
+        let src_id: i64 = args[1].parse().map_err(|_| {
+            SqlError::Plan(format!("Invalid source node ID: '{}' (expected integer)", args[1]))
+        })?;
+        let dst_id: i64 = args[2].parse().map_err(|_| {
+            SqlError::Plan(format!("Invalid destination node ID: '{}' (expected integer)", args[2]))
+        })?;
+        (KeyValue::Int(src_id), KeyValue::Int(dst_id))
+    };
     let internal_src = *src_vl.user_to_row.get(&src_key).ok_or_else(|| {
-        SqlError::Plan(format!("Source node ID {user_src_id} not found in vertex table '{src_table_name}'"))
+        SqlError::Plan(format!("Source node '{}' not found in vertex table '{src_table_name}'", args[1]))
     })? as i64;
     let internal_dst = *src_vl.user_to_row.get(&dst_key).ok_or_else(|| {
-        SqlError::Plan(format!("Destination node ID {user_dst_id} not found in vertex table '{src_table_name}'"))
+        SqlError::Plan(format!("Destination node '{}' not found in vertex table '{src_table_name}'", args[2]))
     })? as i64;
 
     let g = session.ctx.graph(src_table)?;
