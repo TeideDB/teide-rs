@@ -80,6 +80,13 @@ impl sqllogictest::DB for TeideDb {
 fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
     let typ = table.col_type(col);
     match typ {
+        0 => {
+            // TD_LIST: format as [elem1, elem2, ...]
+            match table.format_list(col, row) {
+                Some(s) => s,
+                None => "NULL".to_string(),
+            }
+        }
         4..=6 => match table.get_i64(col, row) {
             Some(v) => format!("{v}"),
             None => "NULL".to_string(),

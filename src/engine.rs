@@ -1114,6 +1114,86 @@ impl Table {
             std::str::from_utf8(slice).ok().map(|s| s.to_owned())
         }
     }
+
+    /// Get the raw `td_t*` pointer for a LIST cell at (`col`, `row`).
+    ///
+    /// A LIST column (type == 0) stores `td_t*` pointers in its data area.
+    /// Each element is a sub-list accessible via `td_list_get`.
+    /// Returns `None` if the column is not a LIST, or `row` is out of range,
+    /// or the element pointer is null.
+    pub fn get_list_raw(&self, col: usize, row: usize) -> Option<*mut ffi::td_t> {
+        let vec = self.get_col_idx(col as i64)?;
+        let t = unsafe { ffi::td_type(vec) };
+        if t != ffi::TD_LIST {
+            return None;
+        }
+        let len = unsafe { ffi::td_len(vec) } as usize;
+        if row >= len {
+            return None;
+        }
+        unsafe {
+            let elem = ffi::td_list_get(vec, row as i64);
+            if elem.is_null() || ffi::td_is_err(elem) {
+                None
+            } else {
+                Some(elem)
+            }
+        }
+    }
+
+    /// Format a LIST cell at (`col`, `row`) as a string like `[1, 2, 3]`.
+    ///
+    /// Each element is formatted according to its type tag:
+    /// - Atoms with negative type are read via `val.i64_` / `val.f64_`
+    /// - Returns `None` if the cell is not a LIST or row is out of range.
+    pub fn format_list(&self, col: usize, row: usize) -> Option<String> {
+        let list_ptr = self.get_list_raw(col, row)?;
+        let list_len = unsafe { ffi::td_len(list_ptr) } as i64;
+        let mut parts = Vec::with_capacity(list_len as usize);
+        for i in 0..list_len {
+            let elem = unsafe { ffi::td_list_get(list_ptr, i) };
+            if elem.is_null() || ffi::td_is_err(elem) {
+                parts.push("NULL".to_string());
+            } else {
+                let elem_type = unsafe { ffi::td_type(elem) };
+                let s = match elem_type {
+                    // Atom types (negative type tags)
+                    ffi::TD_ATOM_I64 | ffi::TD_ATOM_I32 | ffi::TD_ATOM_I16
+                    | ffi::TD_ATOM_DATE | ffi::TD_ATOM_TIME | ffi::TD_ATOM_TIMESTAMP => {
+                        let v = unsafe { (*elem).val.i64_ };
+                        format!("{v}")
+                    }
+                    ffi::TD_ATOM_F64 => {
+                        let v = unsafe { (*elem).val.f64_ };
+                        format!("{v}")
+                    }
+                    ffi::TD_ATOM_BOOL => {
+                        let v = unsafe { (*elem).val.b8 };
+                        if v != 0 { "true".to_string() } else { "false".to_string() }
+                    }
+                    ffi::TD_ATOM_SYM => {
+                        let sym_id = unsafe { (*elem).val.i64_ };
+                        let atom = unsafe { ffi::td_sym_str(sym_id) };
+                        if atom.is_null() {
+                            "NULL".to_string()
+                        } else {
+                            unsafe {
+                                let ptr = ffi::td_str_ptr(atom);
+                                let slen = ffi::td_str_len(atom);
+                                let slice = std::slice::from_raw_parts(ptr as *const u8, slen);
+                                std::str::from_utf8(slice)
+                                    .unwrap_or("?")
+                                    .to_owned()
+                            }
+                        }
+                    }
+                    _ => format!("?<{elem_type}>"),
+                };
+                parts.push(s);
+            }
+        }
+        Some(format!("[{}]", parts.join(", ")))
+    }
 }
 
 impl Drop for Table {
@@ -2471,6 +2551,65 @@ pub fn ffi_error_from_ptr(p: *mut ffi::td_t) -> Option<Error> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// List API — safe wrappers for td_list_* functions
+// ---------------------------------------------------------------------------
+
+/// Create a new empty LIST with the given initial capacity.
+///
+/// The returned raw pointer is owned by the caller and must eventually be
+/// released via `td_release` (or passed to a function that takes ownership).
+///
+/// # Safety
+/// The engine runtime must be initialized (a `Context` must be alive).
+pub unsafe fn list_new(capacity: i64) -> Result<*mut ffi::td_t> {
+    let p = unsafe { ffi::td_list_new(capacity) };
+    check_ptr(p)
+}
+
+/// Append an i64 value to a LIST. The value is wrapped in a `td_i64` atom.
+///
+/// Returns the (possibly reallocated) list pointer.
+///
+/// # Safety
+/// `list` must be a valid LIST pointer from the current engine runtime.
+pub unsafe fn list_append_i64(list: *mut ffi::td_t, value: i64) -> Result<*mut ffi::td_t> {
+    let atom = unsafe { ffi::td_i64(value) };
+    let atom = check_ptr(atom)?;
+    let result = unsafe { ffi::td_list_append(list, atom) };
+    check_ptr(result)
+}
+
+/// Read the length of a LIST.
+///
+/// # Safety
+/// `list` must be a valid LIST pointer from the current engine runtime.
+pub unsafe fn list_len(list: *mut ffi::td_t) -> i64 {
+    unsafe { ffi::td_len(list) }
+}
+
+/// Read an i64 value from a LIST element at `idx`.
+///
+/// Returns `None` if the element is null, is an error sentinel, or is not
+/// an integer atom.
+///
+/// # Safety
+/// `list` must be a valid LIST pointer and `idx` must be in range.
+pub unsafe fn list_get_i64(list: *mut ffi::td_t, idx: i64) -> Option<i64> {
+    let elem = unsafe { ffi::td_list_get(list, idx) };
+    if elem.is_null() || ffi::td_is_err(elem) {
+        return None;
+    }
+    let t = unsafe { ffi::td_type(elem) };
+    match t {
+        ffi::TD_ATOM_I64 | ffi::TD_ATOM_I32 | ffi::TD_ATOM_I16
+        | ffi::TD_ATOM_DATE | ffi::TD_ATOM_TIME | ffi::TD_ATOM_TIMESTAMP => {
+            Some(unsafe { (*elem).val.i64_ })
+        }
+        _ => None,
+    }
+}
+
 // Re-export EXTRACT field constants
 pub mod extract_field {
     pub const YEAR: i64 = super::ffi::TD_EXTRACT_YEAR;
@@ -2513,6 +2652,7 @@ pub mod window_func {
 
 // Re-export type constants
 pub mod types {
+    pub const LIST: i8 = super::ffi::TD_LIST;
     pub const BOOL: i8 = super::ffi::TD_BOOL;
     pub const I32: i8 = super::ffi::TD_I32;
     pub const I64: i8 = super::ffi::TD_I64;

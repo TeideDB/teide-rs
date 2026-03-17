@@ -2064,3 +2064,94 @@ fn test_rel_neighbors() {
     assert_eq!(rel2.n_nodes(0), 3); // forward: n_src_nodes
     assert_eq!(rel2.n_nodes(1), 4); // reverse: n_dst_nodes
 }
+
+// ---------------------------------------------------------------------------
+// LIST column type
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_list_i64_roundtrip() {
+    let _guard = lock();
+    let _ctx = Context::new().unwrap();
+
+    // Build a list of i64 values: [10, 20, 30]
+    unsafe {
+        let list = teide::list_new(4).expect("list_new failed");
+
+        // Verify empty list has length 0
+        assert_eq!(teide::list_len(list), 0);
+
+        // Append values
+        let list = teide::list_append_i64(list, 10).expect("append 10");
+        let list = teide::list_append_i64(list, 20).expect("append 20");
+        let list = teide::list_append_i64(list, 30).expect("append 30");
+
+        // Verify length
+        assert_eq!(teide::list_len(list), 3);
+
+        // Read values back
+        assert_eq!(teide::list_get_i64(list, 0), Some(10));
+        assert_eq!(teide::list_get_i64(list, 1), Some(20));
+        assert_eq!(teide::list_get_i64(list, 2), Some(30));
+
+        // Clean up
+        ffi::td_release(list);
+    }
+}
+
+#[test]
+fn test_list_in_table() {
+    let _guard = lock();
+    let _ctx = Context::new().unwrap();
+
+    // Build a table with a LIST column containing two rows:
+    // Row 0: [1, 2, 3]
+    // Row 1: [10, 20]
+    //
+    // A LIST column is itself a td_list_t (type=0) whose elements are
+    // per-row sub-lists.
+    unsafe {
+        // Create two sub-lists (one per row)
+        let list0 = teide::list_new(4).unwrap();
+        let list0 = teide::list_append_i64(list0, 1).unwrap();
+        let list0 = teide::list_append_i64(list0, 2).unwrap();
+        let list0 = teide::list_append_i64(list0, 3).unwrap();
+
+        let list1 = teide::list_new(4).unwrap();
+        let list1 = teide::list_append_i64(list1, 10).unwrap();
+        let list1 = teide::list_append_i64(list1, 20).unwrap();
+
+        // Create the outer LIST column: a list-of-lists
+        let col = teide::list_new(2).unwrap();
+        let col = ffi::td_list_append(col, list0);
+        assert!(!col.is_null() && !teide::ffi_is_err(col));
+        let col = ffi::td_list_append(col, list1);
+        assert!(!col.is_null() && !teide::ffi_is_err(col));
+
+        // Build a table with this column
+        let name_id = teide::sym_intern("path").unwrap();
+        let mut tbl = ffi::td_table_new(1);
+        assert!(!tbl.is_null());
+        tbl = ffi::td_table_add_col(tbl, name_id, col);
+        assert!(!tbl.is_null() && !teide::ffi_is_err(tbl));
+
+        let table = Table::from_raw(tbl).unwrap();
+
+        // Verify col_type returns 0 (TD_LIST)
+        assert_eq!(table.col_type(0), 0);
+
+        // Verify format_list
+        assert_eq!(table.format_list(0, 0), Some("[1, 2, 3]".to_string()));
+        assert_eq!(table.format_list(0, 1), Some("[10, 20]".to_string()));
+
+        // Verify get_list_raw + list_get_i64
+        let raw0 = table.get_list_raw(0, 0).unwrap();
+        assert_eq!(teide::list_get_i64(raw0, 0), Some(1));
+        assert_eq!(teide::list_get_i64(raw0, 2), Some(3));
+
+        let raw1 = table.get_list_raw(0, 1).unwrap();
+        assert_eq!(teide::list_len(raw1), 2);
+        assert_eq!(teide::list_get_i64(raw1, 0), Some(10));
+        assert_eq!(teide::list_get_i64(raw1, 1), Some(20));
+    }
+}
