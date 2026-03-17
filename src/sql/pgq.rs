@@ -937,7 +937,7 @@ fn read_key_value(
 ) -> Result<KeyValue, SqlError> {
     let typ = table.col_type(col_idx);
     match typ {
-        ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
+        ffi::TD_U8 | ffi::TD_CHAR | ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
             let v = table.get_i64(col_idx, row).ok_or_else(|| {
                 SqlError::Plan(format!(
                     "NULL value at row {row} in column '{col_name}' of '{table_name}'"
@@ -1316,10 +1316,12 @@ fn read_scalar_from_table(
             Some(v) => Ok(ScalarValue::Bool(v != 0)),
             None => Ok(ScalarValue::Null),
         },
-        ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => match table.get_i64(col_idx, row) {
-            Some(v) => Ok(ScalarValue::Int(v)),
-            None => Ok(ScalarValue::Null),
-        },
+        ffi::TD_U8 | ffi::TD_CHAR | ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
+            match table.get_i64(col_idx, row) {
+                Some(v) => Ok(ScalarValue::Int(v)),
+                None => Ok(ScalarValue::Null),
+            }
+        }
         ffi::TD_F64 | ffi::TD_F32 => match table.get_f64(col_idx, row) {
             Some(v) => Ok(ScalarValue::Float(v)),
             None => Ok(ScalarValue::Null),
@@ -3104,7 +3106,11 @@ fn unescape_sql_string(s: &str) -> String {
     } else {
         return trimmed.to_string();
     };
-    inner.replace("''", "'")
+    if trimmed.starts_with('\'') {
+        inner.replace("''", "'")
+    } else {
+        inner.replace("\"\"", "\"")
+    }
 }
 
 // ---------------------------------------------------------------------------
