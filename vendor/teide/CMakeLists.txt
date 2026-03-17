@@ -1,0 +1,145 @@
+cmake_minimum_required(VERSION 3.15)
+project(teide LANGUAGES C)
+
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+option(TEIDE_PORTABLE "Build portable binary (no -march=native)" OFF)
+option(TEIDE_WERROR "Treat warnings as errors" OFF)
+
+# Collect all source files under src/
+file(GLOB_RECURSE TEIDE_SOURCES CONFIGURE_DEPENDS "src/**/*.c")
+
+# Static library
+add_library(teide_static STATIC ${TEIDE_SOURCES})
+set_target_properties(teide_static PROPERTIES OUTPUT_NAME teide)
+target_include_directories(teide_static PUBLIC include PRIVATE src)
+
+# Shared library
+add_library(teide SHARED ${TEIDE_SOURCES})
+target_include_directories(teide PUBLIC include PRIVATE src)
+
+# Platform-specific compiler flags
+if(MSVC)
+    set(TEIDE_WARNINGS /W4 /WX)
+    set(TEIDE_DEBUG_FLAGS /Od /Zi /fsanitize=address)
+    set(TEIDE_RELEASE_FLAGS /O2 /DNDEBUG /arch:AVX2)
+else()
+    set(TEIDE_WARNINGS -Wall -Wextra -Wpedantic)
+    if(TEIDE_WERROR)
+        list(APPEND TEIDE_WARNINGS -Werror)
+    endif()
+    set(TEIDE_DEBUG_FLAGS -O0 -g -fsanitize=address,undefined)
+    if(TEIDE_PORTABLE)
+        set(TEIDE_RELEASE_FLAGS -O3 -mtune=generic -DNDEBUG)
+    else()
+        set(TEIDE_RELEASE_FLAGS -O3 -march=native -DNDEBUG)
+    endif()
+endif()
+
+# Apply flags to both library targets
+foreach(tgt teide_static teide)
+    target_compile_options(${tgt} PRIVATE ${TEIDE_WARNINGS})
+    target_compile_options(${tgt} PRIVATE
+        $<$<CONFIG:Debug>:${TEIDE_DEBUG_FLAGS}>
+        $<$<CONFIG:Release>:${TEIDE_RELEASE_FLAGS}>
+    )
+endforeach()
+
+# Link sanitizer runtime for debug builds (GCC/Clang)
+if(NOT MSVC)
+    foreach(tgt teide_static teide)
+        target_link_options(${tgt} PRIVATE
+            $<$<CONFIG:Debug>:-fsanitize=address,undefined>
+        )
+    endforeach()
+endif()
+
+# Platform-specific link libraries
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(teide_static PUBLIC m pthread)
+    target_link_libraries(teide PUBLIC m pthread)
+endif()
+
+# Fuzz targets (requires clang with libFuzzer)
+option(TEIDE_FUZZ "Build fuzz testing targets" OFF)
+if(TEIDE_FUZZ)
+    file(GLOB FUZZ_SOURCES CONFIGURE_DEPENDS "fuzz/*.c")
+    foreach(fuzz_src ${FUZZ_SOURCES})
+        get_filename_component(fuzz_name ${fuzz_src} NAME_WE)
+        add_executable(${fuzz_name} ${fuzz_src})
+        target_link_libraries(${fuzz_name} PRIVATE teide_static)
+        target_include_directories(${fuzz_name} PRIVATE include src)
+        target_compile_options(${fuzz_name} PRIVATE
+            -fsanitize=fuzzer,address,undefined -g -O1)
+        target_link_options(${fuzz_name} PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+    endforeach()
+endif()
+
+# Benchmark targets
+option(TEIDE_BENCH "Build benchmark executables" OFF)
+if(TEIDE_BENCH)
+    file(GLOB BENCH_SOURCES CONFIGURE_DEPENDS "bench/*.c")
+    foreach(bench_src ${BENCH_SOURCES})
+        get_filename_component(bench_name ${bench_src} NAME_WE)
+        add_executable(${bench_name} ${bench_src})
+        target_link_libraries(${bench_name} PRIVATE teide_static)
+        target_include_directories(${bench_name} PRIVATE include src)
+        target_compile_options(${bench_name} PRIVATE ${TEIDE_RELEASE_FLAGS})
+    endforeach()
+endif()
+
+# Example targets
+option(TEIDE_EXAMPLES "Build example executables" OFF)
+if(TEIDE_EXAMPLES)
+    file(GLOB EXAMPLE_SOURCES CONFIGURE_DEPENDS "examples/*.c")
+    foreach(ex_src ${EXAMPLE_SOURCES})
+        get_filename_component(ex_name ${ex_src} NAME_WE)
+        add_executable(example_${ex_name} ${ex_src})
+        target_link_libraries(example_${ex_name} PRIVATE teide_static)
+        target_include_directories(example_${ex_name} PRIVATE include)
+        if(NOT MSVC)
+            target_link_options(example_${ex_name} PRIVATE
+                $<$<CONFIG:Debug>:-fsanitize=address,undefined>
+            )
+        endif()
+    endforeach()
+endif()
+
+# Test executable
+enable_testing()
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "test/*.c")
+if(TEST_SOURCES)
+    add_executable(test_teide ${TEST_SOURCES})
+    target_link_libraries(test_teide PRIVATE teide_static)
+    target_include_directories(test_teide PRIVATE include src test)
+    target_compile_options(test_teide PRIVATE ${TEIDE_WARNINGS})
+    target_compile_options(test_teide PRIVATE
+        $<$<CONFIG:Debug>:${TEIDE_DEBUG_FLAGS}>
+        $<$<CONFIG:Release>:${TEIDE_RELEASE_FLAGS}>
+    )
+    if(NOT MSVC)
+        target_link_options(test_teide PRIVATE
+            $<$<CONFIG:Debug>:-fsanitize=address,undefined>
+        )
+    endif()
+    add_test(NAME test_teide COMMAND test_teide)
+endif()
+
+# Install targets
+include(GNUInstallDirs)
+install(TARGETS teide teide_static
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES include/teide/td.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/teide
+)
+
+# pkg-config
+configure_file(teide.pc.in teide.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/teide.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)

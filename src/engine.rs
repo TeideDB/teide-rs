@@ -2193,6 +2193,24 @@ impl Rel {
     pub fn as_raw(&self) -> *mut ffi::td_rel_t {
         self.ptr
     }
+
+    /// Get direct read-only access to a node's CSR neighbor list.
+    /// Returns (pointer, count). The pointer is into the CSR's internal
+    /// targets array and is valid as long as this `Rel` is alive.
+    /// direction: 0=fwd (src->dst), 1=rev (dst->src).
+    pub fn neighbors(&self, node: i64, direction: u8) -> (*const i64, i64) {
+        let mut count: i64 = 0;
+        let ptr = unsafe {
+            ffi::td_rel_neighbors(self.ptr, node, direction, &mut count)
+        };
+        (ptr, count)
+    }
+
+    /// Number of nodes on one side of the relationship.
+    /// direction: 0 = source node count, 1 = destination node count.
+    pub fn n_nodes(&self, direction: u8) -> i64 {
+        unsafe { ffi::td_rel_n_nodes(self.ptr, direction) }
+    }
 }
 
 impl Drop for Rel {

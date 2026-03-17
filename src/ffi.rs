@@ -965,6 +965,15 @@ extern "C" {
     pub fn td_rel_set_props(rel: *mut td_rel_t, props: *mut td_t);
     pub fn td_rel_free(rel: *mut td_rel_t);
 
+    pub fn td_rel_neighbors(
+        rel: *mut td_rel_t,
+        node: i64,
+        direction: u8,
+        out_count: *mut i64,
+    ) -> *const i64;
+
+    pub fn td_rel_n_nodes(rel: *mut td_rel_t, direction: u8) -> i64;
+
     // --- Optimizer API ---
     pub fn td_optimize(g: *mut td_graph_t, root: *mut td_op_t) -> *mut td_op_t;
     pub fn td_fuse_pass(g: *mut td_graph_t, root: *mut td_op_t);

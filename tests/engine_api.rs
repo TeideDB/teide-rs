@@ -2020,3 +2020,49 @@ fn order_by_similarity_without_index() {
         _ => panic!("Expected Query result"),
     }
 }
+
+#[test]
+fn test_rel_neighbors() {
+    let _guard = lock();
+    let ctx = Context::new().unwrap();
+
+    // Build a small graph: 3 nodes, edges: 0->1, 0->2, 1->2
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst").unwrap();
+    writeln!(f, "0,1").unwrap();
+    writeln!(f, "0,2").unwrap();
+    writeln!(f, "1,2").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 3, 3, true).unwrap();
+
+    // Forward: node 0 has neighbors [1, 2]
+    let (ptr, count) = rel.neighbors(0, 0); // direction 0 = forward
+    assert_eq!(count, 2);
+    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    assert!(neighbors.contains(&1));
+    assert!(neighbors.contains(&2));
+
+    // Forward: node 1 has neighbors [2]
+    let (ptr, count) = rel.neighbors(1, 0);
+    assert_eq!(count, 1);
+    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    assert_eq!(neighbors[0], 2);
+
+    // Forward: node 2 has no outgoing neighbors
+    let (_, count) = rel.neighbors(2, 0);
+    assert_eq!(count, 0);
+
+    // Reverse: node 2 has incoming from [0, 1]
+    let (ptr, count) = rel.neighbors(2, 1); // direction 1 = reverse
+    assert_eq!(count, 2);
+    let neighbors = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
+    assert!(neighbors.contains(&0));
+    assert!(neighbors.contains(&1));
+
+    // n_nodes
+    assert_eq!(rel.n_nodes(0), 3); // forward: n_src_nodes
+    assert_eq!(rel.n_nodes(1), 3); // reverse: n_dst_nodes
+}

@@ -12,6 +12,13 @@
 
 ## Task 1: Add `td_rel_neighbors` and `td_rel_n_nodes` to libteide
 
+- [x] Add C declarations to td.h
+- [x] Add C implementations to csr.c
+- [x] Add FFI bindings to ffi.rs
+- [x] Add Rust wrappers to engine.rs
+- [x] Add test to engine_api.rs
+- [x] All tests pass
+
 **Files:**
 - Modify: `vendor/teide/include/teide/td.h` (add 2 function declarations after `td_rel_free`, line ~956)
 - Modify: `vendor/teide/src/store/csr.c` (add 2 function implementations at end of file)
