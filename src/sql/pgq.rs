@@ -4362,7 +4362,7 @@ fn unescape_sql_string(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Known graph algorithm function names.
-const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra"];
+const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra", "clustering_coefficient", "local_clustering_coeff", "clustering_coeff"];
 
 /// Parse a COLUMNS expression to check if it's a graph algorithm function call.
 /// Returns `Some((func_name, args))` if the expression matches `FUNC(arg1, arg2, ...)`.
@@ -4495,12 +4495,14 @@ fn plan_algorithm_query(
                     "component" | "connected_component" => "connected_component",
                     "community" | "louvain" => "louvain",
                     "shortest_distance" | "dijkstra" => "dijkstra",
+                    "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => "clustering_coeff",
                     other => other,
                 };
                 let cur_canonical = match func_name.as_str() {
                     "component" | "connected_component" => "connected_component",
                     "community" | "louvain" => "louvain",
                     "shortest_distance" | "dijkstra" => "dijkstra",
+                    "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => "clustering_coeff",
                     other => other,
                 };
                 if prev_canonical != cur_canonical {
@@ -4537,6 +4539,7 @@ fn plan_algorithm_query(
                 "component" | "connected_component" => "_component",
                 "community" | "louvain" => "_community",
                 "shortest_distance" | "dijkstra" => "_dist",
+                "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => "_clustering_coeff",
                 _ => return Err(SqlError::Plan(format!("Unknown algorithm: {func_name}"))),
             };
             let default_alias = result_col_name.trim_start_matches('_');
@@ -4644,6 +4647,9 @@ fn execute_graph_algorithm(
         "pagerank" => g.pagerank(&stored_rel.rel, 20, 0.85)?,
         "component" | "connected_component" => g.connected_comp(&stored_rel.rel)?,
         "community" | "louvain" => g.louvain(&stored_rel.rel, 100)?,
+        "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => {
+            g.clustering_coeff(&stored_rel.rel)?
+        }
         "shortest_distance" | "dijkstra" => {
             return Err(SqlError::Plan(
                 "SHORTEST_DISTANCE() is not supported as a COLUMNS function in node-only MATCH patterns. \

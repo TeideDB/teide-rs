@@ -943,6 +943,10 @@ extern "C" {
         rel: *mut td_rel_t,
         max_iter: u16,
     ) -> *mut td_op_t;
+    pub fn td_local_clustering_coeff(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+    ) -> *mut td_op_t;
 
     // --- CSR / Relationship API ---
     pub fn td_rel_build(

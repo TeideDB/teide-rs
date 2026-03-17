@@ -415,6 +415,7 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
 #define OP_KNN             90   /* brute-force K nearest neighbors        */
 #define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
+#define OP_LOCAL_CLUSTERING_COEFF 92   /* local clustering coefficient      */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -928,6 +929,7 @@ td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
                       uint8_t max_depth);
 td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel,
                      uint16_t max_iter);
+td_op_t* td_local_clustering_coeff(td_graph_t* g, td_rel_t* rel);
 
 /* Vector similarity ops */
 td_op_t* td_cosine_sim(td_graph_t* g, td_op_t* emb_col,

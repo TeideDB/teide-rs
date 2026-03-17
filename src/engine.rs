@@ -2002,6 +2002,14 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Local clustering coefficient per node.
+    /// Returns a table with `_node` (I64) and `_clustering_coeff` (F64) columns.
+    pub fn clustering_coeff(&self, rel: &'a Rel) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_local_clustering_coeff(self.raw, rel.ptr)
+        })
+    }
+
     // --- Vector similarity helpers ---
 
     /// Validate a query vector: convert length to i32, reject empty, check

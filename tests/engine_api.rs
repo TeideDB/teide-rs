@@ -1331,6 +1331,65 @@ fn graph_louvain() {
     }
 }
 
+#[test]
+fn graph_clustering_coefficient() {
+    let _guard = lock();
+    // Build a complete triangle (K3) with mutual edges: 0↔1, 1↔2, 0↔2
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst").unwrap();
+    writeln!(f, "0,1").unwrap();
+    writeln!(f, "1,0").unwrap();
+    writeln!(f, "1,2").unwrap();
+    writeln!(f, "2,1").unwrap();
+    writeln!(f, "0,2").unwrap();
+    writeln!(f, "2,0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 3, 3, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let cc = g.clustering_coeff(&rel).unwrap();
+    let result = g.execute(cc).unwrap();
+
+    assert_eq!(result.nrows(), 3);
+    // Every node in a complete triangle has LCC = 1.0
+    for i in 0..3 {
+        let lcc = result.get_f64(1, i).unwrap();
+        assert!(
+            (lcc - 1.0).abs() < 1e-9,
+            "node {i} should have LCC=1.0 in K3, got {lcc}"
+        );
+    }
+}
+
+#[test]
+fn graph_clustering_coefficient_dag() {
+    let _guard = lock();
+    // DAG with no triangles: 0→1, 0→2, 1→3, 2→3, 3→4
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let cc = g.clustering_coeff(&rel).unwrap();
+    let result = g.execute(cc).unwrap();
+
+    assert_eq!(result.nrows(), 5);
+    // No triangles in a DAG, all LCC should be 0.0
+    for i in 0..5 {
+        let lcc = result.get_f64(1, i).unwrap();
+        assert!(
+            lcc.abs() < 1e-9,
+            "node {i} should have LCC=0.0 in DAG, got {lcc}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Vector Similarity Tests
 // ---------------------------------------------------------------------------

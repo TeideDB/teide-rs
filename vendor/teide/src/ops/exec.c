@@ -13090,6 +13090,114 @@ static td_t* exec_louvain(td_graph_t* g, td_op_t* op) {
 }
 
 /* --------------------------------------------------------------------------
+ * exec_local_clustering_coeff: local clustering coefficient per node.
+ * Treats graph as undirected (uses both forward and reverse CSR).
+ * LCC(v) = triangles / (deg * (deg-1)), where triangles = directed edges
+ * between v's undirected neighbors (fwd scan only).
+ * -------------------------------------------------------------------------- */
+static td_t* exec_local_clustering_coeff(td_graph_t* g, td_op_t* op) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    /* Scratch: merged neighbor list per node (max possible size = n) */
+    int64_t* nbrs = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    /* Scratch: quick-lookup set for neighbor checking */
+    uint8_t* in_nbr = (uint8_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(uint8_t));
+    if (!nbrs || !in_nbr) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    memset(in_nbr, 0, (size_t)n * sizeof(uint8_t));
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* rev_off = (int64_t*)td_data(rel->rev.offsets);
+    int64_t* rev_tgt = (int64_t*)td_data(rel->rev.targets);
+
+    /* Allocate result vectors */
+    td_t* node_vec = td_vec_new(TD_I64, n);
+    td_t* lcc_vec  = td_vec_new(TD_F64, n);
+    if (!node_vec || TD_IS_ERR(node_vec) || !lcc_vec || TD_IS_ERR(lcc_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        if (lcc_vec  && !TD_IS_ERR(lcc_vec))  td_release(lcc_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t* ndata = (int64_t*)td_data(node_vec);
+    double*  ldata = (double*)td_data(lcc_vec);
+
+    for (int64_t v = 0; v < n; v++) {
+        ndata[v] = v;
+
+        /* Merge forward and reverse neighbors into deduplicated list */
+        int64_t deg = 0;
+        for (int64_t j = fwd_off[v]; j < fwd_off[v + 1]; j++) {
+            int64_t u = fwd_tgt[j];
+            if (u >= 0 && u < n && !in_nbr[u]) {
+                in_nbr[u] = 1;
+                nbrs[deg++] = u;
+            }
+        }
+        for (int64_t j = rev_off[v]; j < rev_off[v + 1]; j++) {
+            int64_t u = rev_tgt[j];
+            if (u >= 0 && u < n && !in_nbr[u]) {
+                in_nbr[u] = 1;
+                nbrs[deg++] = u;
+            }
+        }
+
+        if (deg < 2) {
+            ldata[v] = 0.0;
+        } else {
+            /* Count directed fwd edges between neighbors of v */
+            int64_t triangles = 0;
+            for (int64_t i = 0; i < deg; i++) {
+                int64_t u = nbrs[i];
+                /* Check fwd edges of u against neighbor set */
+                for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
+                    if (in_nbr[fwd_tgt[j]]) triangles++;
+                }
+            }
+            /* Each undirected edge {u,w} between neighbors appears once in the
+             * fwd scan (u->w). For the denominator: deg*(deg-1) counts ordered
+             * pairs. So LCC = triangles / (deg*(deg-1)). */
+            ldata[v] = (double)triangles / ((double)deg * (double)(deg - 1));
+        }
+
+        /* Reset in_nbr for next node */
+        for (int64_t i = 0; i < deg; i++) in_nbr[nbrs[i]] = 0;
+    }
+
+    node_vec->len = n;
+    lcc_vec->len  = n;
+
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(2);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(node_vec);
+        td_release(lcc_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    result = td_table_add_col(result, td_sym_intern("_clustering_coeff", 17), lcc_vec);
+    td_release(lcc_vec);
+
+    return result;
+}
+
+/* --------------------------------------------------------------------------
  * exec_cosine_sim: cosine similarity between embedding column and query vector.
  * dot(a,b) / (||a|| * ||b||) per row.
  * Input: TD_F32 embedding column (flat N*D floats)
@@ -14106,6 +14214,10 @@ static td_t* exec_node(td_graph_t* g, td_op_t* op) {
 
         case OP_LOUVAIN: {
             return exec_louvain(g, op);
+        }
+
+        case OP_LOCAL_CLUSTERING_COEFF: {
+            return exec_local_clustering_coeff(g, op);
         }
 
         case OP_COSINE_SIM: {
