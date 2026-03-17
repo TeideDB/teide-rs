@@ -1759,6 +1759,20 @@ fn plan_multi_hop_fixed(
         return plan_multi_hop_variable(session, graph, pattern, columns, mode);
     }
 
+    // Detect patterns with reverse edges that cross vertex table boundaries.
+    // The C LFTJ chain plan maps rel[i] as var[i]→var[i+1] and doesn't
+    // account for direction reversal on heterogeneous edges. Forward cross-table
+    // edges work fine (e.g., Person→Knows→Person→LivesIn→City) because the LFTJ
+    // naturally resolves the chain. But reverse edges on cross-table segments
+    // need BFS to correctly flip the CSR direction.
+    let has_reverse_cross_table = edges.iter().enumerate().any(|(i, e)| {
+        e.direction == MatchDirection::Reverse
+            && segments[i].src_table_name != segments[i].dst_table_name
+    });
+    if has_reverse_cross_table {
+        return plan_multi_hop_variable(session, graph, pattern, columns, mode);
+    }
+
     // Reject WHERE filters on intermediate/destination nodes — not yet supported.
     for node in &nodes[1..] {
         if node.filter.is_some() {

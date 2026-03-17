@@ -129,3 +129,53 @@ query TTI
 SELECT * FROM GRAPH_TABLE (fin_graph MATCH path = ANY SHORTEST (p:Person WHERE p.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->+(a2:Account) COLUMNS (p.name AS p, a1.acct_name AS a1, path_length(p, a2) AS hops)) ORDER BY 2
 ----
 Alice Checking_A 2
+
+# --- Cross-table traversal ---
+
+# 3-segment forward: Person -[Owns]-> Account -[Transfer]-> Account (all results)
+# Alice owns Checking_A(0), Savings_A(1); Bob owns Checking_B(2)
+# Transfers: Checking_A(0)->Checking_B(2), Checking_B(2)->Savings_A(1)
+# Alice's accounts: Checking_A → Transfer → Checking_B; Checking_A → Transfer → Checking_B → Transfer → Savings_A
+query TTT
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH (p:Person WHERE p.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->+(a2:Account) COLUMNS (p.name AS person, a1.acct_name AS src_acct, a2.acct_name AS dst_acct)) ORDER BY 2, 3
+----
+Alice Checking_A Checking_B
+Alice Checking_A Savings_A
+
+# Reverse-edge traversal: Account <-[Owns]- Person
+# Which person owns the account that received a transfer from Checking_A?
+# Checking_A(0) -[Transfer]-> Checking_B(2) <-[Owns]- Bob(1)
+query TTT
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH (a1:Account WHERE a1.acct_name = 'Checking_A')-[:Transfer]->(a2:Account)<-[:Owns]-(p:Person) COLUMNS (a1.acct_name AS src, a2.acct_name AS dst, p.name AS owner)) ORDER BY 2
+----
+Checking_A Checking_B Bob
+
+# Mixed direction 3-segment: Person -[Owns]-> Account -[Transfer]-> Account <-[Owns]- Person
+# "Who did Alice's money reach?" (through account transfers)
+# Alice -[Owns]-> Checking_A -[Transfer]-> Checking_B <-[Owns]- Bob
+query TT
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH (p1:Person WHERE p1.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->(a2:Account)<-[:Owns]-(p2:Person) COLUMNS (p1.name AS sender, p2.name AS receiver)) ORDER BY 2
+----
+Alice Bob
+
+# Variable-length cross-table: trace all transfer chains from Alice's accounts to final accounts, then find owner
+# Alice -[Owns]-> Checking_A -[Transfer]->+ a2 <-[Owns]- p2
+# Chain 1: Alice → Checking_A → Checking_B ← Bob (1 transfer hop)
+# Chain 2: Alice → Checking_A → Checking_B → Savings_A ← Alice (2 transfer hops, Savings_A owned by Alice)
+query TTT
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH (p1:Person WHERE p1.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->+(a2:Account)<-[:Owns]-(p2:Person) COLUMNS (a1.acct_name AS from_acct, a2.acct_name AS to_acct, p2.name AS owner)) ORDER BY 1, 2
+----
+Checking_A Checking_B Bob
+Checking_A Savings_A Alice
+
+# Cross-table with multiple vertex types: Person -[Knows]-> Person -[LivesIn]-> City (using mh_graph)
+# Already tested as 2-hop above, now test variable-length Knows then LivesIn
+# Alice knows Bob, Carol; Bob knows Carol
+# Knows ->+ : Alice→Bob (depth 1), Alice→Carol (depth 1), Alice→Bob→Carol (depth 2)
+# Then LivesIn: Bob→SF, Carol→NYC (Carol appears twice: depth-1 and depth-2 paths)
+query TTT
+SELECT * FROM GRAPH_TABLE (mh_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person)-[:LivesIn]->(c:City) COLUMNS (a.name AS person, b.name AS friend, c.city AS city)) ORDER BY 2, 3
+----
+Alice Bob SF
+Alice Carol NYC
+Alice Carol NYC
