@@ -1391,6 +1391,75 @@ fn tri_not(a: Option<bool>) -> Option<bool> {
     a.map(|v| !v)
 }
 
+/// SQL LIKE pattern matching. `%` matches any sequence, `_` matches one char.
+/// Supports optional escape character (e.g. `LIKE 'a\%b' ESCAPE '\'`).
+fn sql_like_match(text: &str, pattern: &str, escape_char: Option<&str>, case_insensitive: bool) -> bool {
+    let (text, pattern): (String, String) = if case_insensitive {
+        (text.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (text.to_string(), pattern.to_string())
+    };
+    let esc = escape_char.and_then(|e| e.chars().next());
+    let t: Vec<char> = text.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    like_dp(&t, &p, esc)
+}
+
+/// DP-based LIKE matching.
+fn like_dp(text: &[char], pattern: &[char], esc: Option<char>) -> bool {
+    let (n, m) = (text.len(), pattern.len());
+    // dp[j] = whether text[..i] matches pattern[..j]
+    let mut dp = vec![false; m + 1];
+    dp[0] = true;
+    // Initialize: leading %'s match empty text
+    for j in 0..m {
+        if pattern[j] == '%' && dp[j] {
+            dp[j + 1] = true;
+        } else {
+            break;
+        }
+    }
+    for i in 0..n {
+        let mut new_dp = vec![false; m + 1];
+        // new_dp[0] is false (non-empty text can't match empty pattern)
+        let mut j = 0;
+        while j < m {
+            if let Some(e) = esc {
+                if pattern[j] == e && j + 1 < m {
+                    // Escaped character: match literally
+                    if dp[j] && text[i] == pattern[j + 1] {
+                        new_dp[j + 2] = true;
+                    }
+                    j += 2;
+                    continue;
+                }
+            }
+            match pattern[j] {
+                '%' => {
+                    // % matches zero or more: dp[j] (skip %) or new_dp[j] (consume char)
+                    if dp[j] || new_dp[j] {
+                        new_dp[j + 1] = true;
+                        new_dp[j] = true; // propagate: % can still consume more
+                    }
+                }
+                '_' => {
+                    if dp[j] {
+                        new_dp[j + 1] = true;
+                    }
+                }
+                c => {
+                    if dp[j] && text[i] == c {
+                        new_dp[j + 1] = true;
+                    }
+                }
+            }
+            j += 1;
+        }
+        dp = new_dp;
+    }
+    dp[m]
+}
+
 /// Evaluate a parsed filter expression against a table row.
 /// Returns `Some(true)` if the row passes, `Some(false)` if it doesn't,
 /// or `None` for SQL UNKNOWN (NULL-involved comparisons).
@@ -1486,6 +1555,34 @@ fn evaluate_filter(
             Ok(Some(!matches!(eval_scalar(inner, table, row, var_name)?, ScalarValue::Null)))
         }
         sql_ast::Expr::Nested(inner) => evaluate_filter(inner, table, row, var_name),
+        sql_ast::Expr::Like {
+            negated,
+            expr: inner,
+            pattern,
+            escape_char,
+            ..
+        }
+        | sql_ast::Expr::ILike {
+            negated,
+            expr: inner,
+            pattern,
+            escape_char,
+            ..
+        } => {
+            let case_insensitive = matches!(expr, sql_ast::Expr::ILike { .. });
+            let val = eval_scalar(inner, table, row, var_name)?;
+            let pat = eval_scalar(pattern, table, row, var_name)?;
+            match (&val, &pat) {
+                (ScalarValue::Null, _) | (_, ScalarValue::Null) => Ok(None),
+                (ScalarValue::Str(s), ScalarValue::Str(p)) => {
+                    let matched = sql_like_match(s, p, escape_char.as_deref(), case_insensitive);
+                    Ok(Some(if *negated { !matched } else { matched }))
+                }
+                _ => Err(SqlError::Plan(format!(
+                    "LIKE requires string operands, got: {val:?} LIKE {pat:?}"
+                ))),
+            }
+        }
         _ => {
             let v = eval_scalar(expr, table, row, var_name)?;
             match v {

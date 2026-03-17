@@ -103,3 +103,79 @@ Alice Dave
 query TT
 SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name = 'Nobody')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
 ----
+
+# --- LIKE filter ---
+
+# LIKE with % wildcard
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name LIKE 'A%')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+
+# LIKE with _ wildcard (3-char names ending in 'ob')
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name LIKE '_ob')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Bob Carol
+
+# NOT LIKE
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name NOT LIKE 'A%')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# LIKE with % in middle
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name LIKE 'A%e')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+
+# --- NOT (unary) filter ---
+
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE NOT a.age > 28)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# --- NOT IN filter ---
+
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name NOT IN ('Carol', 'Dave'))-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+Bob Carol
+
+# --- IS NULL / IS NOT NULL ---
+# NOTE: The C engine stores NULL as sentinel values (0 for int, "" for string),
+# so IS NULL/IS NOT NULL cannot distinguish true NULLs from sentinels in the
+# current engine. These tests verify the evaluate_filter code path works without
+# errors, but use empty-string detection as a proxy for NULL behavior.
+
+statement ok
+CREATE TABLE rf_persons2 (id INTEGER, name VARCHAR, city VARCHAR)
+
+statement ok
+INSERT INTO rf_persons2 VALUES (0, 'Alice', 'NYC'), (1, 'Bob', ''), (2, 'Carol', 'SF')
+
+statement ok
+CREATE TABLE rf_knows2 (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO rf_knows2 VALUES (0, 1), (0, 2), (1, 2)
+
+statement ok
+CREATE PROPERTY GRAPH rf_graph2 VERTEX TABLES (rf_persons2 LABEL Person) EDGE TABLES (rf_knows2 SOURCE KEY (src) REFERENCES rf_persons2 (id) DESTINATION KEY (dst) REFERENCES rf_persons2 (id) LABEL Knows)
+
+# IS NOT NULL: all rows have a non-null city (even '' is non-null in the engine)
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph2 MATCH (a:Person WHERE a.city IS NOT NULL)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Bob Carol
