@@ -1369,7 +1369,10 @@ fn evaluate_filter(
             }
             let found = list.iter().any(|item| {
                 eval_scalar(item, table, row, var_name)
-                    .map(|v| !matches!(v, ScalarValue::Null) && v == val)
+                    .map(|v| {
+                        !matches!(v, ScalarValue::Null)
+                            && v.partial_cmp(&val) == Some(std::cmp::Ordering::Equal)
+                    })
                     .unwrap_or(false)
             });
             Ok(if *negated { !found } else { found })
@@ -3171,10 +3174,10 @@ fn execute_dijkstra_algorithm(
         SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
     })?;
 
-    let src_id: i64 = args[1].parse().map_err(|_| {
+    let user_src_id: i64 = args[1].parse().map_err(|_| {
         SqlError::Plan(format!("Invalid source node ID: '{}'", args[1]))
     })?;
-    let dst_id: i64 = args[2].parse().map_err(|_| {
+    let user_dst_id: i64 = args[2].parse().map_err(|_| {
         SqlError::Plan(format!("Invalid destination node ID: '{}'", args[2]))
     })?;
     // Strip surrounding quotes from weight column name
@@ -3192,9 +3195,24 @@ fn execute_dijkstra_algorithm(
         SqlError::Plan(format!("Table '{src_table_name}' not found"))
     })?.table;
 
+    // Remap user-facing IDs to internal row indices via natural key maps
+    let src_vl = graph.vertex_labels.values()
+        .find(|vl| vl.table_name == *src_table_name)
+        .ok_or_else(|| {
+            SqlError::Plan(format!("No vertex label found for table '{src_table_name}'"))
+        })?;
+    let src_key = KeyValue::Int(user_src_id);
+    let dst_key = KeyValue::Int(user_dst_id);
+    let internal_src = *src_vl.user_to_row.get(&src_key).ok_or_else(|| {
+        SqlError::Plan(format!("Source node ID {user_src_id} not found in vertex table '{src_table_name}'"))
+    })? as i64;
+    let internal_dst = *src_vl.user_to_row.get(&dst_key).ok_or_else(|| {
+        SqlError::Plan(format!("Destination node ID {user_dst_id} not found in vertex table '{src_table_name}'"))
+    })? as i64;
+
     let g = session.ctx.graph(src_table)?;
-    let src = g.const_i64(src_id)?;
-    let dst = g.const_i64(dst_id)?;
+    let src = g.const_i64(internal_src)?;
+    let dst = g.const_i64(internal_dst)?;
     let result_col = g.dijkstra(src, Some(dst), &stored_rel.rel, weight_col, 255)?;
 
     let result = g.execute(result_col)?;
