@@ -1252,7 +1252,9 @@ fn eval_scalar(
         } => {
             let v = eval_scalar(inner, table, row, var_name)?;
             match v {
-                ScalarValue::Int(i) => Ok(ScalarValue::Int(-i)),
+                ScalarValue::Int(i) => Ok(ScalarValue::Int(i.checked_neg().ok_or_else(
+                    || SqlError::Plan(format!("Integer overflow negating {i}")),
+                )?)),
                 ScalarValue::Float(f) => Ok(ScalarValue::Float(-f)),
                 _ => Err(SqlError::Plan(format!(
                     "Cannot negate non-numeric value: {expr}"
@@ -1361,9 +1363,13 @@ fn evaluate_filter(
             negated,
         } => {
             let val = eval_scalar(inner, table, row, var_name)?;
+            if matches!(val, ScalarValue::Null) {
+                // NULL IN (...) is unknown → false per SQL three-valued logic
+                return Ok(false);
+            }
             let found = list.iter().any(|item| {
                 eval_scalar(item, table, row, var_name)
-                    .map(|v| v == val)
+                    .map(|v| !matches!(v, ScalarValue::Null) && v == val)
                     .unwrap_or(false)
             });
             Ok(if *negated { !found } else { found })
