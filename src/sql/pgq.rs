@@ -950,6 +950,8 @@ fn plan_single_hop(
         edge,
         graph,
         is_reverse,
+        src_label,
+        dst_label,
     )
 }
 
@@ -1139,6 +1141,8 @@ fn project_columns(
     edge_pattern: &EdgePattern,
     graph: &PropertyGraph,
     is_reverse: bool,
+    src_vertex_label: &VertexLabel,
+    dst_vertex_label: &VertexLabel,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
@@ -1189,11 +1193,15 @@ fn project_columns(
             let out_name = alias.unwrap_or(&col).to_string();
 
             if var == src_var {
+                // Check PROPERTIES visibility for source vertex label
+                check_column_visible(&src_vertex_label.visibility, &col, &src_vertex_label.label)?;
                 let col_idx = find_col_idx(src_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in source table")))?;
                 col_names.push(out_name);
                 col_specs.push(ColSpec::Node { table_col_idx: col_idx, is_src: true });
             } else if var == dst_var {
+                // Check PROPERTIES visibility for destination vertex label
+                check_column_visible(&dst_vertex_label.visibility, &col, &dst_vertex_label.label)?;
                 let col_idx = find_col_idx(dst_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in destination table")))?;
                 col_names.push(out_name);
@@ -1206,6 +1214,8 @@ fn project_columns(
                 let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
                 })?;
+                // Check PROPERTIES visibility for edge label
+                check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
                 })?;
@@ -1311,27 +1321,6 @@ fn check_column_visible(
              (restricted by PROPERTIES clause)"
         )))
     }
-}
-
-/// Look up a vertex label's visibility from the graph.
-/// Tries the node's explicit label first, then falls back to matching by table name.
-fn vertex_visibility<'a>(
-    node: &NodePattern,
-    table_name: &str,
-    graph: &'a PropertyGraph,
-) -> &'a ColumnVisibility {
-    if let Some(label) = &node.label {
-        if let Some(vl) = graph.vertex_labels.get(label) {
-            return &vl.visibility;
-        }
-    }
-    // Fall back to matching by table name
-    graph
-        .vertex_labels
-        .values()
-        .find(|vl| vl.table_name == table_name)
-        .map(|vl| &vl.visibility)
-        .unwrap_or(&ColumnVisibility::All)
 }
 
 /// Read a key value (integer or string) from a table cell.
@@ -2387,6 +2376,20 @@ fn plan_multi_hop_variable(
         pos_table_names.push(seg.dst_table_name.clone());
     }
 
+    // Build per-position vertex label names for PROPERTIES visibility checks.
+    let pos_label_names: Vec<String> = nodes.iter().enumerate().map(|(i, node)| {
+        if let Some(label) = &node.label {
+            label.clone()
+        } else if i < pos_table_names.len() {
+            graph.vertex_labels.values()
+                .find(|vl| vl.table_name == pos_table_names[i])
+                .map(|vl| vl.label.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }).collect();
+
     // --- Determine start nodes ---
     let first_src_table_name = &segments[0].src_table_name;
     let first_src_stored = session.tables.get(first_src_table_name).ok_or_else(|| {
@@ -2495,6 +2498,11 @@ fn plan_multi_hop_variable(
 
             if let Some(var_idx) = var_map.get(&var) {
                 let table_name = &pos_table_names[*var_idx];
+                // Check PROPERTIES visibility for this vertex label
+                let label_name = &pos_label_names[*var_idx];
+                if let Some(vl) = graph.vertex_labels.get(label_name.as_str()) {
+                    check_column_visible(&vl.visibility, &col, label_name)?;
+                }
                 let vtable = session.tables.get(table_name).ok_or_else(|| {
                     SqlError::Plan(format!("Table '{table_name}' not found"))
                 })?;
@@ -2518,6 +2526,8 @@ fn plan_multi_hop_variable(
                 let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
                 })?;
+                // Check PROPERTIES visibility for this edge label
+                check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
                 })?;
@@ -2845,6 +2855,21 @@ fn plan_multi_hop_fixed(
     // If cyclic, the last entry maps back to var 0 (already handled by truncating to n_vars)
     var_table_names.truncate(n_vars);
 
+    // Build per-node-position vertex label names for PROPERTIES visibility checks.
+    let var_label_names: Vec<String> = nodes.iter().enumerate().map(|(i, node)| {
+        if let Some(label) = &node.label {
+            label.clone()
+        } else if i < var_table_names.len() {
+            // Find the label name from the graph that matches this table
+            graph.vertex_labels.values()
+                .find(|vl| vl.table_name == var_table_names[i])
+                .map(|vl| vl.label.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }).take(n_vars).collect();
+
     // Apply source node (v0) WHERE filter if present
     let mut row_mask: Vec<bool> = if let Some(filter_text) = nodes[0].filter.as_deref() {
         let expr = parse_filter_expr(filter_text)?;
@@ -2928,6 +2953,11 @@ fn plan_multi_hop_fixed(
 
             if let Some(var_idx) = var_map.get(&var) {
                 let table_name = &var_table_names[*var_idx];
+                // Check PROPERTIES visibility for this vertex label
+                let label_name = &var_label_names[*var_idx];
+                if let Some(vl) = graph.vertex_labels.get(label_name.as_str()) {
+                    check_column_visible(&vl.visibility, &col, label_name)?;
+                }
                 let vtable = session.tables.get(table_name).ok_or_else(|| {
                     SqlError::Plan(format!("Table '{table_name}' not found"))
                 })?;
@@ -2951,6 +2981,8 @@ fn plan_multi_hop_fixed(
                 let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
                 })?;
+                // Check PROPERTIES visibility for this edge label
+                check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
                     SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
                 })?;
@@ -3176,7 +3208,7 @@ fn plan_var_length(
     };
 
     // var_expand result has: _start, _end, _depth
-    project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table, edge)
+    project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table, edge, src_label, dst_label)
 }
 
 /// Project COLUMNS from var_expand results.
@@ -3190,6 +3222,8 @@ fn project_var_length_columns(
     src_table: &Table,
     dst_table: &Table,
     edge_pattern: &EdgePattern,
+    src_vertex_label: &VertexLabel,
+    dst_vertex_label: &VertexLabel,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
@@ -3249,11 +3283,15 @@ fn project_var_length_columns(
             let out_name = alias.unwrap_or(&col).to_string();
 
             if var == src_var {
+                // Check PROPERTIES visibility for source vertex label
+                check_column_visible(&src_vertex_label.visibility, &col, &src_vertex_label.label)?;
                 let col_idx = find_col_idx(src_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in source table")))?;
                 col_names.push(out_name);
                 col_specs.push(ColSpec { kind: VarColKind::Src, table_col_idx: col_idx });
             } else if var == dst_var {
+                // Check PROPERTIES visibility for destination vertex label
+                check_column_visible(&dst_vertex_label.visibility, &col, &dst_vertex_label.label)?;
                 let col_idx = find_col_idx(dst_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in destination table")))?;
                 col_names.push(out_name);
@@ -3352,6 +3390,7 @@ fn parse_sp_columns(
     left_table: &str,
     right_table: &str,
     session: &Session,
+    graph: &PropertyGraph,
 ) -> Result<(Vec<String>, Vec<SpColKind>), SqlError> {
     let mut col_names: Vec<String> = Vec::new();
     let mut col_kinds: Vec<SpColKind> = Vec::new();
@@ -3389,6 +3428,10 @@ fn parse_sp_columns(
             let var = lower[..dot_pos].trim();
             let prop = lower[dot_pos + 1..].trim();
             if var == src_var {
+                // Check PROPERTIES visibility for source vertex label
+                if let Some(vl) = graph.vertex_labels.values().find(|vl| vl.table_name == left_table) {
+                    check_column_visible(&vl.visibility, prop, &vl.label)?;
+                }
                 let stored = session.tables.get(left_table).ok_or_else(|| {
                     SqlError::Plan(format!("Table '{left_table}' not found"))
                 })?;
@@ -3400,6 +3443,10 @@ fn parse_sp_columns(
                 col_names.push(alias.unwrap_or(prop).to_string());
                 col_kinds.push(SpColKind::SrcProp(col_idx));
             } else if var == dst_var {
+                // Check PROPERTIES visibility for destination vertex label
+                if let Some(vl) = graph.vertex_labels.values().find(|vl| vl.table_name == right_table) {
+                    check_column_visible(&vl.visibility, prop, &vl.label)?;
+                }
                 let stored = session.tables.get(right_table).ok_or_else(|| {
                     SqlError::Plan(format!("Table '{right_table}' not found"))
                 })?;
@@ -3590,7 +3637,7 @@ fn plan_shortest_path(
         let src_var = src_node.variable.as_deref().unwrap_or("__src");
         let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
         let (col_names, col_kinds) =
-            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
+            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session, graph)?;
 
         // Build CSV with correct values: node=user_key, depth=0, path_length=0
         let src_key = left_vertex_label.row_to_user.get(src_id as usize)
@@ -3658,7 +3705,7 @@ fn plan_shortest_path(
         let src_var = src_node.variable.as_deref().unwrap_or("__src");
         let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
         let (display_names, _col_kinds) =
-            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
+            parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session, graph)?;
 
         let csv_col_names: Vec<String> = (0..display_names.len())
             .map(|i| format!("__c{i}"))
@@ -3674,7 +3721,7 @@ fn plan_shortest_path(
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
     let (col_names, col_kinds) =
-        parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session)?;
+        parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session, graph)?;
 
     // Total path length = number of edges = number of nodes - 1
     let total_path_length = if path.is_empty() { 0 } else { path.len() - 1 };
@@ -3940,12 +3987,20 @@ fn plan_cheapest_path(
             let out_name = alias.unwrap_or(col).to_string();
 
             if var == src_var {
+                // Check PROPERTIES visibility for source vertex label
+                if let Some(vl) = graph.vertex_labels.values().find(|vl| vl.table_name == *left_table) {
+                    check_column_visible(&vl.visibility, col, &vl.label)?;
+                }
                 let col_idx = find_col_idx(src_vtable, col).ok_or_else(|| {
                     SqlError::Plan(format!("Column '{col}' not found in source table"))
                 })?;
                 col_names.push(out_name);
                 col_specs.push(CpColKind::SrcProp(col_idx));
             } else if var == dst_var {
+                // Check PROPERTIES visibility for destination vertex label
+                if let Some(vl) = graph.vertex_labels.values().find(|vl| vl.table_name == *right_table) {
+                    check_column_visible(&vl.visibility, col, &vl.label)?;
+                }
                 let col_idx = find_col_idx(dst_vtable, col).ok_or_else(|| {
                     SqlError::Plan(format!("Column '{col}' not found in destination table"))
                 })?;
@@ -4359,6 +4414,8 @@ fn plan_algorithm_query(
             let out_name = alias.unwrap_or(&col).to_string();
 
             if var == node_var {
+                // Check PROPERTIES visibility for this vertex label
+                check_column_visible(&vertex_label.visibility, &col, &vertex_label.label)?;
                 let col_idx = find_col_idx(&vertex_stored.table, &col).ok_or_else(|| {
                     SqlError::Plan(format!("Column '{col}' not found in vertex table"))
                 })?;

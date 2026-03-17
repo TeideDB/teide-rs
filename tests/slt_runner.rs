@@ -303,6 +303,11 @@ fn slt_pgq_quantifiers() {
 }
 
 #[test]
+fn slt_pgq_properties() {
+    run_slt("tests/slt/pgq_properties.slt");
+}
+
+#[test]
 fn slt_pgq_multi_match() {
     run_slt("tests/slt/pgq_multi_match.slt");
 }

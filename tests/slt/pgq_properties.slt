@@ -1,0 +1,114 @@
+# SQL/PGQ: PROPERTIES clause for column visibility in DDL
+
+# ------------------------------------------------------------------
+# Setup: base tables
+# ------------------------------------------------------------------
+
+statement ok
+CREATE TABLE pr_persons (id INTEGER, name VARCHAR, ssn VARCHAR)
+
+statement ok
+INSERT INTO pr_persons VALUES (0, 'Alice', '123-45-6789'), (1, 'Bob', '987-65-4321')
+
+statement ok
+CREATE TABLE pr_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO pr_knows VALUES (0, 1)
+
+# ------------------------------------------------------------------
+# PROPERTIES (col1, col2): only listed columns are visible
+# ------------------------------------------------------------------
+
+statement ok
+CREATE PROPERTY GRAPH pr_graph VERTEX TABLES (pr_persons LABEL Person PROPERTIES (name)) EDGE TABLES (pr_knows SOURCE KEY (src) REFERENCES pr_persons (id) DESTINATION KEY (dst) REFERENCES pr_persons (id) LABEL Knows)
+
+# Can access visible property
+query TT
+SELECT * FROM GRAPH_TABLE (pr_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Bob
+
+# Cannot access hidden property (ssn not in PROPERTIES list)
+statement error
+SELECT * FROM GRAPH_TABLE (pr_graph MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.ssn AS s, b.name AS n))
+
+# ------------------------------------------------------------------
+# NO PROPERTIES: no columns visible
+# ------------------------------------------------------------------
+
+statement ok
+CREATE TABLE pr2_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO pr2_persons VALUES (0, 'X'), (1, 'Y')
+
+statement ok
+CREATE TABLE pr2_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO pr2_knows VALUES (0, 1)
+
+statement ok
+CREATE PROPERTY GRAPH pr2_graph VERTEX TABLES (pr2_persons LABEL Person NO PROPERTIES) EDGE TABLES (pr2_knows SOURCE KEY (src) REFERENCES pr2_persons (id) DESTINATION KEY (dst) REFERENCES pr2_persons (id) LABEL Knows)
+
+statement error
+SELECT * FROM GRAPH_TABLE (pr2_graph MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.name AS n, b.name AS m))
+
+# ------------------------------------------------------------------
+# PROPERTIES ARE ALL COLUMNS EXCEPT: all except listed columns
+# ------------------------------------------------------------------
+
+statement ok
+CREATE TABLE pr3_persons (id INTEGER, name VARCHAR, secret VARCHAR)
+
+statement ok
+INSERT INTO pr3_persons VALUES (0, 'Alice', 'hidden'), (1, 'Bob', 'secret')
+
+statement ok
+CREATE TABLE pr3_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO pr3_knows VALUES (0, 1)
+
+statement ok
+CREATE PROPERTY GRAPH pr3_graph VERTEX TABLES (pr3_persons LABEL Person PROPERTIES ARE ALL COLUMNS EXCEPT (secret)) EDGE TABLES (pr3_knows SOURCE KEY (src) REFERENCES pr3_persons (id) DESTINATION KEY (dst) REFERENCES pr3_persons (id) LABEL Knows)
+
+# Can access 'name' (not excluded)
+query TT
+SELECT * FROM GRAPH_TABLE (pr3_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Bob
+
+# Cannot access 'secret' (excluded)
+statement error
+SELECT * FROM GRAPH_TABLE (pr3_graph MATCH (a:Person)-[:Knows]->(b:Person) COLUMNS (a.secret AS s, b.name AS n))
+
+# ------------------------------------------------------------------
+# Edge PROPERTIES
+# ------------------------------------------------------------------
+
+statement ok
+CREATE TABLE pr4_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO pr4_persons VALUES (0, 'Alice'), (1, 'Bob')
+
+statement ok
+CREATE TABLE pr4_edges (src INTEGER, dst INTEGER, weight DOUBLE, hidden VARCHAR)
+
+statement ok
+INSERT INTO pr4_edges VALUES (0, 1, 1.5, 'secret')
+
+statement ok
+CREATE PROPERTY GRAPH pr4_graph VERTEX TABLES (pr4_persons LABEL Person) EDGE TABLES (pr4_edges SOURCE KEY (src) REFERENCES pr4_persons (id) DESTINATION KEY (dst) REFERENCES pr4_persons (id) LABEL Knows PROPERTIES (weight))
+
+# Can access visible edge property
+query TTR
+SELECT * FROM GRAPH_TABLE (pr4_graph MATCH (a:Person)-[e:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.weight AS w))
+----
+Alice Bob 1.5
+
+# Cannot access hidden edge property
+statement error
+SELECT * FROM GRAPH_TABLE (pr4_graph MATCH (a:Person)-[e:Knows]->(b:Person) COLUMNS (a.name AS src, e.hidden AS h))
