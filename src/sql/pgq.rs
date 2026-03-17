@@ -1128,20 +1128,16 @@ fn multi_segment_bfs(
     }
 
     while let Some(state) = queue.pop_front() {
-        if n_states > MAX_BFS_STATES {
-            return Err(SqlError::Plan(format!(
-                "Multi-segment BFS exceeded {MAX_BFS_STATES} states — graph too large or \
-                 path quantifier range too wide. Try narrowing the hop range."
-            )));
-        }
         if nrows >= MAX_RESULTS {
             break;
         }
 
         let seg = &segments[state.seg_idx];
 
-        // AnyShortest pruning: if we already found a result, skip states that
-        // are already longer.
+        // AnyShortest pruning: skip states already longer than the best known
+        // result. Note: because segment transitions break FIFO depth ordering,
+        // this is only an optimistic prune — a post-filter below removes any
+        // results with total_depth > the true minimum.
         if *mode == PathMode::AnyShortest {
             if let Some(best) = best_depth {
                 if state.total_depth > best {
@@ -1163,21 +1159,19 @@ fn multi_segment_bfs(
                 if is_cyclic && exit_path[0] != exit_path[n_positions - 1] {
                     // Not a cycle — skip
                 } else {
-                    // AnyShortest check
-                    if *mode == PathMode::AnyShortest {
-                        if let Some(best) = best_depth {
-                            if state.total_depth > best {
-                                continue; // longer than best — skip
-                            }
-                        }
-                        best_depth = Some(state.total_depth);
-                    }
-
                     for (pos, ids) in result_node_ids.iter_mut().enumerate() {
                         ids.push(exit_path[pos]);
                     }
                     result_path_lengths.push(state.total_depth);
                     nrows += 1;
+
+                    // Update best_depth for pruning (may not be globally minimal yet)
+                    if *mode == PathMode::AnyShortest {
+                        best_depth = Some(match best_depth {
+                            Some(b) if b < state.total_depth => b,
+                            _ => state.total_depth,
+                        });
+                    }
                 }
             } else {
                 // Transition to next segment at depth 0
@@ -1209,6 +1203,12 @@ fn multi_segment_bfs(
             };
 
             for &next_node in &neighbors {
+                if n_states >= MAX_BFS_STATES {
+                    return Err(SqlError::Plan(format!(
+                        "Multi-segment BFS exceeded {MAX_BFS_STATES} states — graph too large or \
+                         path quantifier range too wide. Try narrowing the hop range."
+                    )));
+                }
                 queue.push_back(BfsState {
                     seg_idx: state.seg_idx,
                     node_id: next_node,
@@ -1218,6 +1218,32 @@ fn multi_segment_bfs(
                 });
                 n_states += 1;
             }
+        }
+    }
+
+    // AnyShortest post-filter: segment transitions can break FIFO depth ordering,
+    // so the early pruning above is optimistic. Remove any results whose
+    // total_depth exceeds the true minimum.
+    if *mode == PathMode::AnyShortest && nrows > 0 {
+        let min_depth = *result_path_lengths.iter().min().unwrap();
+        let mut keep = Vec::with_capacity(nrows);
+        for i in 0..nrows {
+            if result_path_lengths[i] == min_depth {
+                keep.push(i);
+            }
+        }
+        if keep.len() < nrows {
+            let mut new_node_ids = vec![Vec::with_capacity(keep.len()); n_positions];
+            let mut new_path_lengths = Vec::with_capacity(keep.len());
+            for &i in &keep {
+                for (pos, ids) in new_node_ids.iter_mut().enumerate() {
+                    ids.push(result_node_ids[pos][i]);
+                }
+                new_path_lengths.push(result_path_lengths[i]);
+            }
+            result_node_ids = new_node_ids;
+            result_path_lengths = new_path_lengths;
+            nrows = keep.len();
         }
     }
 
@@ -2578,8 +2604,7 @@ fn reconstruct_shortest_path(
 }
 
 /// Extract a node's row index from a WHERE filter.
-/// Looks for patterns like "a.id = 42" or "a.name = 'Alice'" and resolves to the
-/// row index in the vertex table. The row index is used as a CSR node index.
+/// Delegates to `extract_node_id_from_filter` after unwrapping the filter text.
 fn extract_node_id(
     node: &NodePattern,
     table_name: &str,
@@ -2591,88 +2616,7 @@ fn extract_node_id(
             "SHORTEST_PATH requires WHERE filters on both source and destination nodes".into(),
         )
     })?;
-
-    // Split on '=' first, then strip variable prefix only from the LHS
-    let parts: Vec<&str> = filter.splitn(2, '=').collect();
-    if parts.len() != 2 {
-        return Err(SqlError::Plan(format!(
-            "Cannot extract node ID from filter: {filter}"
-        )));
-    }
-    let lhs = parts[0].trim();
-    // Reject !=, >=, <= operators (detected by trailing !, >, < on LHS after split)
-    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
-        return Err(SqlError::Plan(format!(
-            "Unsupported operator in node filter: {filter}. Only 'col = value' is supported."
-        )));
-    }
-    let var = node.variable.as_deref().unwrap_or("");
-    let col_name = if !var.is_empty() {
-        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
-        let mut s = lhs.to_string();
-        for p in &prefixes {
-            if let Some(stripped) = s.strip_prefix(p.as_str()) {
-                s = stripped.to_string();
-                break;
-            }
-        }
-        s.trim().to_lowercase()
-    } else {
-        lhs.to_lowercase()
-    };
-    let value = parts[1].trim();
-    // Remove internal spaces from value to handle tokenizer artifacts (e.g., "- 1" -> "-1")
-    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-
-    // Scan the table to find the matching row and return its row index.
-    let stored = session.tables.get(table_name).ok_or_else(|| {
-        SqlError::Plan(format!("Table '{table_name}' not found"))
-    })?;
-
-    let nrows = checked_logical_nrows(stored)?;
-    let col_idx = find_col_idx(&stored.table, &col_name).ok_or_else(|| {
-        SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
-    })?;
-
-    let str_val = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        Some(value[1..value.len() - 1].replace("''", "'"))
-    } else {
-        None
-    };
-
-    let int_val = if str_val.is_none() { value_nospace.parse::<i64>().ok() } else { None };
-    let float_val = if str_val.is_none() && int_val.is_none() {
-        value_nospace.parse::<f64>().ok()
-    } else {
-        None
-    };
-
-    let mut found_row: Option<usize> = None;
-    for row in 0..nrows {
-        let matched = if let Some(ref sv) = str_val {
-            stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
-        } else if let Some(iv) = int_val {
-            stored.table.get_i64(col_idx, row) == Some(iv)
-        } else if let Some(fv) = float_val {
-            stored.table.get_f64(col_idx, row) == Some(fv)
-        } else {
-            false
-        };
-
-        if matched {
-            if found_row.is_some() {
-                return Err(SqlError::Plan(format!(
-                    "Ambiguous node filter: '{filter}' matches multiple rows in '{table_name}'. \
-                     SHORTEST_PATH requires filters that identify exactly one node."
-                )));
-            }
-            found_row = Some(row);
-        }
-    }
-
-    found_row.map(|r| r as i64).ok_or_else(|| {
-        SqlError::Plan(format!("No matching row for filter: {filter}"))
-    })
+    extract_node_id_from_filter(node, table_name, filter, session)
 }
 
 // ---------------------------------------------------------------------------
