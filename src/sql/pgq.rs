@@ -1126,7 +1126,7 @@ impl PartialEq for ScalarValue {
             (ScalarValue::Float(a), ScalarValue::Int(b)) => *a == (*b as f64),
             (ScalarValue::Str(a), ScalarValue::Str(b)) => a == b,
             (ScalarValue::Bool(a), ScalarValue::Bool(b)) => a == b,
-            (ScalarValue::Null, ScalarValue::Null) => true,
+            (ScalarValue::Null, ScalarValue::Null) => false,
             _ => false,
         }
     }
@@ -1405,11 +1405,17 @@ fn evaluate_filter(
         sql_ast::Expr::BinaryOp { left, op, right } => match op {
             sql_ast::BinaryOperator::And => {
                 let l = evaluate_filter(left, table, row, var_name)?;
+                if l == Some(false) {
+                    return Ok(Some(false));
+                }
                 let r = evaluate_filter(right, table, row, var_name)?;
                 Ok(tri_and(l, r))
             }
             sql_ast::BinaryOperator::Or => {
                 let l = evaluate_filter(left, table, row, var_name)?;
+                if l == Some(true) {
+                    return Ok(Some(true));
+                }
                 let r = evaluate_filter(right, table, row, var_name)?;
                 Ok(tri_or(l, r))
             }
@@ -1474,10 +1480,10 @@ fn evaluate_filter(
         }
         sql_ast::Expr::IsNull(inner) => {
             // IS NULL is never UNKNOWN — it always returns true or false
-            Ok(Some(eval_scalar(inner, table, row, var_name)? == ScalarValue::Null))
+            Ok(Some(matches!(eval_scalar(inner, table, row, var_name)?, ScalarValue::Null)))
         }
         sql_ast::Expr::IsNotNull(inner) => {
-            Ok(Some(eval_scalar(inner, table, row, var_name)? != ScalarValue::Null))
+            Ok(Some(!matches!(eval_scalar(inner, table, row, var_name)?, ScalarValue::Null)))
         }
         sql_ast::Expr::Nested(inner) => evaluate_filter(inner, table, row, var_name),
         _ => {
