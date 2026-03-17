@@ -53,8 +53,10 @@
     <a href="./architecture/" class="sidebar-link">Architecture</a>
   </div>
   <div class="sidebar-section">
-    <div class="sidebar-section-label">Plans</div>
-    <a href="./plans/graph-sql-proposal.html" class="sidebar-link">Graph SQL Proposal</a>
+    <div class="sidebar-section-label">Graph &amp; Vector</div>
+    <a href="./sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+    <a href="./sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+    <a href="./sql/vector-search.html" class="sidebar-link">Vector Search</a>
   </div>
 </nav>
 
@@ -63,8 +65,8 @@
 
     <div class="hero">
       <div class="section-label">Teide Documentation</div>
-      <h1>Fast columnar SQL engine</h1>
-      <p class="lead">Teide is a high-performance columnar computation engine with a zero-dependency C17 core, SQL interface, interactive REPL, and PostgreSQL wire protocol server.</p>
+      <h1>One Engine. Tables and Graphs.</h1>
+      <p class="lead">TeideDB is a high-performance columnar engine with native graph pattern matching (SQL/PGQ), vector similarity search, and graph algorithms — all in one SQL query.</p>
       <div class="hero-actions">
         <a href="./getting-started/" class="btn btn-primary">Get Started</a>
         <a href="https://github.com/TeideDB/teide-rs" class="btn btn-outline">GitHub</a>
@@ -75,39 +77,52 @@
       <div class="card">
         <div class="card-num">01</div>
         <h3>SQL Engine</h3>
-        <p>Full SQL query support with aggregations, joins, window functions, CTEs, and set operations.</p>
+        <p>Full SQL with aggregations, joins, window functions, CTEs. DuckDB-compatible syntax.</p>
       </div>
       <div class="card">
         <div class="card-num">02</div>
-        <h3>Interactive REPL</h3>
-        <p>Syntax highlighting, tab completion, and multiple output formats (table, CSV, JSON).</p>
+        <h3>Graph Queries (SQL/PGQ)</h3>
+        <p>CREATE PROPERTY GRAPH, MATCH patterns, variable-length paths, shortest path — ISO SQL:2023 standard.</p>
       </div>
       <div class="card">
         <div class="card-num">03</div>
-        <h3>PgWire Server</h3>
-        <p>Connect with psql, DBeaver, or any PostgreSQL-compatible client.</p>
+        <h3>Vector Search</h3>
+        <p>Cosine similarity, euclidean distance, KNN search over F32 embedding columns. HNSW index for million-scale.</p>
       </div>
       <div class="card">
         <div class="card-num">04</div>
-        <h3>Rust API</h3>
-        <p>Embed Teide in your application with Context, Table, Graph, and Column types.</p>
+        <h3>Graph Algorithms</h3>
+        <p>PageRank, connected components, weighted Dijkstra, Louvain community detection — all as C engine kernels.</p>
       </div>
       <div class="card">
         <div class="card-num">05</div>
-        <h3>Graph API</h3>
-        <p>Build CSR relationship indexes, traverse neighbors, find shortest paths, and run Leapfrog Triejoin.</p>
+        <h3>PgWire + REPL</h3>
+        <p>Connect with psql, DBeaver, or any Postgres client. Interactive REPL with syntax highlighting.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">06</div>
+        <h3>Rust API</h3>
+        <p>Embed TeideDB with Context, Table, Graph, Column, Rel, and HnswIndex types.</p>
       </div>
     </div>
 
     <h2>Quick Example</h2>
-    <pre><code class="language-sql">-- Load CSV and query instantly
-CREATE TABLE trades AS SELECT * FROM read_csv('trades.csv');
+    <pre><code class="language-sql">-- Load data and define a property graph
+CREATE TABLE persons AS SELECT * FROM read_csv('persons.csv');
+CREATE TABLE friendships AS SELECT * FROM read_csv('friendships.csv');
 
-SELECT symbol, SUM(qty) AS total_qty, AVG(price) AS avg_price
-FROM trades
-GROUP BY symbol
-ORDER BY total_qty DESC
-LIMIT 5;</code></pre>
+CREATE PROPERTY GRAPH social
+VERTEX TABLES (persons LABEL Person)
+EDGE TABLES (friendships
+  SOURCE KEY (src) REFERENCES persons (id)
+  DESTINATION KEY (dst) REFERENCES persons (id)
+  LABEL Knows);
+
+-- Graph pattern matching + SQL analytics in one query
+SELECT person, connections FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[:Knows]-(b:Person)
+  COLUMNS (a.name AS person, COUNT(b.id) AS connections)
+) ORDER BY connections DESC LIMIT 10;</code></pre>
 
     <nav class="page-nav">
       <a href="./getting-started/" class="next"><span class="nav-label">Next</span><span class="nav-title">Getting Started</span></a>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vector Search - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="vector-search.html" class="sidebar-link active">Vector Search</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Vector Search</h1>
+    <p class="lead">Store embeddings as F32 columns, compute cosine similarity and euclidean distance, find nearest neighbors with brute-force KNN or HNSW index.</p>
+
+    <h2>Embedding Columns</h2>
+    <p>TeideDB stores dense float32 vectors using the <code>TD_F32</code> type. Embeddings use a flat N&times;D layout: N rows of D-dimensional vectors stored contiguously in memory. This layout is cache-friendly and SIMD-ready, enabling vectorized distance computations across the full column.</p>
+    <p>Create embedding columns via the Rust API:</p>
+    <pre><code class="language-rust">// Create a 3-dimensional embedding column
+let embeddings: Vec&lt;f32&gt; = vec![
+    0.1, 0.2, 0.3,   // row 0
+    0.4, 0.5, 0.6,   // row 1
+    0.7, 0.8, 0.9,   // row 2
+];
+table.create_embedding_column(&amp;ctx, "embedding", &amp;embeddings, 3)?;</code></pre>
+
+    <h2>Cosine Similarity</h2>
+    <pre><code class="language-sql">COSINE_SIMILARITY(embedding_col, ARRAY[1.0, 0.0, ...])</code></pre>
+    <p>Computes <code>dot(a, b) / (||a|| * ||b||)</code> per row. Returns an F64 similarity score where 1.0 means identical direction and 0.0 means orthogonal vectors.</p>
+    <pre><code class="language-sql">SELECT name, COSINE_SIMILARITY(embedding, ARRAY[0.1, 0.2, 0.3]) AS sim
+FROM documents
+ORDER BY sim DESC
+LIMIT 10;</code></pre>
+
+    <h2>Euclidean Distance</h2>
+    <pre><code class="language-sql">EUCLIDEAN_DISTANCE(embedding_col, ARRAY[1.0, 0.0, ...])</code></pre>
+    <p>Computes <code>sqrt(sum((a_i - b_i)^2))</code> per row. Returns an F64 distance where 0.0 means identical vectors.</p>
+    <pre><code class="language-sql">SELECT name, EUCLIDEAN_DISTANCE(embedding, ARRAY[0.1, 0.2, 0.3]) AS dist
+FROM documents
+ORDER BY dist ASC
+LIMIT 10;</code></pre>
+
+    <h2>KNN Search (Brute-Force)</h2>
+    <pre><code class="language-sql">KNN(table, 'embedding_col', ARRAY[...], k)</code></pre>
+    <p>Scans all rows and returns the K most similar vectors. The output contains <code>_rowid</code> and <code>_similarity</code> columns. Complexity is O(N*D), suitable for datasets with fewer than ~1M vectors.</p>
+    <pre><code class="language-sql">SELECT d.name, k._similarity
+FROM KNN(documents, 'embedding', ARRAY[0.1, 0.2, 0.3], 10) AS k
+JOIN documents d ON d._rowid = k._rowid;</code></pre>
+
+    <h2>HNSW Index</h2>
+    <p>For large-scale nearest neighbor search, TeideDB supports HNSW (Hierarchical Navigable Small Worlds) approximate nearest neighbor indexes. HNSW builds a multi-layer proximity graph that enables O(D * log N) query time.</p>
+
+    <h3>Parameters</h3>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>M</code></td><td>16</td><td>Max neighbors per node. Higher = better recall, more memory.</td></tr>
+        <tr><td><code>ef_construction</code></td><td>200</td><td>Build-time search width. Higher = better index quality, slower build.</td></tr>
+        <tr><td><code>ef_search</code></td><td>64</td><td>Query-time search width. Higher = better recall, slower query.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Creating an Index</h3>
+    <pre><code class="language-sql">CREATE VECTOR INDEX idx_docs_embedding
+ON documents (embedding)
+USING HNSW
+WITH (M = 16, ef_construction = 200);</code></pre>
+
+    <h3>Persistence</h3>
+    <p>HNSW indexes support save, load, and memory-mapped (mmap) access for efficient startup and shared-memory deployments.</p>
+
+    <h3>Performance</h3>
+    <table>
+      <thead>
+        <tr><th>Vectors</th><th>Brute-force</th><th>HNSW</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>100K</td><td>~50ms</td><td>~0.5ms</td></tr>
+        <tr><td>1M</td><td>~500ms</td><td>~1ms</td></tr>
+        <tr><td>10M</td><td>~5s</td><td>~2ms</td></tr>
+      </tbody>
+    </table>
+
+    <h2>GraphRAG Integration</h2>
+    <p>Combine vector search with graph traversal to build retrieval-augmented generation pipelines. Find similar documents first, then traverse their knowledge graph to discover related entities.</p>
+    <pre><code class="language-sql">-- Find similar documents, then traverse their knowledge graph
+SELECT entity.name, k._similarity
+FROM KNN(documents, 'embedding', $query_vec, 5) AS k
+JOIN documents d ON d._rowid = k._rowid
+JOIN GRAPH_TABLE (knowledge
+  MATCH (d:Document)-[:MENTIONS]-&gt;{1,2}(e:Entity)
+  COLUMNS (e.name)
+) AS entity ON entity._rowid = k._rowid;</code></pre>
+
+    <nav class="page-nav">
+      <a href="../graph/" class="prev">Graph Algorithms</a>
+      <a href="../cli/" class="next">CLI / REPL</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

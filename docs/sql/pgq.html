@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQL/PGQ — Graph Pattern Matching - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+    <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="pgq.html" class="sidebar-link active">SQL/PGQ</a>
+      <a href="graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../graph/" class="sidebar-link">Graph API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>SQL/PGQ &mdash; Graph Pattern Matching</h1>
+    <p class="lead">Create property graphs over existing tables and query them with Cypher-like MATCH patterns, composable with full SQL analytics.</p>
+
+    <h2>CREATE PROPERTY GRAPH</h2>
+    <p>Define a property graph by declaring vertex tables and edge tables over existing relational tables. Teide automatically builds compressed sparse row (CSR) indexes on creation for efficient traversal.</p>
+    <p>Syntax:</p>
+    <pre><code class="language-sql">CREATE PROPERTY GRAPH graph_name
+  VERTEX TABLES (
+    table_name
+      KEY (column_name)
+      LABEL label_name
+      PROPERTIES (col1, col2, ...)
+  )
+  EDGE TABLES (
+    table_name
+      KEY (column_name)
+      SOURCE KEY (src_col) REFERENCES vertex_table (key_col)
+      DESTINATION KEY (dst_col) REFERENCES vertex_table (key_col)
+      LABEL label_name
+      PROPERTIES (col1, col2, ...)
+  );</code></pre>
+    <p>Example &mdash; a social network with persons and friendships:</p>
+    <pre><code class="language-sql">-- Relational tables
+CREATE TABLE persons (id INTEGER, name VARCHAR, age INTEGER);
+INSERT INTO persons VALUES (1, 'Alice', 30), (2, 'Bob', 25),
+                           (3, 'Carol', 35), (4, 'Dave', 28);
+
+CREATE TABLE friendships (id INTEGER, src INTEGER, dst INTEGER, since DATE);
+INSERT INTO friendships VALUES (1, 1, 2, '2020-01-15'),
+                               (2, 1, 3, '2019-06-01'),
+                               (3, 2, 4, '2021-03-22'),
+                               (4, 3, 4, '2022-11-10');
+
+-- Property graph (builds CSR indexes automatically)
+CREATE PROPERTY GRAPH social
+  VERTEX TABLES (
+    persons KEY (id) LABEL Person PROPERTIES (name, age)
+  )
+  EDGE TABLES (
+    friendships KEY (id)
+      SOURCE KEY (src) REFERENCES persons (id)
+      DESTINATION KEY (dst) REFERENCES persons (id)
+      LABEL Knows
+      PROPERTIES (since)
+  );</code></pre>
+
+    <h2>DROP PROPERTY GRAPH</h2>
+    <pre><code class="language-sql">DROP PROPERTY GRAPH social;
+DROP PROPERTY GRAPH IF EXISTS social;</code></pre>
+
+    <h2>GRAPH_TABLE with MATCH</h2>
+    <p>Use <code>GRAPH_TABLE</code> in a <code>FROM</code> clause to run pattern matching queries against a property graph. The <code>MATCH</code> clause specifies the graph pattern, and the <code>COLUMNS</code> clause projects properties out as relational columns.</p>
+
+    <h3>Basic 1-Hop Pattern</h3>
+    <pre><code class="language-sql">SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[:Knows]->(b:Person)
+  COLUMNS (a.name AS person, b.name AS friend)
+);
+-- Alice | Bob
+-- Alice | Carol
+-- Bob   | Dave
+-- Carol | Dave</code></pre>
+
+    <h3>With WHERE Filter</h3>
+    <p>Predicates can be placed directly inside vertex or edge patterns:</p>
+    <pre><code class="language-sql">SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person)
+  COLUMNS (a.name AS person, b.name AS friend, b.age AS friend_age)
+);
+-- Alice | Bob   | 25
+-- Alice | Carol | 35</code></pre>
+
+    <h3>COLUMNS Clause</h3>
+    <p>The <code>COLUMNS</code> clause maps graph element properties to output columns. Each entry follows the form <code>element.property AS alias</code>:</p>
+    <pre><code class="language-sql">SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[e:Knows]->(b:Person)
+  COLUMNS (a.name AS src, b.name AS dst, e.since AS friends_since)
+);</code></pre>
+
+    <h2>Variable-Length Paths</h2>
+    <p>Quantifiers on edge patterns enable multi-hop traversal.</p>
+
+    <h3>Bounded Range <code>{min,max}</code></h3>
+    <pre><code class="language-sql">-- Friends within 1 to 3 hops
+SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person WHERE a.name = 'Alice')
+        -[:Knows]->{1,3}
+        (b:Person)
+  COLUMNS (a.name AS src, b.name AS reachable)
+);
+-- Alice | Bob
+-- Alice | Carol
+-- Alice | Dave</code></pre>
+
+    <h3>One or More <code>+</code></h3>
+    <pre><code class="language-sql">-- Transitive closure (1+ hops)
+SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[:Knows]->+(b:Person)
+  COLUMNS (a.name AS src, b.name AS reachable)
+);</code></pre>
+
+    <h3>Zero or More <code>*</code></h3>
+    <pre><code class="language-sql">-- Reflexive transitive closure (0+ hops, includes self)
+SELECT *
+FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[:Knows]->*(b:Person)
+  COLUMNS (a.name AS src, b.name AS reachable)
+);</code></pre>
+
+    <h2>Shortest Path</h2>
+    <p>Use <code>ANY SHORTEST</code> to find a single shortest path between nodes. Bind the path to a variable to use <code>path_length()</code>.</p>
+    <pre><code class="language-sql">SELECT *
+FROM GRAPH_TABLE (social
+  MATCH ANY SHORTEST
+    (a:Person WHERE a.name = 'Alice')
+    -[p:Knows]->+
+    (b:Person WHERE b.name = 'Dave')
+  COLUMNS (a.name AS src, b.name AS dst, path_length(p) AS hops)
+);
+-- Alice | Dave | 2</code></pre>
+
+    <h2>Edge Directions</h2>
+    <p>Patterns support three edge directions:</p>
+    <pre><code class="language-sql">-- Forward (outgoing edges)
+MATCH (a:Person)-[:Knows]->(b:Person)
+
+-- Reverse (incoming edges)
+MATCH (a:Person)<-[:Knows]-(b:Person)
+
+-- Undirected (either direction)
+MATCH (a:Person)-[:Knows]-(b:Person)</code></pre>
+
+    <h2>Composable with SQL</h2>
+    <p><code>GRAPH_TABLE</code> returns a standard relation, so it composes freely with all SQL constructs: <code>GROUP BY</code>, <code>ORDER BY</code>, <code>JOIN</code>, window functions, CTEs, and subqueries.</p>
+
+    <h3>Top 10 Most Connected People</h3>
+    <pre><code class="language-sql">SELECT person, COUNT(*) AS connections
+FROM GRAPH_TABLE (social
+  MATCH (a:Person)-[:Knows]-(b:Person)
+  COLUMNS (a.name AS person)
+)
+GROUP BY person
+ORDER BY connections DESC
+LIMIT 10;</code></pre>
+
+    <h3>Graph Results as CTE, Joined with Other Tables</h3>
+    <pre><code class="language-sql">WITH reachable AS (
+  SELECT *
+  FROM GRAPH_TABLE (social
+    MATCH (a:Person WHERE a.name = 'Alice')
+          -[:Knows]->{1,3}
+          (b:Person)
+    COLUMNS (b.name AS friend_name, b.age AS friend_age)
+  )
+)
+SELECT r.friend_name, r.friend_age, o.city
+FROM reachable r
+INNER JOIN locations o ON r.friend_name = o.name
+ORDER BY r.friend_age;</code></pre>
+
+    <nav class="page-nav">
+      <a href="table-functions.html" class="prev">Table Functions</a>
+      <a href="graph-algorithms.html" class="next">Graph Algorithms</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

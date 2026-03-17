@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph Algorithms - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="./" class="sidebar-link">Overview</a>
+      <a href="data-types.html" class="sidebar-link">Data Types</a>
+      <a href="ddl.html" class="sidebar-link">DDL</a>
+      <a href="dml.html" class="sidebar-link">DML</a>
+      <a href="queries.html" class="sidebar-link">Queries</a>
+      <a href="filtering.html" class="sidebar-link">Filtering</a>
+      <a href="expressions.html" class="sidebar-link">Expressions</a>
+      <a href="aggregation.html" class="sidebar-link">Aggregation</a>
+      <a href="joins.html" class="sidebar-link">Joins</a>
+      <a href="window-functions.html" class="sidebar-link">Window Functions</a>
+      <a href="sorting.html" class="sidebar-link">Sorting &amp; Limits</a>
+      <a href="set-operations.html" class="sidebar-link">Set Operations</a>
+      <a href="subqueries.html" class="sidebar-link">Subqueries &amp; CTEs</a>
+      <a href="functions.html" class="sidebar-link">Scalar Functions</a>
+      <a href="table-functions.html" class="sidebar-link">Table Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="graph-algorithms.html" class="sidebar-link active">Graph Algorithms</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tools</div>
+      <a href="../cli/" class="sidebar-link">CLI / REPL</a>
+      <a href="../server/" class="sidebar-link">PgWire Server</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Developer</div>
+      <a href="../api/" class="sidebar-link">Rust API</a>
+      <a href="../graph/" class="sidebar-link">Graph API</a>
+      <a href="../storage/" class="sidebar-link">Storage &amp; Symbols</a>
+      <a href="../architecture/" class="sidebar-link">Architecture</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">SQL REFERENCE</div>
+    <h1>Graph Algorithms</h1>
+    <p class="lead">PageRank, connected components, weighted shortest path, and community detection &mdash; executed as native C kernels on CSR indexes, exposed via GRAPH_TABLE COLUMNS functions.</p>
+
+    <h2>Overview</h2>
+    <p>TeideDB ships four graph algorithms as built-in C engine kernels. Key properties:</p>
+    <ul>
+      <li>All algorithms operate directly on <strong>CSR (Compressed Sparse Row)</strong> indexes &mdash; the same indexes used for MATCH traversals.</li>
+      <li><strong>No data copying</strong> &mdash; algorithms read CSR pointers in-place, avoiding materialization overhead.</li>
+      <li>Results compose with full SQL: <code>GROUP BY</code>, <code>ORDER BY</code>, <code>JOIN</code>, subqueries, and window functions all work on algorithm output columns.</li>
+    </ul>
+
+    <h2>PageRank</h2>
+    <pre><code class="language-sql">PAGERANK(graph_name, node_var)</code></pre>
+    <p>Iterative rank computation using the power-iteration method. Runs 20 iterations with a damping factor of 0.85. Returns an <code>F64</code> rank per node that sums to approximately 1.0.</p>
+    <pre><code class="language-sql">SELECT name, rank
+FROM GRAPH_TABLE (social
+  MATCH (p:Person)
+  COLUMNS (p.name AS name, PAGERANK(social, p) AS rank)
+)
+ORDER BY rank DESC
+LIMIT 10;</code></pre>
+
+    <h2>Connected Components</h2>
+    <pre><code class="language-sql">COMPONENT(graph_name, node_var)
+CONNECTED_COMPONENT(graph_name, node_var)</code></pre>
+    <p>Label-propagation algorithm that runs until convergence. Treats the graph as <strong>undirected</strong> regardless of edge direction. Returns an <code>I64</code> component ID per node &mdash; nodes in the same connected subgraph share the same ID.</p>
+    <pre><code class="language-sql">-- Find disconnected subgraphs and their sizes
+SELECT component_id, COUNT(*) AS size
+FROM GRAPH_TABLE (network
+  MATCH (n:Node)
+  COLUMNS (COMPONENT(network, n) AS component_id)
+)
+GROUP BY component_id
+ORDER BY size DESC;</code></pre>
+
+    <h2>Weighted Shortest Path (Dijkstra)</h2>
+    <pre><code class="language-sql">SHORTEST_DISTANCE(graph_name, src_id, dst_id, 'weight_col')</code></pre>
+    <p>Dijkstra&rsquo;s algorithm with edge weights read from a property table column. Returns an <code>F64</code> distance value. The weight column name is passed as a string literal.</p>
+    <pre><code class="language-sql">-- Distance between two cities via weighted road edges
+SELECT SHORTEST_DISTANCE(roads, 1, 42, 'km') AS distance;</code></pre>
+
+    <h2>Community Detection (Louvain)</h2>
+    <pre><code class="language-sql">COMMUNITY(graph_name, node_var)
+LOUVAIN(graph_name, node_var)</code></pre>
+    <p>Modularity-optimization algorithm (Louvain Phase 1). Treats the graph as <strong>undirected</strong>. Returns an <code>I64</code> community ID per node.</p>
+    <pre><code class="language-sql">-- Find communities in a social network
+SELECT community, COUNT(*) AS members, ARRAY_AGG(name) AS people
+FROM GRAPH_TABLE (social
+  MATCH (p:Person)
+  COLUMNS (
+    p.name AS name,
+    COMMUNITY(social, p) AS community
+  )
+)
+GROUP BY community
+ORDER BY members DESC;</code></pre>
+
+    <h2>Performance</h2>
+    <p>All algorithms run as C kernels with direct CSR pointer access &mdash; no FFI boundary per edge.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Algorithm</th>
+          <th>Time</th>
+          <th>Space</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PageRank</td>
+          <td>O(iter &times; E)</td>
+          <td>O(N)</td>
+        </tr>
+        <tr>
+          <td>Connected Components</td>
+          <td>O(diameter &times; E)</td>
+          <td>O(N)</td>
+        </tr>
+        <tr>
+          <td>Dijkstra</td>
+          <td>O((V + E) log V)</td>
+          <td>O(V + E)</td>
+        </tr>
+        <tr>
+          <td>Louvain</td>
+          <td>O(iter &times; E)</td>
+          <td>O(N)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <nav class="page-nav">
+      <a href="../graph/" class="prev">SQL/PGQ</a>
+      <a href="vector-search.html" class="next">Vector Search</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

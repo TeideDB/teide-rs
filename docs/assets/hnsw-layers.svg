@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="600" height="400">
+  <style>
+    .node { stroke-width: 1.5; }
+    .edge { stroke-width: 1; fill: none; }
+    .layer-bg { stroke: #d8dfe4; stroke-width: 1; rx: 8; ry: 8; }
+    .layer-label { font-family: 'Inter', sans-serif; font-size: 11px; fill: #3a5261; font-weight: 700; }
+    .annot { font-family: 'Inter', sans-serif; font-size: 9px; fill: #6b7f8e; }
+    .annot-hl { font-family: 'Inter', sans-serif; font-size: 10px; fill: #e89b50; font-weight: 600; }
+    .title { font-family: 'Inter', sans-serif; font-size: 13px; fill: #3a5261; font-weight: 700; }
+    .search-path { stroke: #e89b50; stroke-width: 2; fill: none; marker-end: url(#arrowO); stroke-dasharray: 6 3; }
+    .search-node { fill: #e89b50; stroke: #e89b50; stroke-width: 1.5; }
+  </style>
+  <defs>
+    <marker id="arrowO" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="none" stroke="#e89b50" stroke-width="1"/>
+    </marker>
+  </defs>
+
+  <rect width="600" height="400" fill="#f7f5f2"/>
+  <text x="24" y="28" class="title">HNSW Multi-Layer Index</text>
+
+  <!-- Layer 2 (top) -->
+  <rect x="60" y="48" width="420" height="72" class="layer-bg" fill="#ffffff"/>
+  <text x="76" y="68" class="layer-label">Layer 2</text>
+  <text x="76" y="80" class="annot">Coarse search</text>
+
+  <!-- Layer 2 nodes -->
+  <circle cx="200" cy="84" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="380" cy="84" r="8" class="node search-node"/>
+
+  <!-- Layer 2 edge -->
+  <line x1="208" y1="84" x2="372" y2="84" class="edge" stroke="#4b6777"/>
+
+  <!-- Layer 1 (middle) -->
+  <rect x="60" y="140" width="420" height="80" class="layer-bg" fill="#ffffff"/>
+  <text x="76" y="160" class="layer-label">Layer 1</text>
+  <text x="76" y="172" class="annot">Coarse search</text>
+
+  <!-- Layer 1 nodes -->
+  <circle cx="160" cy="184" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="250" cy="178" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="340" cy="184" r="8" class="node search-node"/>
+  <circle cx="420" cy="172" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+
+  <!-- Layer 1 edges -->
+  <line x1="168" y1="184" x2="242" y2="178" class="edge" stroke="#4b6777"/>
+  <line x1="258" y1="178" x2="332" y2="184" class="edge" stroke="#4b6777"/>
+  <line x1="348" y1="184" x2="412" y2="172" class="edge" stroke="#4b6777"/>
+  <line x1="168" y1="182" x2="332" y2="182" class="edge" stroke="#d8dfe4"/>
+
+  <!-- Layer 0 (bottom) -->
+  <rect x="60" y="240" width="420" height="88" class="layer-bg" fill="#ffffff"/>
+  <text x="76" y="260" class="layer-label">Layer 0</text>
+  <text x="76" y="272" class="annot">Fine search (ef neighbors)</text>
+
+  <!-- Layer 0 nodes -->
+  <circle cx="120" cy="290" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="175" cy="286" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="225" cy="294" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="275" cy="284" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="315" cy="296" r="8" class="node search-node"/>
+  <circle cx="355" cy="284" r="8" class="node search-node"/>
+  <circle cx="400" cy="292" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <circle cx="445" cy="286" r="8" class="node" fill="#dce8ee" stroke="#4b6777"/>
+
+  <!-- Layer 0 edges (dense) -->
+  <line x1="128" y1="290" x2="167" y2="286" class="edge" stroke="#d8dfe4"/>
+  <line x1="183" y1="286" x2="217" y2="294" class="edge" stroke="#d8dfe4"/>
+  <line x1="233" y1="294" x2="267" y2="284" class="edge" stroke="#d8dfe4"/>
+  <line x1="283" y1="284" x2="307" y2="296" class="edge" stroke="#4b6777"/>
+  <line x1="323" y1="296" x2="347" y2="284" class="edge" stroke="#4b6777"/>
+  <line x1="363" y1="284" x2="392" y2="292" class="edge" stroke="#d8dfe4"/>
+  <line x1="408" y1="292" x2="437" y2="286" class="edge" stroke="#d8dfe4"/>
+  <line x1="128" y1="288" x2="217" y2="292" class="edge" stroke="#d8dfe4"/>
+  <line x1="183" y1="284" x2="267" y2="282" class="edge" stroke="#d8dfe4"/>
+  <line x1="275" y1="292" x2="347" y2="286" class="edge" stroke="#d8dfe4"/>
+  <line x1="355" y1="292" x2="437" y2="288" class="edge" stroke="#d8dfe4"/>
+
+  <!-- Search path: enter at top, descend -->
+  <!-- Entry arrow -->
+  <line x1="380" y1="44" x2="380" y2="74" class="search-path"/>
+  <text x="395" y="52" class="annot-hl">Entry point</text>
+
+  <!-- Descend Layer 2 → Layer 1 -->
+  <line x1="380" y1="92" x2="344" y2="174" class="search-path"/>
+
+  <!-- Descend Layer 1 → Layer 0 -->
+  <line x1="340" y1="192" x2="320" y2="286" class="search-path"/>
+
+  <!-- Beam at Layer 0 -->
+  <path d="M315,296 Q335,310 355,284" class="search-path" stroke-dasharray="4 2"/>
+
+  <!-- Query label -->
+  <rect x="490" y="48" width="96" height="50" fill="none" stroke="#e89b50" stroke-width="1" rx="6"/>
+  <text x="538" y="66" class="annot-hl" text-anchor="middle">Query vector</text>
+  <text x="538" y="80" class="annot" text-anchor="middle" fill="#6b7f8e">enters at top</text>
+  <text x="538" y="90" class="annot" text-anchor="middle" fill="#6b7f8e">descends layers</text>
+
+  <!-- Legend -->
+  <rect x="60" y="348" width="420" height="36" fill="none" stroke="#d8dfe4" stroke-width="0.5" rx="6"/>
+  <circle cx="80" cy="366" r="5" class="node" fill="#dce8ee" stroke="#4b6777"/>
+  <text x="92" y="370" class="annot" text-anchor="start">Graph node</text>
+  <circle cx="170" cy="366" r="5" class="search-node"/>
+  <text x="182" y="370" class="annot" text-anchor="start">Search path node</text>
+  <line x1="290" y1="366" x2="318" y2="366" class="search-path"/>
+  <text x="326" y="370" class="annot" text-anchor="start">Search traversal</text>
+</svg>

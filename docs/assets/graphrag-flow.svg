@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
+  <style>
+    .box { fill: #ffffff; stroke: #d8dfe4; stroke-width: 1; rx: 8; ry: 8; }
+    .box-teide { fill: #dce8ee; stroke: #4b6777; stroke-width: 1.5; rx: 8; ry: 8; }
+    .label { font-family: 'Inter', sans-serif; font-size: 11px; fill: #1c2d38; text-anchor: middle; font-weight: 600; }
+    .sublabel { font-family: 'JetBrains Mono', monospace; font-size: 8px; fill: #6b7f8e; text-anchor: middle; }
+    .arrow { stroke: #4b6777; stroke-width: 1.5; fill: none; marker-end: url(#arrowR); }
+    .title { font-family: 'Inter', sans-serif; font-size: 13px; fill: #3a5261; font-weight: 700; }
+    .teide-zone { fill: #dce8ee; stroke: #4b6777; stroke-width: 1.5; rx: 10; ry: 10; opacity: 0.3; }
+    .teide-label { font-family: 'Inter', sans-serif; font-size: 10px; fill: #4b6777; font-weight: 700; text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="arrowR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#4b6777" stroke-width="1"/>
+    </marker>
+  </defs>
+
+  <rect width="800" height="200" fill="#f7f5f2"/>
+  <text x="24" y="24" class="title">GraphRAG Pipeline</text>
+
+  <!-- TeideDB zone background -->
+  <rect x="330" y="38" width="274" height="120" class="teide-zone"/>
+  <text x="467" y="54" class="teide-label">TeideDB (single query)</text>
+
+  <!-- Step 1: Question -->
+  <rect x="20" y="62" width="90" height="48" class="box"/>
+  <text x="65" y="82" class="label" font-size="18">?</text>
+  <text x="65" y="96" class="label">Question</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="110" y1="86" x2="130" y2="86" class="arrow"/>
+
+  <!-- Step 2: Embed -->
+  <rect x="132" y="62" width="80" height="48" class="box"/>
+  <text x="172" y="84" class="label">Embed</text>
+  <text x="172" y="122" class="sublabel">LLM API</text>
+
+  <!-- Arrow 2→3 -->
+  <line x1="212" y1="86" x2="232" y2="86" class="arrow"/>
+
+  <!-- Step 3: Vector Search (inside TeideDB zone) -->
+  <rect x="340" y="62" width="120" height="48" class="box-teide"/>
+  <text x="400" y="82" class="label">Vector Search</text>
+  <text x="400" y="94" class="sublabel">KNN over embeddings</text>
+
+  <!-- Arrow between embed and vector search (longer) -->
+  <!-- Redraw: arrow from Embed to Vector Search -->
+
+  <!-- Step 4: Graph Traverse (inside TeideDB zone) -->
+  <rect x="474" y="62" width="120" height="48" class="box-teide"/>
+  <text x="534" y="82" class="label">Graph Traverse</text>
+  <text x="534" y="94" class="sublabel">MATCH expansion</text>
+
+  <!-- Arrow 3→4 -->
+  <line x1="460" y1="86" x2="474" y2="86" class="arrow"/>
+
+  <!-- Arrow embed → vector search (bridge) -->
+  <line x1="212" y1="86" x2="338" y2="86" class="arrow"/>
+
+  <!-- Arrow 4→5 -->
+  <line x1="594" y1="86" x2="614" y2="86" class="arrow"/>
+
+  <!-- Step 5: Context -->
+  <rect x="616" y="62" width="72" height="48" class="box"/>
+  <text x="652" y="84" class="label">Context</text>
+  <text x="652" y="122" class="sublabel">combined results</text>
+
+  <!-- Arrow 5→6 -->
+  <line x1="688" y1="86" x2="704" y2="86" class="arrow"/>
+
+  <!-- Step 6: LLM Answer -->
+  <rect x="706" y="62" width="78" height="48" class="box"/>
+  <text x="745" y="84" class="label">LLM Answer</text>
+  <text x="745" y="122" class="sublabel">final response</text>
+
+  <!-- Bottom annotation -->
+  <rect x="20" y="170" width="760" height="22" fill="none" stroke="#d8dfe4" stroke-width="0.5" rx="4"/>
+  <text x="400" y="184" style="font-family:'Inter',sans-serif; font-size:9px; fill:#4b6777; text-anchor:middle; font-weight:500;">TeideDB combines vector search + graph traversal in a single SQL/PGQ query -- no external orchestration needed</text>
+</svg>
