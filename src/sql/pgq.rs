@@ -941,6 +941,37 @@ fn read_key_value(
     }
 }
 
+/// Rebuild vertex key maps for a vertex label from the current table data.
+/// Called during graph invalidation after DML to keep key maps consistent.
+pub(super) fn rebuild_vertex_key_map(
+    vl: &mut VertexLabel,
+    stored: &super::StoredTable,
+) -> Result<(), SqlError> {
+    let col_idx = find_col_idx(&stored.table, &vl.key_column).ok_or_else(|| {
+        SqlError::Plan(format!(
+            "Key column '{}' not found in vertex table '{}'",
+            vl.key_column, vl.table_name
+        ))
+    })?;
+    let nrows = checked_logical_nrows(stored)?;
+    let mut user_to_row = HashMap::with_capacity(nrows);
+    let mut row_to_user = Vec::with_capacity(nrows);
+    for row in 0..nrows {
+        let key_val = read_key_value(&stored.table, col_idx, row, &vl.key_column, &vl.table_name)?;
+        if user_to_row.contains_key(&key_val) {
+            return Err(SqlError::Plan(format!(
+                "Duplicate key {:?} in vertex table '{}'",
+                key_val, vl.table_name
+            )));
+        }
+        user_to_row.insert(key_val.clone(), row);
+        row_to_user.push(key_val);
+    }
+    vl.user_to_row = user_to_row;
+    vl.row_to_user = row_to_user;
+    Ok(())
+}
+
 /// Remap edge FK values through vertex key maps and build a CSR `Rel`.
 /// Used during initial graph construction and graph rebuild after DML.
 pub(super) fn remap_and_build_rel(
@@ -1087,25 +1118,60 @@ impl PartialOrd for ScalarValue {
 /// separate tokens joined by spaces. This reassembles them for sqlparser.
 /// Also normalizes "a . col" → "a.col" compound identifiers.
 fn normalize_filter_text(filter_text: &str) -> String {
+    // Tokenize quote-aware: preserve single-quoted strings as atomic tokens.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut chars = filter_text.chars().peekable();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if ch == '\'' {
+            // Collect entire single-quoted string as one token
+            let mut tok = String::new();
+            tok.push(chars.next().unwrap()); // opening quote
+            while let Some(&c) = chars.peek() {
+                tok.push(chars.next().unwrap());
+                if c == '\'' {
+                    // Check for escaped quote ('')
+                    if chars.peek() == Some(&'\'') {
+                        tok.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            tokens.push(tok);
+        } else {
+            // Non-quoted token: collect until whitespace or quote
+            let mut tok = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() || c == '\'' {
+                    break;
+                }
+                tok.push(chars.next().unwrap());
+            }
+            tokens.push(tok);
+        }
+    }
+
     let mut result = String::with_capacity(filter_text.len());
-    let tokens: Vec<&str> = filter_text.split_whitespace().collect();
     let mut i = 0;
     while i < tokens.len() {
         if i > 0 {
-            // Check if we should suppress the space (for compound identifiers)
-            let prev = tokens[i - 1];
-            let curr = tokens[i];
+            let prev = &tokens[i - 1];
+            let curr = &tokens[i];
             if prev == "." || curr == "." {
                 // Don't add space around dots: "a . name" -> "a.name"
             } else {
                 result.push(' ');
             }
         }
-        let tok = tokens[i];
+        let tok = &tokens[i];
         // Try to merge multi-char operators
         if i + 1 < tokens.len() {
-            let next = tokens[i + 1];
-            let merged = match (tok, next) {
+            let next = &tokens[i + 1];
+            let merged = match (tok.as_str(), next.as_str()) {
                 (">", "=") => Some(">="),
                 ("<", "=") => Some("<="),
                 ("!", "=") => Some("!="),

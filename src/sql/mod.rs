@@ -419,6 +419,22 @@ impl Session {
             .map(|(name, _)| name.clone())
             .collect();
 
+        // First rebuild vertex key maps for any affected vertex tables
+        for graph_name in &affected {
+            let graph = self.graphs.get_mut(graph_name).unwrap();
+            for vl in graph.vertex_labels.values_mut() {
+                if vl.table_name == table_name {
+                    let stored = self.tables.get(&vl.table_name).ok_or_else(|| {
+                        SqlError::Plan(format!(
+                            "Cannot rebuild graph '{}': vertex table '{}' not found",
+                            graph_name, vl.table_name
+                        ))
+                    })?;
+                    pgq::rebuild_vertex_key_map(vl, stored)?;
+                }
+            }
+        }
+
         // Collect all rebuilt edges first, only apply if ALL graphs validate
         let mut rebuilt: Vec<(String, Vec<(String, pgq::StoredRel)>)> = Vec::new();
 
@@ -446,8 +462,8 @@ impl Session {
                     ))
                 })?;
 
-                let n_src = pgq::checked_nrows(&src_stored.table)? as i64;
-                let n_dst = pgq::checked_nrows(&dst_stored.table)? as i64;
+                let n_src = pgq::checked_logical_nrows(src_stored)? as i64;
+                let n_dst = pgq::checked_logical_nrows(dst_stored)? as i64;
 
                 // Look up vertex labels for key maps
                 let src_vl = graph.vertex_labels.values()
