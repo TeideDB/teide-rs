@@ -591,24 +591,33 @@ pub(crate) fn plan_graph_table(
     let is_var_length = pattern.edges.len() == 1
         && !matches!(pattern.edges[0].quantifier, PathQuantifier::One);
 
+    // Detect cyclic variable binding (same variable at first and last node).
+    // Cyclic patterns need the Rust BFS planner because the C engine's var_expand
+    // uses visited-set deduplication which prevents revisiting the start node.
+    let is_cyclic_binding = pattern.nodes.len() >= 2
+        && matches!(
+            (&pattern.nodes[0].variable, &pattern.nodes.last().unwrap().variable),
+            (Some(a), Some(b)) if a == b
+        );
+
     match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
         // ANY SHORTEST always uses the shortest-path planner (supports dst filters,
         // _node/_depth columns).
-        (2, 1, PathMode::AnyShortest) => {
+        (2, 1, PathMode::AnyShortest) if !is_cyclic_binding => {
             plan_shortest_path(session, graph, pattern, &expr.columns)
         }
-        (2, 1, PathMode::Walk) if is_var_length => {
+        (2, 1, PathMode::Walk) if is_var_length && !is_cyclic_binding => {
             plan_var_length(session, graph, pattern, &expr.columns)
         }
-        (2, 1, PathMode::Walk) => {
+        (2, 1, PathMode::Walk) if !is_var_length && !is_cyclic_binding => {
             plan_single_hop(session, graph, pattern, &expr.columns)
         }
         (1, 0, _) => {
             plan_algorithm_query(session, graph, pattern, &expr.columns)
         }
-        _ if pattern.nodes.len() >= 3 && pattern.edges.len() >= 2 => {
+        _ if pattern.nodes.len() >= 2 && pattern.edges.len() >= 1 => {
             let all_fixed = pattern.edges.iter().all(|e| matches!(e.quantifier, PathQuantifier::One));
-            if all_fixed {
+            if all_fixed && !is_cyclic_binding {
                 plan_multi_hop_fixed(session, graph, pattern, &expr.columns, &match_clause.mode)
             } else {
                 plan_multi_hop_variable(session, graph, pattern, &expr.columns, &match_clause.mode)
@@ -1646,7 +1655,7 @@ fn plan_multi_hop_fixed(
     graph: &PropertyGraph,
     pattern: &PathPattern,
     columns: &[ColumnEntry],
-    _mode: &PathMode,
+    mode: &PathMode,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let nodes = &pattern.nodes;
     let edges = &pattern.edges;
@@ -1740,17 +1749,14 @@ fn plan_multi_hop_fixed(
     }
 
     // Detect cyclic variable binding: first and last node share the same variable name.
-    // Cyclic patterns require special handling in wco_join (a closing edge) which is
-    // not yet implemented — reject for now (handled by Task 4 / plan_multi_hop_variable).
+    // The C LFTJ default plan doesn't support cyclic variable mappings, so delegate
+    // cyclic fixed-hop patterns to the BFS planner which handles is_cyclic natively.
     let is_cyclic = match (&nodes[0].variable, &nodes[nodes.len() - 1].variable) {
         (Some(a), Some(b)) => a == b,
         _ => false,
     };
     if is_cyclic {
-        return Err(SqlError::Plan(
-            "Cyclic variable binding in fixed-hop multi-edge patterns is not yet supported. \
-             Use variable-length patterns for cycles.".into(),
-        ));
+        return plan_multi_hop_variable(session, graph, pattern, columns, mode);
     }
 
     // Reject WHERE filters on intermediate/destination nodes — not yet supported.
@@ -2101,7 +2107,6 @@ fn plan_var_length(
     let result = g.execute(var_exp)?;
 
     // var_expand result has: _start, _end, _depth
-    // Project the requested COLUMNS using _start/_end to look up properties
     project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table)
 }
 
@@ -2129,19 +2134,25 @@ fn project_var_length_columns(
 
     let mut start_indices = Vec::with_capacity(nrows);
     let mut end_indices = Vec::with_capacity(nrows);
+    let mut depth_values: Vec<i64> = Vec::with_capacity(nrows);
     for row in 0..nrows {
         let start_val = var_result.get_i64(start_idx_col, row)
             .ok_or_else(|| SqlError::Plan(format!("NULL _start index at row {row}")))?;
         if start_val < 0 {
             return Err(SqlError::Plan(format!("Negative _start index {start_val} at row {row}")));
         }
-        start_indices.push(start_val as usize);
         let end_val = var_result.get_i64(end_idx_col, row)
             .ok_or_else(|| SqlError::Plan(format!("NULL _end index at row {row}")))?;
         if end_val < 0 {
             return Err(SqlError::Plan(format!("Negative _end index {end_val} at row {row}")));
         }
+        start_indices.push(start_val as usize);
         end_indices.push(end_val as usize);
+        depth_values.push(
+            depth_idx_col
+                .and_then(|ci| var_result.get_i64(ci, row))
+                .unwrap_or(0),
+        );
     }
 
     // Build column specs in COLUMNS clause order
@@ -2218,12 +2229,7 @@ fn project_var_length_columns(
                     csv.push_str(&get_cell_string(dst_table, spec.table_col_idx, end_indices[row])?);
                 }
                 VarColKind::Depth => {
-                    if let Some(d_col) = depth_idx_col {
-                        let d = var_result.get_i64(d_col, row).unwrap_or(0);
-                        csv.push_str(&d.to_string());
-                    } else {
-                        csv.push('0');
-                    }
+                    csv.push_str(&depth_values[row].to_string());
                 }
             }
         }

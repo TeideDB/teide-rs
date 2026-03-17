@@ -72,3 +72,41 @@ SELECT * FROM GRAPH_TABLE (fin_graph MATCH (p:Person WHERE p.name = 'Alice')-[:O
 ----
 Checking_A Checking_B
 Checking_A Savings_A
+
+# --- Cyclic variable binding ---
+
+# Triangle detection: (p:Person)-[e1:Knows]->(q:Person)-[e2:Knows]->(r:Person)-[e3:Knows]->(p:Person)
+# Using existing mh_graph: Alice→Bob, Alice→Carol, Bob→Carol (no back edges so no triangles)
+
+# First, add back-edges to create a triangle: Bob→Alice and Carol→Bob
+statement ok
+CREATE TABLE mh_knows2 (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO mh_knows2 VALUES (0, 1), (0, 2), (1, 2), (1, 0), (2, 0)
+
+statement ok
+CREATE TABLE mh_persons2 (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO mh_persons2 VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')
+
+statement ok
+CREATE PROPERTY GRAPH cycle_graph VERTEX TABLES (mh_persons2 LABEL Person) EDGE TABLES (mh_knows2 SOURCE KEY (src) REFERENCES mh_persons2 (id) DESTINATION KEY (dst) REFERENCES mh_persons2 (id) LABEL Knows)
+
+# Cyclic 3-hop: (p)-[Knows]->(q)-[Knows]->(r)-[Knows]->(p) starting from Alice
+# Alice→Bob→Carol→Alice is a valid cycle
+query TTT
+SELECT * FROM GRAPH_TABLE (cycle_graph MATCH (p:Person WHERE p.name = 'Alice')-[:Knows]->(q:Person)-[:Knows]->(r:Person)-[:Knows]->(p:Person) COLUMNS (p.name AS p, q.name AS q, r.name AS r)) ORDER BY 2, 3
+----
+Alice Bob Carol
+
+# Variable-length cycle: find all 2-to-3 hop cycles from Alice back to Alice
+# 2-hop: Alice→Bob→Alice, Alice→Carol→Alice
+# 3-hop: Alice→Bob→Carol→Alice
+query TI
+SELECT * FROM GRAPH_TABLE (cycle_graph MATCH (p:Person WHERE p.name = 'Alice')-[:Knows]->{2,3}(p:Person) COLUMNS (p.name AS pname, path_length(p, p) AS hops)) ORDER BY 2
+----
+Alice 2
+Alice 2
+Alice 3

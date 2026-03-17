@@ -2264,3 +2264,4 @@ fn test_update_overwrites_previous_value() {
     assert_eq!(r.table.get_i64(1, 0), Some(100));
     assert_eq!(r.table.get_i64(1, 1), Some(20));
 }
+
