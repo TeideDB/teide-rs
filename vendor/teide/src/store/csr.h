@@ -72,7 +72,7 @@ static inline int64_t* td_csr_neighbors(td_csr_t* csr, int64_t node, int64_t* ou
     }
     int64_t* o = (int64_t*)td_data(csr->offsets);
     int64_t* t = (int64_t*)td_data(csr->targets);
-    *out_count = o[node + 1] - o[node];
+    if (out_count) *out_count = o[node + 1] - o[node];
     return &t[o[node]];
 }
 
