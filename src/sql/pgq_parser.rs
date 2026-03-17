@@ -855,6 +855,7 @@ fn parse_edge_and_node(
     let mut variable = None;
     let mut label = None;
     let mut quantifier = PathQuantifier::One;
+    let mut cost_expr: Option<String> = None;
 
     if t.peek() == Some("[") {
         t.next()?; // consume '['
@@ -872,6 +873,20 @@ fn parse_edge_and_node(
             } else {
                 variable = Some(first_tok.to_lowercase());
             }
+        }
+
+        // Parse optional COST expression inside edge brackets: [r:Label COST r.weight]
+        if t.peek().map(|s| s.eq_ignore_ascii_case("COST")) == Some(true) {
+            t.next()?; // consume COST
+            let mut expr_tokens = Vec::new();
+            // Collect tokens until ']'
+            while t.peek() != Some("]") && t.peek().is_some() {
+                expr_tokens.push(t.next()?);
+            }
+            if expr_tokens.is_empty() {
+                return Err(SqlError::Parse("COST keyword requires an expression".into()));
+            }
+            cost_expr = Some(expr_tokens.join(""));
         }
 
         t.expect("]")?;
@@ -931,6 +946,7 @@ fn parse_edge_and_node(
             label,
             direction,
             quantifier,
+            cost_expr,
         },
         node,
     ))

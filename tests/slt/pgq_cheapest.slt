@@ -1,0 +1,67 @@
+# SQL/PGQ: CHEAPEST path with COST expression (Dijkstra-based weighted shortest path)
+
+# --- Test 1: Direct route is cheaper than multi-hop ---
+
+statement ok
+CREATE TABLE cp_cities (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO cp_cities VALUES (0, 'NYC'), (1, 'Chicago'), (2, 'Denver'), (3, 'SF')
+
+statement ok
+CREATE TABLE cp_routes (src INTEGER, dst INTEGER, distance DOUBLE)
+
+statement ok
+INSERT INTO cp_routes VALUES (0, 1, 790.0), (1, 2, 920.0), (2, 3, 1240.0), (0, 3, 2900.0)
+
+statement ok
+CREATE PROPERTY GRAPH cp_graph VERTEX TABLES (cp_cities LABEL City) EDGE TABLES (cp_routes SOURCE KEY (src) REFERENCES cp_cities (id) DESTINATION KEY (dst) REFERENCES cp_cities (id) LABEL Route)
+
+# Cheapest path NYC to SF: direct (2900) vs via Chicago->Denver->SF (790+920+1240=2950)
+# Direct is cheaper, Dijkstra should pick 2900.0
+query TTR
+SELECT * FROM GRAPH_TABLE (cp_graph MATCH p = ANY SHORTEST (a:City WHERE a.name = 'NYC')-[r:Route COST r.distance]->+(b:City WHERE b.name = 'SF') COLUMNS (a.name AS src, b.name AS dst, path_cost(p) AS cost))
+----
+NYC SF 2900.0
+
+# --- Test 2: Indirect route is cheaper ---
+
+statement ok
+CREATE TABLE cp2_cities (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO cp2_cities VALUES (0, 'A'), (1, 'B'), (2, 'C')
+
+statement ok
+CREATE TABLE cp2_routes (src INTEGER, dst INTEGER, cost DOUBLE)
+
+statement ok
+INSERT INTO cp2_routes VALUES (0, 1, 1.0), (1, 2, 1.0), (0, 2, 10.0)
+
+statement ok
+CREATE PROPERTY GRAPH cp2_graph VERTEX TABLES (cp2_cities LABEL City) EDGE TABLES (cp2_routes SOURCE KEY (src) REFERENCES cp2_cities (id) DESTINATION KEY (dst) REFERENCES cp2_cities (id) LABEL Route)
+
+# A->B->C costs 2.0, A->C costs 10.0 — indirect route wins
+query TTR
+SELECT * FROM GRAPH_TABLE (cp2_graph MATCH p = ANY SHORTEST (a:City WHERE a.name = 'A')-[r:Route COST r.cost]->+(b:City WHERE b.name = 'C') COLUMNS (a.name AS src, b.name AS dst, path_cost(p) AS cost))
+----
+A C 2.0
+
+# Cleanup
+statement ok
+DROP PROPERTY GRAPH cp2_graph
+
+statement ok
+DROP TABLE cp2_routes
+
+statement ok
+DROP TABLE cp2_cities
+
+statement ok
+DROP PROPERTY GRAPH cp_graph
+
+statement ok
+DROP TABLE cp_routes
+
+statement ok
+DROP TABLE cp_cities

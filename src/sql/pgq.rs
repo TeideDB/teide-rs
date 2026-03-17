@@ -196,6 +196,9 @@ pub(crate) struct EdgePattern {
     pub label: Option<String>,
     pub direction: MatchDirection,
     pub quantifier: PathQuantifier,
+    /// Optional COST expression for weighted shortest path (Dijkstra).
+    /// e.g. `COST e.weight` stores `"e.weight"`.
+    pub cost_expr: Option<String>,
 }
 
 /// A single path pattern: node-edge-node-edge-...-node
@@ -609,6 +612,18 @@ pub(crate) fn plan_graph_table(
             (&pattern.nodes[0].variable, &pattern.nodes.last().unwrap().variable),
             (Some(a), Some(b)) if a == b
         );
+
+    // Check if any edge has a COST expression → route to Dijkstra-based cheapest path planner
+    let has_cost = pattern.edges.iter().any(|e| e.cost_expr.is_some());
+    if has_cost {
+        if pattern.nodes.len() != 2 || pattern.edges.len() != 1 {
+            return Err(SqlError::Plan(
+                "COST expression is only supported on single-edge patterns: (a)-[e:Label COST expr]->+(b)"
+                    .into(),
+            ));
+        }
+        return plan_cheapest_path(session, graph, pattern, &expr.columns);
+    }
 
     match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
         // ANY SHORTEST always uses the shortest-path planner (supports dst filters,
@@ -3370,6 +3385,217 @@ fn plan_shortest_path(
 
     let result = csv_to_table(session, &csv, &col_names)?;
     Ok((result, col_names))
+}
+
+// ---------------------------------------------------------------------------
+// Cheapest (weighted shortest) path planner
+// ---------------------------------------------------------------------------
+
+/// Plan an ANY SHORTEST MATCH with COST expression using Dijkstra.
+///
+/// When an edge pattern carries a COST expression (e.g. `COST r.weight`),
+/// the planner invokes the C engine's Dijkstra kernel to find the
+/// minimum-weight path between source and destination nodes.
+///
+/// Result: one summary row per query with source/destination properties
+/// and `path_cost(p)` for the total weight of the cheapest path.
+fn plan_cheapest_path(
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    columns: &[ColumnEntry],
+) -> Result<(Table, Vec<String>), SqlError> {
+    let src_node = &pattern.nodes[0];
+    let edge = &pattern.edges[0];
+    let dst_node = &pattern.nodes[1];
+
+    let edge_label = edge.label.as_deref().ok_or_else(|| {
+        SqlError::Plan("Edge pattern must specify a label for COST queries".into())
+    })?;
+    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label}' not found"))
+    })?;
+
+    // Dijkstra requires same src/dst vertex table (CSR constraint).
+    if stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
+        return Err(SqlError::Plan(
+            "CHEAPEST path (COST) is not supported on edges with different source and \
+             destination vertex tables (heterogeneous endpoints)."
+                .into(),
+        ));
+    }
+
+    let is_reverse = edge.direction == MatchDirection::Reverse;
+    let (left_table, right_table) = if is_reverse {
+        (
+            &stored_rel.edge_label.dst_ref_table,
+            &stored_rel.edge_label.src_ref_table,
+        )
+    } else {
+        (
+            &stored_rel.edge_label.src_ref_table,
+            &stored_rel.edge_label.dst_ref_table,
+        )
+    };
+
+    // Resolve source and destination node IDs from WHERE filters
+    let src_id = extract_node_id(src_node, left_table, session)?;
+    let dst_id = extract_node_id(dst_node, right_table, session)?;
+
+    // Resolve cost expression to weight column name.
+    // COST expression is like "e.distance" or "r.weight" — extract the column part.
+    let cost_text = edge.cost_expr.as_deref().ok_or_else(|| {
+        SqlError::Plan("Internal error: plan_cheapest_path called without cost_expr".into())
+    })?;
+    let weight_col = if let Some(dot_pos) = cost_text.find('.') {
+        &cost_text[dot_pos + 1..]
+    } else {
+        cost_text
+    };
+
+    // Attach edge properties so Dijkstra can read weight values.
+    let edge_table_name = &stored_rel.edge_label.table_name;
+    let edge_table = &session
+        .tables
+        .get(edge_table_name)
+        .ok_or_else(|| SqlError::Plan(format!("Edge table '{edge_table_name}' not found")))?
+        .table;
+    stored_rel.rel.set_props(edge_table);
+
+    let src_table_name = &stored_rel.edge_label.src_ref_table;
+    let src_table = &session
+        .tables
+        .get(src_table_name)
+        .ok_or_else(|| SqlError::Plan(format!("Table '{src_table_name}' not found")))?
+        .table;
+
+    let (_min_depth, max_depth): (u8, u8) = match edge.quantifier {
+        PathQuantifier::Range { min, max } => (min, max),
+        PathQuantifier::Plus => (1, 255),
+        PathQuantifier::Star => (0, 255),
+        PathQuantifier::One => (1, 1),
+    };
+
+    let g = session.ctx.graph(src_table)?;
+    let src_col = g.const_i64(src_id)?;
+    let dst_col = g.const_i64(dst_id)?;
+    let result_col = g.dijkstra(src_col, Some(dst_col), &stored_rel.rel, weight_col, max_depth)?;
+    let result = g.execute(result_col)?;
+
+    // Dijkstra result has _node (I64) and _dist (F64) columns.
+    let nrows = checked_nrows(&result)?;
+
+    let _node_col_idx = find_col_idx(&result, "_node")
+        .ok_or_else(|| SqlError::Plan("Dijkstra result missing _node column".into()))?;
+    let dist_col_idx = find_col_idx(&result, "_dist")
+        .ok_or_else(|| SqlError::Plan("Dijkstra result missing _dist column".into()))?;
+
+    // Total cost is the _dist value at the destination row (last row).
+    let total_cost: f64 = if nrows > 0 {
+        result.get_f64(dist_col_idx, nrows - 1).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    // Get vertex tables for property lookups
+    let src_vtable = &session
+        .tables
+        .get(left_table.as_str())
+        .ok_or_else(|| SqlError::Plan(format!("Table '{left_table}' not found")))?
+        .table;
+    let dst_vtable = &session
+        .tables
+        .get(right_table.as_str())
+        .ok_or_else(|| SqlError::Plan(format!("Table '{right_table}' not found")))?
+        .table;
+
+    let src_var = src_node.variable.as_deref().unwrap_or("__src");
+    let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+
+    // Project COLUMNS — cheapest path returns one summary row.
+    enum CpColKind {
+        SrcProp(usize), // column index into src vertex table
+        DstProp(usize), // column index into dst vertex table
+        PathCost,       // total path cost
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_specs: Vec<CpColKind> = Vec::new();
+
+    for entry in columns {
+        let expr = &entry.expr;
+        let alias = entry.alias.as_deref();
+        let lower = expr.to_lowercase();
+
+        if lower.contains("path_cost") {
+            col_names.push(alias.unwrap_or("path_cost").to_string());
+            col_specs.push(CpColKind::PathCost);
+        } else if let Some(dot_pos) = lower.find('.') {
+            let var = lower[..dot_pos].trim();
+            let col = lower[dot_pos + 1..].trim();
+            let out_name = alias.unwrap_or(col).to_string();
+
+            if var == src_var {
+                let col_idx = find_col_idx(src_vtable, col).ok_or_else(|| {
+                    SqlError::Plan(format!("Column '{col}' not found in source table"))
+                })?;
+                col_names.push(out_name);
+                col_specs.push(CpColKind::SrcProp(col_idx));
+            } else if var == dst_var {
+                let col_idx = find_col_idx(dst_vtable, col).ok_or_else(|| {
+                    SqlError::Plan(format!("Column '{col}' not found in destination table"))
+                })?;
+                col_names.push(out_name);
+                col_specs.push(CpColKind::DstProp(col_idx));
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in CHEAPEST path COLUMNS. Available: {src_var}, {dst_var}"
+                )));
+            }
+        } else {
+            return Err(SqlError::Plan(format!(
+                "COLUMNS: unsupported expression '{expr}' in CHEAPEST path"
+            )));
+        }
+    }
+
+    if col_specs.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Build a single result row via CSV.
+    let csv_col_names: Vec<String> = (0..col_names.len()).map(|i| format!("__c{i}")).collect();
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    // If path was found (nrows > 0), emit one result row.
+    if nrows > 0 {
+        for (i, spec) in col_specs.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            match spec {
+                CpColKind::SrcProp(col_idx) => {
+                    csv.push_str(&get_cell_string(src_vtable, *col_idx, src_id as usize)?);
+                }
+                CpColKind::DstProp(col_idx) => {
+                    csv.push_str(&get_cell_string(dst_vtable, *col_idx, dst_id as usize)?);
+                }
+                CpColKind::PathCost => {
+                    // Ensure the float always has a decimal point so the C
+                    // engine reads it as F64 rather than I64.
+                    let s = total_cost.to_string();
+                    csv.push_str(&s);
+                    if !s.contains('.') {
+                        csv.push_str(".0");
+                    }
+                }
+            }
+        }
+        csv.push('\n');
+    }
+
+    let result_table = csv_to_table(session, &csv, &col_names)?;
+    Ok((result_table, col_names))
 }
 
 /// Reconstruct shortest path using BFS over the CSR adjacency structure.

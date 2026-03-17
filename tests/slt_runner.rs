@@ -276,3 +276,8 @@ fn slt_pgq_edge_props() {
 fn slt_pgq_dst_filters() {
     run_slt("tests/slt/pgq_dst_filters.slt");
 }
+
+#[test]
+fn slt_pgq_cheapest() {
+    run_slt("tests/slt/pgq_cheapest.slt");
+}
