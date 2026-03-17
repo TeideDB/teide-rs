@@ -1,0 +1,59 @@
+# SQL/PGQ: DESCRIBE PROPERTY GRAPH
+
+# Setup: create vertex and edge tables
+statement ok
+CREATE TABLE desc_persons (id INTEGER, name VARCHAR, age INTEGER)
+
+statement ok
+INSERT INTO desc_persons VALUES (0, 'Alice', 30), (1, 'Bob', 25)
+
+statement ok
+CREATE TABLE desc_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO desc_knows VALUES (0, 1)
+
+statement ok
+CREATE PROPERTY GRAPH desc_graph VERTEX TABLES (desc_persons LABEL Person) EDGE TABLES (desc_knows SOURCE KEY (src) REFERENCES desc_persons (id) DESTINATION KEY (dst) REFERENCES desc_persons (id) LABEL Knows)
+
+# DESCRIBE should return vertex and edge metadata
+query TTTTTT
+DESCRIBE PROPERTY GRAPH desc_graph
+----
+VERTEX person desc_persons id - -
+EDGE knows desc_knows src desc_persons desc_persons
+
+# DESCRIBE non-existent graph should fail
+statement error
+DESCRIBE PROPERTY GRAPH nonexistent_graph
+
+# Multi-vertex multi-edge graph
+statement ok
+CREATE TABLE desc_cities (cid INTEGER, cname VARCHAR)
+
+statement ok
+INSERT INTO desc_cities VALUES (0, 'NYC'), (1, 'SF')
+
+statement ok
+CREATE TABLE desc_lives_in (person_id INTEGER, city_id INTEGER)
+
+statement ok
+INSERT INTO desc_lives_in VALUES (0, 0), (1, 1)
+
+statement ok
+CREATE PROPERTY GRAPH desc_multi VERTEX TABLES (desc_persons LABEL Person, desc_cities KEY (cid) LABEL City) EDGE TABLES (desc_knows SOURCE KEY (src) REFERENCES desc_persons (id) DESTINATION KEY (dst) REFERENCES desc_persons (id) LABEL Knows, desc_lives_in SOURCE KEY (person_id) REFERENCES desc_persons (id) DESTINATION KEY (city_id) REFERENCES desc_cities (cid) LABEL LivesIn)
+
+query TTTTTT
+DESCRIBE PROPERTY GRAPH desc_multi
+----
+VERTEX city desc_cities cid - -
+VERTEX person desc_persons id - -
+EDGE knows desc_knows src desc_persons desc_persons
+EDGE livesin desc_lives_in person_id desc_persons desc_cities
+
+# After DROP, DESCRIBE should fail
+statement ok
+DROP PROPERTY GRAPH desc_graph
+
+statement error
+DESCRIBE PROPERTY GRAPH desc_graph

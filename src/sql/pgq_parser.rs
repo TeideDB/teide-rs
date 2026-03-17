@@ -5,6 +5,8 @@
 // before they reach the SQL parser and handle them directly.
 
 use super::SqlError;
+use super::pgq::ColumnVisibility;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Global counter to generate unique temp table names for GRAPH_TABLE results.
@@ -38,6 +40,7 @@ pub(crate) struct ParsedVertexTable {
     pub table_name: String,
     pub label: Option<String>,
     pub key_column: Option<String>,
+    pub visibility: ColumnVisibility,
 }
 
 #[derive(Debug)]
@@ -50,6 +53,7 @@ pub(crate) struct ParsedEdgeTable {
     pub dst_ref_table: String,
     pub dst_ref_col: String,
     pub label: Option<String>,
+    pub visibility: ColumnVisibility,
 }
 
 #[derive(Debug)]
@@ -74,6 +78,7 @@ pub(crate) struct CreateVectorIndex {
 pub(crate) enum PgqStatement {
     CreatePropertyGraph(CreatePropertyGraph),
     DropPropertyGraph { name: String, if_exists: bool },
+    DescribePropertyGraph(String),
     CreateVectorIndex(CreateVectorIndex),
     DropVectorIndex { name: String, if_exists: bool },
 }
@@ -134,6 +139,9 @@ pub(crate) fn try_parse_pgq(sql: &str) -> Result<Option<PgqStatement>, SqlError>
     }
     if upper.starts_with("DROP PROPERTY GRAPH") {
         return Ok(Some(parse_drop_property_graph(stripped)?));
+    }
+    if upper.starts_with("DESCRIBE PROPERTY GRAPH") {
+        return Ok(Some(parse_describe_property_graph(stripped)?));
     }
     if upper.starts_with("CREATE VECTOR INDEX") {
         return Ok(Some(parse_create_vector_index(stripped)?));
@@ -199,6 +207,66 @@ impl Tokens {
         Ok(())
     }
 
+}
+
+/// Parse an optional PROPERTIES clause after LABEL / KEY in a vertex or edge
+/// table definition.  Handles:
+///   PROPERTIES (col1, col2, ...)
+///   PROPERTIES ARE ALL COLUMNS EXCEPT (col1, col2, ...)
+///   NO PROPERTIES
+/// Returns `ColumnVisibility::All` when none of the above are present.
+fn parse_properties(t: &mut Tokens) -> Result<ColumnVisibility, SqlError> {
+    // Check for "NO PROPERTIES"
+    if t.peek().map(|s| s.eq_ignore_ascii_case("NO")) == Some(true) {
+        let saved = t.pos;
+        t.next()?; // consume NO
+        if t.peek().map(|s| s.eq_ignore_ascii_case("PROPERTIES")) == Some(true) {
+            t.next()?; // consume PROPERTIES
+            return Ok(ColumnVisibility::None);
+        }
+        // Not "NO PROPERTIES" — rewind
+        t.pos = saved;
+        return Ok(ColumnVisibility::All);
+    }
+
+    if t.peek().map(|s| s.eq_ignore_ascii_case("PROPERTIES")) != Some(true) {
+        return Ok(ColumnVisibility::All);
+    }
+    t.next()?; // consume PROPERTIES
+
+    // Check for "ARE ALL COLUMNS EXCEPT (...)"
+    if t.peek().map(|s| s.eq_ignore_ascii_case("ARE")) == Some(true) {
+        t.next()?; // consume ARE
+        t.expect("ALL")?;
+        t.expect("COLUMNS")?;
+        t.expect("EXCEPT")?;
+        t.expect("(")?;
+        let mut cols = HashSet::new();
+        loop {
+            let col = t.next()?.to_lowercase();
+            cols.insert(col);
+            if t.peek() == Some(")") {
+                break;
+            }
+            t.expect(",")?;
+        }
+        t.expect(")")?;
+        return Ok(ColumnVisibility::AllExcept(cols));
+    }
+
+    // PROPERTIES (col1, col2, ...)
+    t.expect("(")?;
+    let mut cols = HashSet::new();
+    loop {
+        let col = t.next()?.to_lowercase();
+        cols.insert(col);
+        if t.peek() == Some(")") {
+            break;
+        }
+        t.expect(",")?;
+    }
+    t.expect(")")?;
+    Ok(ColumnVisibility::Only(cols))
 }
 
 /// Tokenize SQL into words and punctuation, respecting parentheses and commas.
@@ -419,7 +487,9 @@ fn parse_vertex_tables(t: &mut Tokens) -> Result<Vec<ParsedVertexTable>, SqlErro
                 _ => break,
             }
         }
-        tables.push(ParsedVertexTable { table_name, label, key_column });
+        // Parse optional PROPERTIES / NO PROPERTIES / PROPERTIES ARE ALL COLUMNS EXCEPT
+        let visibility = parse_properties(t)?;
+        tables.push(ParsedVertexTable { table_name, label, key_column, visibility });
         if t.peek() == Some(",") {
             t.next()?; // consume comma
         } else {
@@ -465,6 +535,9 @@ fn parse_edge_tables(t: &mut Tokens) -> Result<Vec<ParsedEdgeTable>, SqlError> {
             label = Some(t.next()?);
         }
 
+        // Parse optional PROPERTIES / NO PROPERTIES / PROPERTIES ARE ALL COLUMNS EXCEPT
+        let visibility = parse_properties(t)?;
+
         tables.push(ParsedEdgeTable {
             table_name,
             src_col,
@@ -474,6 +547,7 @@ fn parse_edge_tables(t: &mut Tokens) -> Result<Vec<ParsedEdgeTable>, SqlError> {
             dst_ref_table,
             dst_ref_col,
             label,
+            visibility,
         });
 
         if t.peek() == Some(",") {
@@ -1068,6 +1142,21 @@ fn parse_drop_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     };
     t.expect_end()?;
     Ok(PgqStatement::DropPropertyGraph { name, if_exists })
+}
+
+// ---------------------------------------------------------------------------
+// DESCRIBE PROPERTY GRAPH
+// Syntax: DESCRIBE PROPERTY GRAPH <name>
+// ---------------------------------------------------------------------------
+
+fn parse_describe_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
+    let mut t = Tokens::new(sql);
+    t.expect("DESCRIBE")?;
+    t.expect("PROPERTY")?;
+    t.expect("GRAPH")?;
+    let name = t.next()?.to_lowercase();
+    t.expect_end()?;
+    Ok(PgqStatement::DescribePropertyGraph(name))
 }
 
 // ---------------------------------------------------------------------------

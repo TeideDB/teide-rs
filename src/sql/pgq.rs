@@ -515,7 +515,7 @@ fn describe_property_graph(
     // Collect and sort vertex labels by label name for deterministic output.
     let mut vertex_entries: Vec<(&String, &VertexLabel)> =
         graph.vertex_labels.iter().collect();
-    vertex_entries.sort_by_key(|(name, _)| name.clone());
+    vertex_entries.sort_by_key(|(name, _)| (*name).clone());
     for (label_name, vl) in &vertex_entries {
         csv.push_str(&format!(
             "{},{},{},{},{},{}\n",
@@ -531,7 +531,7 @@ fn describe_property_graph(
     // Collect and sort edge labels by label name for deterministic output.
     let mut edge_entries: Vec<(&String, &StoredRel)> =
         graph.edge_labels.iter().collect();
-    edge_entries.sort_by_key(|(name, _)| name.clone());
+    edge_entries.sort_by_key(|(name, _)| (*name).clone());
     for (label_name, stored_rel) in &edge_entries {
         csv.push_str(&format!(
             "{},{},{},{},{},{}\n",
@@ -1294,6 +1294,44 @@ pub(super) fn find_col_idx(table: &Table, name: &str) -> Option<usize> {
     }
     let ncols = ncols as usize;
     (0..ncols).find(|&i| table.col_name_str(i).to_lowercase() == name)
+}
+
+/// Check that a column is visible under the given PROPERTIES visibility rule.
+/// Returns `Ok(())` if visible, or a descriptive error if restricted.
+fn check_column_visible(
+    visibility: &ColumnVisibility,
+    col_name: &str,
+    label_name: &str,
+) -> Result<(), SqlError> {
+    if visibility.is_visible(col_name) {
+        Ok(())
+    } else {
+        Err(SqlError::Plan(format!(
+            "Column '{col_name}' is not accessible on label '{label_name}' \
+             (restricted by PROPERTIES clause)"
+        )))
+    }
+}
+
+/// Look up a vertex label's visibility from the graph.
+/// Tries the node's explicit label first, then falls back to matching by table name.
+fn vertex_visibility<'a>(
+    node: &NodePattern,
+    table_name: &str,
+    graph: &'a PropertyGraph,
+) -> &'a ColumnVisibility {
+    if let Some(label) = &node.label {
+        if let Some(vl) = graph.vertex_labels.get(label) {
+            return &vl.visibility;
+        }
+    }
+    // Fall back to matching by table name
+    graph
+        .vertex_labels
+        .values()
+        .find(|vl| vl.table_name == table_name)
+        .map(|vl| &vl.visibility)
+        .unwrap_or(&ColumnVisibility::All)
 }
 
 /// Read a key value (integer or string) from a table cell.
