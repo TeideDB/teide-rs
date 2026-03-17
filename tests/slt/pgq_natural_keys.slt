@@ -82,6 +82,15 @@ SELECT * FROM GRAPH_TABLE (nk_graph MATCH (a:Person WHERE a.name = 'Xena')-[:Kno
 Xena	Yuri
 Xena	Zara
 
+# === Test 4b: Shortest path with natural keys ===
+
+query II
+SELECT * FROM GRAPH_TABLE (nk_graph MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Xena')-[:Knows]->+(b:Person WHERE b.name = 'Zara') COLUMNS (_node, _depth)) ORDER BY _depth
+----
+-50	0
+0	1
+999999	2
+
 # === Test 5: String keys ===
 
 statement ok
@@ -153,3 +162,31 @@ Widget	Gadget
 
 statement ok
 DROP PROPERTY GRAPH dep_graph
+
+# === Test 7: Error cases ===
+
+# Duplicate key values in vertex table
+statement ok
+CREATE TABLE nk_dup (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO nk_dup VALUES (1, 'A'), (1, 'B')
+
+statement error Duplicate key
+CREATE PROPERTY GRAPH dup_graph VERTEX TABLES (nk_dup KEY (id) LABEL Node) EDGE TABLES (nk_deps SOURCE KEY (from_sku) REFERENCES nk_dup (id) DESTINATION KEY (to_sku) REFERENCES nk_dup (id) LABEL Edge)
+
+statement ok
+DROP TABLE nk_dup
+
+# Missing key column
+statement ok
+CREATE TABLE nk_nocol (name VARCHAR)
+
+statement ok
+INSERT INTO nk_nocol VALUES ('Alice')
+
+statement error Key column 'id' not found
+CREATE PROPERTY GRAPH nocol_graph VERTEX TABLES (nk_nocol KEY (id) LABEL Node) EDGE TABLES (nk_deps SOURCE KEY (from_sku) REFERENCES nk_nocol (id) DESTINATION KEY (to_sku) REFERENCES nk_nocol (id) LABEL Edge)
+
+statement ok
+DROP TABLE nk_nocol

@@ -69,3 +69,37 @@ SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Kn
 Alice Bob
 Alice Carol
 Alice Dave
+
+# BETWEEN filter: age between 25 and 30 (inclusive)
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age BETWEEN 25 AND 30)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+Bob Carol
+
+# NOT BETWEEN filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age NOT BETWEEN 26 AND 34)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# Less-than-or-equal filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age <= 25)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# Parenthesized/nested expression
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE (a.age > 28 AND a.name = 'Alice'))-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+
+# Filter matching no rows: empty result
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name = 'Nobody')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+----

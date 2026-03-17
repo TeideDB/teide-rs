@@ -104,6 +104,16 @@ pub(crate) enum KeyValue {
     Str(String),
 }
 
+impl KeyValue {
+    /// Format for CSV output: integers as plain numbers, strings as CSV-quoted.
+    fn to_csv(&self) -> String {
+        match self {
+            KeyValue::Int(v) => v.to_string(),
+            KeyValue::Str(s) => csv_quote(s),
+        }
+    }
+}
+
 /// A vertex label mapping: label name -> session table name, with key maps
 /// for translating between user-facing key values and internal row indices.
 pub(crate) struct VertexLabel {
@@ -113,7 +123,6 @@ pub(crate) struct VertexLabel {
     #[allow(dead_code)]
     pub key_column: String,
     pub user_to_row: HashMap<KeyValue, usize>,
-    #[allow(dead_code)]
     pub row_to_user: Vec<KeyValue>,
 }
 
@@ -125,9 +134,11 @@ pub(crate) struct EdgeLabel {
     pub label: String,
     pub src_col: String,
     pub src_ref_table: String,
+    #[allow(dead_code)]
     pub src_ref_col: String,
     pub dst_col: String,
     pub dst_ref_table: String,
+    #[allow(dead_code)]
     pub dst_ref_col: String,
 }
 
@@ -265,31 +276,8 @@ pub(crate) fn build_property_graph(
         let nrows = checked_logical_nrows(stored)?;
         let mut user_to_row = HashMap::with_capacity(nrows);
         let mut row_to_user = Vec::with_capacity(nrows);
-        let key_type = stored.table.col_type(key_col_idx);
         for row in 0..nrows {
-            let key_val = match key_type {
-                ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => {
-                    let v = stored.table.get_i64(key_col_idx, row).ok_or_else(|| {
-                        SqlError::Plan(format!(
-                            "NULL key at row {row} in '{}'", vt.table_name
-                        ))
-                    })?;
-                    KeyValue::Int(v)
-                }
-                ffi::TD_SYM => {
-                    let s = stored.table.get_str(key_col_idx, row).ok_or_else(|| {
-                        SqlError::Plan(format!(
-                            "NULL key at row {row} in '{}'", vt.table_name
-                        ))
-                    })?;
-                    KeyValue::Str(s)
-                }
-                t => {
-                    return Err(SqlError::Plan(format!(
-                        "Unsupported key column type {t} in '{}'", vt.table_name
-                    )));
-                }
-            };
+            let key_val = read_key_value(&stored.table, key_col_idx, row, key_col_name, &vt.table_name)?;
             if user_to_row.contains_key(&key_val) {
                 return Err(SqlError::Plan(format!(
                     "Duplicate key {:?} in vertex table '{}'", key_val, vt.table_name
@@ -1088,6 +1076,7 @@ impl PartialOrd for ScalarValue {
             (ScalarValue::Int(a), ScalarValue::Float(b)) => (*a as f64).partial_cmp(b),
             (ScalarValue::Float(a), ScalarValue::Int(b)) => a.partial_cmp(&(*b as f64)),
             (ScalarValue::Str(a), ScalarValue::Str(b)) => a.partial_cmp(b),
+            (ScalarValue::Bool(a), ScalarValue::Bool(b)) => a.partial_cmp(b),
             _ => None,
         }
     }
@@ -1254,8 +1243,8 @@ fn compare_scalars(
         return Ok(false); // NULL comparisons are false (SQL three-valued logic)
     }
     match op {
-        BinaryOperator::Eq => Ok(lhs == rhs),
-        BinaryOperator::NotEq => Ok(lhs != rhs),
+        BinaryOperator::Eq => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Equal)),
+        BinaryOperator::NotEq => Ok(lhs.partial_cmp(rhs) != Some(std::cmp::Ordering::Equal)),
         BinaryOperator::Lt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Less)),
         BinaryOperator::LtEq => Ok(matches!(
             lhs.partial_cmp(rhs),
@@ -1322,6 +1311,13 @@ fn evaluate_filter(
             let val = eval_scalar(inner, table, row, var_name)?;
             let lo = eval_scalar(low, table, row, var_name)?;
             let hi = eval_scalar(high, table, row, var_name)?;
+            // NULL in any operand -> unknown -> exclude row (SQL three-valued logic)
+            if matches!(&val, ScalarValue::Null)
+                || matches!(&lo, ScalarValue::Null)
+                || matches!(&hi, ScalarValue::Null)
+            {
+                return Ok(false);
+            }
             let in_range = val >= lo && val <= hi;
             Ok(if *negated { !in_range } else { in_range })
         }
@@ -2439,12 +2435,10 @@ fn plan_shortest_path(
 
     // For reverse edges, swap default table/column references
     let is_reverse = edge.direction == MatchDirection::Reverse;
-    let (left_table, left_col, right_table, right_col) = if is_reverse {
-        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.dst_ref_col,
-         &stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.src_ref_col)
+    let (left_table, right_table) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.src_ref_table)
     } else {
-        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.src_ref_col,
-         &stored_rel.edge_label.dst_ref_table, &stored_rel.edge_label.dst_ref_col)
+        (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table)
     };
 
     // Validate explicit node labels against the edge's expected tables.
@@ -2485,8 +2479,15 @@ fn plan_shortest_path(
         ));
     }
 
-    let src_id = extract_node_id(src_node, left_table, left_col, session)?;
-    let dst_id = extract_node_id(dst_node, right_table, right_col, session)?;
+    let src_id = extract_node_id(src_node, left_table, session)?;
+    let dst_id = extract_node_id(dst_node, right_table, session)?;
+
+    // Look up the vertex label for _node output (row index -> user key).
+    let vertex_label = graph.vertex_labels.values()
+        .find(|vl| vl.table_name == *left_table)
+        .ok_or_else(|| SqlError::Plan(format!(
+            "No vertex label found for table '{left_table}'"
+        )))?;
 
     let (min_depth, max_depth): (u8, u8) = match edge.quantifier {
         PathQuantifier::Range { min, max } => (min, max),
@@ -2536,7 +2537,11 @@ fn plan_shortest_path(
         if col_names.is_empty() {
             return Err(SqlError::Plan("COLUMNS clause is empty".into()));
         }
-        // Build CSV with correct values: node=src_id, depth=0, path_length=0
+        // Build CSV with correct values: node=user_key, depth=0, path_length=0
+        let src_key = vertex_label.row_to_user.get(src_id as usize)
+            .ok_or_else(|| SqlError::Plan(format!(
+                "Row index {src_id} out of bounds in vertex table '{left_table}'"
+            )))?;
         let csv_col_names: Vec<String> = (0..col_names.len())
             .map(|i| format!("__c{i}"))
             .collect();
@@ -2545,7 +2550,7 @@ fn plan_shortest_path(
         for (i, &col_idx) in col_indices.iter().enumerate() {
             if i > 0 { csv.push(','); }
             match col_idx {
-                0 => csv.push_str(&src_id.to_string()),
+                0 => csv.push_str(&src_key.to_csv()),
                 1 | 2 => csv.push('0'), // depth and path_length are both 0 for 0-hop
                 _ => {}
             }
@@ -2561,9 +2566,9 @@ fn plan_shortest_path(
         MatchDirection::Undirected => 2,
     };
 
-    // BFS over the edge table to find the shortest qualifying path
+    // BFS over the CSR to find the shortest qualifying path
     let mut path = reconstruct_shortest_path(
-        session, src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
+        src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
     )?;
 
     if path.is_empty() {
@@ -2667,10 +2672,14 @@ fn plan_shortest_path(
     csv.push('\n');
 
     for (depth, &node_id) in path.iter().enumerate() {
+        let user_key = vertex_label.row_to_user.get(node_id as usize)
+            .ok_or_else(|| SqlError::Plan(format!(
+                "Row index {node_id} out of bounds in vertex table '{left_table}'"
+            )))?;
         for (i, &col_idx) in col_indices.iter().enumerate() {
             if i > 0 { csv.push(','); }
             match col_idx {
-                0 => csv.push_str(&node_id.to_string()),
+                0 => csv.push_str(&user_key.to_csv()),
                 1 => csv.push_str(&depth.to_string()),
                 2 => csv.push_str(&total_path_length.to_string()),
                 _ => {}
@@ -2683,11 +2692,10 @@ fn plan_shortest_path(
     Ok((result, col_names))
 }
 
-/// Reconstruct shortest path using BFS over the edge table.
-/// Returns the path as a Vec of node IDs from dst back to src (reversed).
+/// Reconstruct shortest path using BFS over the CSR adjacency structure.
+/// Returns the path as a Vec of row indices from dst back to src (reversed).
 /// Only returns a path whose hop count is between min_depth and max_depth (inclusive).
 fn reconstruct_shortest_path(
-    session: &Session,
     src_id: i64,
     dst_id: i64,
     min_depth: i64,
@@ -2696,41 +2704,6 @@ fn reconstruct_shortest_path(
     direction: u8,
 ) -> Result<Vec<i64>, SqlError> {
     use std::collections::{HashMap as HM, HashSet, VecDeque};
-
-    // Get all edges for adjacency lookup
-    let edge_table_name = &stored_rel.edge_label.table_name;
-    let edge_stored = session.tables.get(edge_table_name).ok_or_else(|| {
-        SqlError::Plan(format!("Edge table '{}' not found", edge_table_name))
-    })?;
-
-    let src_col_name = &stored_rel.edge_label.src_col;
-    let dst_col_name = &stored_rel.edge_label.dst_col;
-    let src_col_idx = find_col_idx(&edge_stored.table, src_col_name)
-        .ok_or_else(|| SqlError::Plan(format!("Column '{src_col_name}' not found in edge table")))?;
-    let dst_col_idx = find_col_idx(&edge_stored.table, dst_col_name)
-        .ok_or_else(|| SqlError::Plan(format!("Column '{dst_col_name}' not found in edge table")))?;
-
-    // Build adjacency list from edge table
-    let n_edges = checked_logical_nrows(edge_stored)?;
-    let mut adj: HM<i64, Vec<i64>> = HM::new();
-    for row in 0..n_edges {
-        let s = match edge_stored.table.get_i64(src_col_idx, row) {
-            Some(v) => v,
-            None => continue, // skip edges with NULL endpoints
-        };
-        let d = match edge_stored.table.get_i64(dst_col_idx, row) {
-            Some(v) => v,
-            None => continue,
-        };
-        match direction {
-            0 => { adj.entry(s).or_default().push(d); } // forward
-            1 => { adj.entry(d).or_default().push(s); } // reverse
-            _ => { // undirected
-                adj.entry(s).or_default().push(d);
-                adj.entry(d).or_default().push(s);
-            }
-        }
-    }
 
     // BFS keyed on (node, depth) to allow revisiting nodes at different depths.
     // This is needed when min_depth > shortest_depth: the shortest path to an
@@ -2767,13 +2740,23 @@ fn reconstruct_shortest_path(
         if depth >= max_depth {
             continue;
         }
-        if let Some(neighbors) = adj.get(&node) {
-            for &next in neighbors {
-                let next_depth = depth + 1;
-                if visited.insert((next, next_depth)) {
-                    pred_map.insert((next, next_depth), node);
-                    frontier.push_back((next, next_depth));
-                }
+        // Use the CSR for neighbor lookup — works correctly with remapped row indices
+        let neighbors = if direction == 2 {
+            // Undirected: merge forward and reverse neighbors
+            let fwd = stored_rel.rel.neighbors(node, 0);
+            let rev = stored_rel.rel.neighbors(node, 1);
+            let mut merged = Vec::with_capacity(fwd.len() + rev.len());
+            merged.extend_from_slice(fwd);
+            merged.extend_from_slice(rev);
+            merged
+        } else {
+            stored_rel.rel.neighbors(node, direction).to_vec()
+        };
+        for &next in &neighbors {
+            let next_depth = depth + 1;
+            if visited.insert((next, next_depth)) {
+                pred_map.insert((next, next_depth), node);
+                frontier.push_back((next, next_depth));
             }
         }
     }
@@ -2786,7 +2769,6 @@ fn reconstruct_shortest_path(
 fn extract_node_id(
     node: &NodePattern,
     table_name: &str,
-    _key_col: &str,
     session: &Session,
 ) -> Result<i64, SqlError> {
     let filter = node.filter.as_deref().ok_or_else(|| {
