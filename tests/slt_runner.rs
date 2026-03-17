@@ -281,3 +281,8 @@ fn slt_pgq_dst_filters() {
 fn slt_pgq_cheapest() {
     run_slt("tests/slt/pgq_cheapest.slt");
 }
+
+#[test]
+fn slt_pgq_path_accessors() {
+    run_slt("tests/slt/pgq_path_accessors.slt");
+}

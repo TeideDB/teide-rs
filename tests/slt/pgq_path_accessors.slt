@@ -1,0 +1,50 @@
+# SQL/PGQ: Path accessor functions — vertices(p), edges(p)
+
+# Setup
+statement ok
+CREATE TABLE pa_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO pa_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE pa_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO pa_knows VALUES (0, 1), (1, 2), (2, 3)
+
+statement ok
+CREATE PROPERTY GRAPH pa_graph VERTEX TABLES (pa_persons LABEL Person) EDGE TABLES (pa_knows SOURCE KEY (src) REFERENCES pa_persons (id) DESTINATION KEY (dst) REFERENCES pa_persons (id) LABEL Knows)
+
+# vertices(p): list of vertex IDs along the path (Alice -> Bob -> Carol -> Dave)
+query T
+SELECT * FROM GRAPH_TABLE (pa_graph MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person WHERE b.name = 'Dave') COLUMNS (vertices(p) AS v))
+----
+[0, 1, 2, 3]
+[0, 1, 2, 3]
+[0, 1, 2, 3]
+[0, 1, 2, 3]
+
+# edges(p): list of edge pairs along the path
+query T
+SELECT * FROM GRAPH_TABLE (pa_graph MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person WHERE b.name = 'Dave') COLUMNS (edges(p) AS e))
+----
+[(0, 1), (1, 2), (2, 3)]
+[(0, 1), (1, 2), (2, 3)]
+[(0, 1), (1, 2), (2, 3)]
+[(0, 1), (1, 2), (2, 3)]
+
+# Direct neighbor (1-hop): Alice -> Bob
+query TT
+SELECT * FROM GRAPH_TABLE (pa_graph MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person WHERE b.name = 'Bob') COLUMNS (vertices(p) AS v, edges(p) AS e))
+----
+[0, 1] [(0, 1)]
+[0, 1] [(0, 1)]
+
+# vertices and edges with depth
+query TIT
+SELECT * FROM GRAPH_TABLE (pa_graph MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Alice')-[:Knows]->+(b:Person WHERE b.name = 'Carol') COLUMNS (vertices(p) AS v, _depth, edges(p) AS e)) ORDER BY _depth
+----
+[0, 1, 2] 0 [(0, 1), (1, 2)]
+[0, 1, 2] 1 [(0, 1), (1, 2)]
+[0, 1, 2] 2 [(0, 1), (1, 2)]

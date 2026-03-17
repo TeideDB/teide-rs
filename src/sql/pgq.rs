@@ -3029,6 +3029,10 @@ enum SpColKind {
     Depth,
     /// `path_length(p)` — total path length (constant per row)
     PathLength,
+    /// `vertices(p)` — list of vertex IDs along the path as text
+    Vertices,
+    /// `edges(p)` — list of edge pairs along the path as text
+    Edges,
     /// Source variable property lookup — column index in the left vertex table
     SrcProp(usize),
     /// Destination variable property lookup — column index in the right vertex table
@@ -3053,7 +3057,15 @@ fn parse_sp_columns(
         let lower = entry.expr.to_lowercase();
         let alias = entry.alias.as_deref();
 
-        if lower.contains("path_length") {
+        // Strip whitespace for matching function-call syntax like "vertices ( p )"
+        let compact = lower.replace(' ', "");
+        if compact.starts_with("vertices(") {
+            col_names.push(alias.unwrap_or("vertices").to_string());
+            col_kinds.push(SpColKind::Vertices);
+        } else if compact.starts_with("edges(") {
+            col_names.push(alias.unwrap_or("edges").to_string());
+            col_kinds.push(SpColKind::Edges);
+        } else if lower.contains("path_length") {
             col_names.push(alias.unwrap_or("path_length").to_string());
             col_kinds.push(SpColKind::PathLength);
         } else if lower == "_node" || lower == "node" {
@@ -3294,6 +3306,14 @@ fn plan_shortest_path(
             match kind {
                 SpColKind::Node => csv.push_str(&src_key.to_csv()),
                 SpColKind::Depth | SpColKind::PathLength => csv.push('0'),
+                SpColKind::Vertices => {
+                    // 0-hop: single node
+                    csv.push_str(&csv_quote(&format!("[{}]", src_key.to_csv())));
+                }
+                SpColKind::Edges => {
+                    // 0-hop: no edges
+                    csv.push_str(&csv_quote("[]"));
+                }
                 SpColKind::SrcProp(idx) => {
                     let t = left_stored.ok_or_else(|| {
                         SqlError::Plan(format!("Table '{left_table}' not found"))
@@ -3363,6 +3383,60 @@ fn plan_shortest_path(
     csv.push('\n');
 
     let last_idx = path.len().saturating_sub(1);
+
+    // Pre-compute vertices(p) and edges(p) strings (constant per path).
+    // These are CSV-quoted because they contain commas.
+    let needs_vertices = col_kinds.iter().any(|k| matches!(k, SpColKind::Vertices));
+    let needs_edges = col_kinds.iter().any(|k| matches!(k, SpColKind::Edges));
+    let vertices_str = if needs_vertices {
+        let mut parts = Vec::with_capacity(path.len());
+        for (i, &nid) in path.iter().enumerate() {
+            let vl = if i == last_idx && right_vertex_label.is_some() {
+                right_vertex_label.unwrap()
+            } else {
+                left_vertex_label
+            };
+            parts.push(
+                vl.row_to_user
+                    .get(nid as usize)
+                    .map(|k| k.to_csv())
+                    .unwrap_or_else(|| nid.to_string()),
+            );
+        }
+        csv_quote(&format!("[{}]", parts.join(", ")))
+    } else {
+        String::new()
+    };
+    let edges_str = if needs_edges {
+        let mut parts = Vec::with_capacity(path.len().saturating_sub(1));
+        for i in 0..path.len().saturating_sub(1) {
+            let src_vl = if i == last_idx && right_vertex_label.is_some() {
+                right_vertex_label.unwrap()
+            } else {
+                left_vertex_label
+            };
+            let dst_vl = if i + 1 == last_idx && right_vertex_label.is_some() {
+                right_vertex_label.unwrap()
+            } else {
+                left_vertex_label
+            };
+            let sk = src_vl
+                .row_to_user
+                .get(path[i] as usize)
+                .map(|k| k.to_csv())
+                .unwrap_or_else(|| path[i].to_string());
+            let dk = dst_vl
+                .row_to_user
+                .get(path[i + 1] as usize)
+                .map(|k| k.to_csv())
+                .unwrap_or_else(|| path[i + 1].to_string());
+            parts.push(format!("({sk}, {dk})"));
+        }
+        csv_quote(&format!("[{}]", parts.join(", ")))
+    } else {
+        String::new()
+    };
+
     for (depth, &node_id) in path.iter().enumerate() {
         // For single-hop heterogeneous edges, the last node in the path
         // belongs to the right (destination) table and needs a different
@@ -3387,6 +3461,8 @@ fn plan_shortest_path(
                 SpColKind::Node => csv.push_str(&user_key.to_csv()),
                 SpColKind::Depth => csv.push_str(&depth.to_string()),
                 SpColKind::PathLength => csv.push_str(&total_path_length.to_string()),
+                SpColKind::Vertices => csv.push_str(&vertices_str),
+                SpColKind::Edges => csv.push_str(&edges_str),
                 SpColKind::SrcProp(idx) => {
                     let t = left_stored.ok_or_else(|| {
                         SqlError::Plan(format!("Table '{left_table}' not found"))
