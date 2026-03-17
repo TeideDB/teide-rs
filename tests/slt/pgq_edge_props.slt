@@ -1,0 +1,100 @@
+# SQL/PGQ: Edge property access in COLUMNS projection
+
+# ===================================================================
+# Setup: persons and knows_edges with edge properties
+# ===================================================================
+
+statement ok
+CREATE TABLE ep_persons (id INTEGER, name VARCHAR, city VARCHAR)
+
+statement ok
+INSERT INTO ep_persons VALUES (0, 'Alice', 'NYC'), (1, 'Bob', 'SF'), (2, 'Carol', 'NYC'), (3, 'Dave', 'LA')
+
+statement ok
+CREATE TABLE ep_knows (src INTEGER, dst INTEGER, since INTEGER, weight DOUBLE)
+
+statement ok
+INSERT INTO ep_knows VALUES (0, 1, 2020, 0.9), (0, 2, 2021, 0.5), (1, 3, 2022, 0.7), (2, 3, 2019, 0.8)
+
+statement ok
+CREATE PROPERTY GRAPH ep_graph VERTEX TABLES (ep_persons LABEL Person) EDGE TABLES (ep_knows SOURCE KEY (src) REFERENCES ep_persons (id) DESTINATION KEY (dst) REFERENCES ep_persons (id) LABEL Knows)
+
+# ===================================================================
+# Single-hop: edge property in COLUMNS
+# ===================================================================
+
+# Project edge property alongside node properties (use aliases to avoid duplicate column names)
+query TTI
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person WHERE a.name = 'Alice')-[t:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name, t.since)) ORDER BY dst_name
+----
+Alice Bob 2020
+Alice Carol 2021
+
+# Edge property with alias
+query TR
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person WHERE a.name = 'Alice')-[t:Knows]->(b:Person) COLUMNS (b.name AS dst_name, t.weight AS w)) ORDER BY dst_name
+----
+Bob 0.9
+Carol 0.5
+
+# All edges: edge property from all rows
+query TTI
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person)-[t:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name, t.since)) ORDER BY src_name, dst_name
+----
+Alice Bob 2020
+Alice Carol 2021
+Bob Dave 2022
+Carol Dave 2019
+
+# ===================================================================
+# Reverse edge with property access
+# ===================================================================
+
+query TTI
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person WHERE a.name = 'Dave')<-[t:Knows]-(b:Person) COLUMNS (a.name AS dst_name, b.name AS src_name, t.since)) ORDER BY src_name
+----
+Dave Bob 2022
+Dave Carol 2019
+
+# ===================================================================
+# Edge without variable should still work (unnamed edge)
+# ===================================================================
+
+query TT
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src_name, b.name AS dst_name)) ORDER BY dst_name
+----
+Alice Bob
+Alice Carol
+
+# ===================================================================
+# Multi-hop: edge properties from different edge tables
+# ===================================================================
+
+statement ok
+CREATE TABLE ep_cities (id INTEGER, city VARCHAR)
+
+statement ok
+INSERT INTO ep_cities VALUES (0, 'NYC'), (1, 'SF'), (2, 'LA')
+
+statement ok
+CREATE TABLE ep_lives (person_id INTEGER, city_id INTEGER, moved_year INTEGER)
+
+statement ok
+INSERT INTO ep_lives VALUES (0, 0, 2015), (1, 1, 2018), (2, 0, 2016), (3, 2, 2020)
+
+statement ok
+CREATE PROPERTY GRAPH ep_graph2 VERTEX TABLES (ep_persons LABEL Person, ep_cities LABEL City) EDGE TABLES (ep_knows SOURCE KEY (src) REFERENCES ep_persons (id) DESTINATION KEY (dst) REFERENCES ep_persons (id) LABEL Knows, ep_lives SOURCE KEY (person_id) REFERENCES ep_persons (id) DESTINATION KEY (city_id) REFERENCES ep_cities (id) LABEL LivesIn)
+
+# Multi-hop: Person -[Knows]-> Person -[LivesIn]-> City with edge properties from both edges
+query TTITI
+SELECT * FROM GRAPH_TABLE (ep_graph2 MATCH (a:Person WHERE a.name = 'Alice')-[k:Knows]->(b:Person)-[l:LivesIn]->(c:City) COLUMNS (a.name AS who, b.name AS friend, k.since, c.city, l.moved_year)) ORDER BY friend
+----
+Alice Bob 2020 SF 2018
+Alice Carol 2021 NYC 2016
+
+# ===================================================================
+# Error: accessing non-existent edge property
+# ===================================================================
+
+statement error
+SELECT * FROM GRAPH_TABLE (ep_graph MATCH (a:Person)-[t:Knows]->(b:Person) COLUMNS (t.nonexistent))

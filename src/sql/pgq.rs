@@ -145,6 +145,9 @@ pub(crate) struct EdgeLabel {
 pub(crate) struct StoredRel {
     pub rel: Rel,
     pub edge_label: EdgeLabel,
+    /// Maps (remapped_src_row, remapped_dst_row) to original edge table row indices.
+    /// Used to look up edge properties given a (src, dst) pair from CSR traversal.
+    pub edge_row_map: HashMap<(i64, i64), Vec<usize>>,
 }
 
 /// A property graph defined over session tables.
@@ -361,7 +364,7 @@ pub(crate) fn build_property_graph(
         };
 
         // Remap edge FK values through vertex key maps and build CSR
-        let rel = remap_and_build_rel(
+        let (rel, edge_row_map) = remap_and_build_rel(
             session, edge_stored, src_vl, dst_vl, &edge_label, n_src, n_dst,
         )?;
 
@@ -370,7 +373,7 @@ pub(crate) fn build_property_graph(
                 "Duplicate edge label '{label}' in property graph"
             )));
         }
-        edge_labels.insert(label, StoredRel { rel, edge_label });
+        edge_labels.insert(label, StoredRel { rel, edge_label, edge_row_map });
     }
 
     Ok(PropertyGraph {
@@ -743,6 +746,9 @@ fn plan_single_hop(
         dst_node,
         &src_stored.table,
         &dst_stored.table,
+        edge,
+        graph,
+        is_reverse,
     )
 }
 
@@ -812,6 +818,7 @@ fn validate_node_table_for_edge(
 
 /// Project COLUMNS from expand results.
 /// Maps column expressions like "b.name" to lookups in source/destination tables.
+/// Also supports edge variable references like "e.weight" via edge_row_map.
 fn project_columns(
     session: &Session,
     expand_result: &Table,
@@ -820,9 +827,13 @@ fn project_columns(
     dst_node: &NodePattern,
     src_table: &Table,
     dst_table: &Table,
+    edge_pattern: &EdgePattern,
+    graph: &PropertyGraph,
+    is_reverse: bool,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+    let edge_var = edge_pattern.variable.as_deref();
 
     // Use row-level extraction: _src/_dst are row indices into vertex tables
     let nrows = checked_nrows(expand_result)?;
@@ -853,9 +864,9 @@ fn project_columns(
     // Build CSV string for result table
     // Maintain column order as specified in the COLUMNS clause
     let mut col_names = Vec::new();
-    struct ColSpec {
-        table_col_idx: usize,
-        is_src: bool, // true = use src_indices, false = use dst_indices
+    enum ColSpec {
+        Node { table_col_idx: usize, is_src: bool },
+        Edge { table_col_idx: usize, edge_label: String },
     }
     let mut col_specs: Vec<ColSpec> = Vec::new();
 
@@ -872,15 +883,38 @@ fn project_columns(
                 let col_idx = find_col_idx(src_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in source table")))?;
                 col_names.push(out_name);
-                col_specs.push(ColSpec { table_col_idx: col_idx, is_src: true });
+                col_specs.push(ColSpec::Node { table_col_idx: col_idx, is_src: true });
             } else if var == dst_var {
                 let col_idx = find_col_idx(dst_table, &col)
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in destination table")))?;
                 col_names.push(out_name);
-                col_specs.push(ColSpec { table_col_idx: col_idx, is_src: false });
+                col_specs.push(ColSpec::Node { table_col_idx: col_idx, is_src: false });
+            } else if edge_var.is_some() && var == edge_var.unwrap() {
+                // Edge variable: look up property from edge table
+                let edge_label_name = edge_pattern.label.as_deref().ok_or_else(|| {
+                    SqlError::Plan("Edge variable requires a label to access properties".into())
+                })?;
+                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
+                })?;
+                let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                })?;
+                let col_idx = find_col_idx(&edge_table.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{col}' not found in edge table '{}'",
+                        stored_rel.edge_label.table_name
+                    ))
+                })?;
+                col_names.push(out_name);
+                col_specs.push(ColSpec::Edge { table_col_idx: col_idx, edge_label: edge_label_name.to_string() });
             } else {
+                let mut available = format!("{src_var}, {dst_var}");
+                if let Some(ev) = edge_var {
+                    available.push_str(&format!(", {ev}"));
+                }
                 return Err(SqlError::Plan(format!(
-                    "Unknown variable '{var}' in COLUMNS. Available: {src_var}, {dst_var}"
+                    "Unknown variable '{var}' in COLUMNS. Available: {available}"
                 )));
             }
         } else {
@@ -906,9 +940,35 @@ fn project_columns(
             if i > 0 {
                 csv.push(',');
             }
-            let table_row = if spec.is_src { src_indices[row] } else { dst_indices[row] };
-            let table = if spec.is_src { src_table } else { dst_table };
-            csv.push_str(&get_cell_string(table, spec.table_col_idx, table_row)?);
+            match spec {
+                ColSpec::Node { table_col_idx, is_src } => {
+                    let table_row = if *is_src { src_indices[row] } else { dst_indices[row] };
+                    let table = if *is_src { src_table } else { dst_table };
+                    csv.push_str(&get_cell_string(table, *table_col_idx, table_row)?);
+                }
+                ColSpec::Edge { table_col_idx, edge_label } => {
+                    let stored_rel = graph.edge_labels.get(edge_label.as_str()).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+                    })?;
+                    // For forward edges: CSR (src, dst) = (_src, _dst)
+                    // For reverse edges: pattern _src is edge dst, _dst is edge src
+                    let (edge_src, edge_dst) = if is_reverse {
+                        (dst_indices[row] as i64, src_indices[row] as i64)
+                    } else {
+                        (src_indices[row] as i64, dst_indices[row] as i64)
+                    };
+                    let edge_rows = stored_rel.edge_row_map.get(&(edge_src, edge_dst))
+                        .ok_or_else(|| SqlError::Plan(format!(
+                            "No edge found for ({edge_src}, {edge_dst}) in edge label '{edge_label}'"
+                        )))?;
+                    // Use the first matching edge row (for multi-edges, this picks one)
+                    let edge_row = edge_rows[0];
+                    let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                    })?;
+                    csv.push_str(&get_cell_string(&edge_table.table, *table_col_idx, edge_row)?);
+                }
+            }
         }
         csv.push('\n');
     }
@@ -992,6 +1052,7 @@ pub(super) fn rebuild_vertex_key_map(
 
 /// Remap edge FK values through vertex key maps and build a CSR `Rel`.
 /// Used during initial graph construction and graph rebuild after DML.
+/// Returns the Rel and an edge_row_map: (remapped_src, remapped_dst) -> Vec<original_edge_row>.
 pub(super) fn remap_and_build_rel(
     session: &Session,
     edge_stored: &super::StoredTable,
@@ -1000,7 +1061,7 @@ pub(super) fn remap_and_build_rel(
     el: &EdgeLabel,
     n_src: i64,
     n_dst: i64,
-) -> Result<Rel, SqlError> {
+) -> Result<(Rel, HashMap<(i64, i64), Vec<usize>>), SqlError> {
     let n_edges = checked_logical_nrows(edge_stored)?;
     let src_col_idx = find_col_idx(&edge_stored.table, &el.src_col).ok_or_else(|| {
         SqlError::Plan(format!(
@@ -1016,6 +1077,7 @@ pub(super) fn remap_and_build_rel(
     })?;
 
     let mut csv = String::from("_src,_dst\n");
+    let mut edge_row_map: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for row in 0..n_edges {
         let src_key = read_key_value(&edge_stored.table, src_col_idx, row, &el.src_col, &el.table_name)?;
         let src_row = src_vl.user_to_row.get(&src_key).ok_or_else(|| {
@@ -1035,11 +1097,12 @@ pub(super) fn remap_and_build_rel(
         csv.push(',');
         csv.push_str(&dst_row.to_string());
         csv.push('\n');
+        edge_row_map.entry((*src_row as i64, *dst_row as i64)).or_default().push(row);
     }
     let col_names = vec!["_src".to_string(), "_dst".to_string()];
     let remapped_edge_table = csv_to_table(session, &csv, &col_names)?;
     let rel = Rel::from_edges(&remapped_edge_table, "_src", "_dst", n_src, n_dst, true)?;
-    Ok(rel)
+    Ok((rel, edge_row_map))
 }
 
 /// Get a cell value as a string for CSV output.
@@ -2007,9 +2070,18 @@ fn plan_multi_hop_variable(
         pos_table_names.push(seg.dst_table_name.clone());
     }
 
+    // Build edge variable map: edge variable name -> edge index
+    let mut edge_var_map: HashMap<String, usize> = HashMap::new();
+    for (i, edge) in edges.iter().enumerate() {
+        if let Some(ref var) = edge.variable {
+            edge_var_map.entry(var.clone()).or_insert(i);
+        }
+    }
+
     // --- Project COLUMNS ---
     enum MhVarColKind {
         Property { var_idx: usize, table_col_idx: usize, table_name: String },
+        EdgeProperty { edge_idx: usize, table_col_idx: usize, edge_label: String, is_reverse: bool },
         PathLength,
     }
     let mut col_names: Vec<String> = Vec::new();
@@ -2027,29 +2099,56 @@ fn plan_multi_hop_variable(
             let default_name = format!("{var}_{col}");
             let out_name = alias.unwrap_or(&default_name).to_string();
 
-            let var_idx = var_map.get(&var).ok_or_else(|| {
-                let available: Vec<_> = var_map.keys().collect();
-                SqlError::Plan(format!(
+            if let Some(var_idx) = var_map.get(&var) {
+                let table_name = &pos_table_names[*var_idx];
+                let vtable = session.tables.get(table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Table '{table_name}' not found"))
+                })?;
+                let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{col}' not found in vertex table '{table_name}'"
+                    ))
+                })?;
+
+                col_names.push(out_name);
+                col_specs.push(MhVarColKind::Property {
+                    var_idx: *var_idx,
+                    table_col_idx,
+                    table_name: table_name.clone(),
+                });
+            } else if let Some(edge_idx) = edge_var_map.get(&var) {
+                let edge = &edges[*edge_idx];
+                let edge_label_name = edge.label.as_deref().ok_or_else(|| {
+                    SqlError::Plan("Edge variable requires a label to access properties".into())
+                })?;
+                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
+                })?;
+                let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                })?;
+                let table_col_idx = find_col_idx(&edge_table.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{col}' not found in edge table '{}'",
+                        stored_rel.edge_label.table_name
+                    ))
+                })?;
+                let is_reverse = edge.direction == MatchDirection::Reverse;
+
+                col_names.push(out_name);
+                col_specs.push(MhVarColKind::EdgeProperty {
+                    edge_idx: *edge_idx,
+                    table_col_idx,
+                    edge_label: edge_label_name.to_string(),
+                    is_reverse,
+                });
+            } else {
+                let mut available: Vec<_> = var_map.keys().collect();
+                available.extend(edge_var_map.keys());
+                return Err(SqlError::Plan(format!(
                     "Unknown variable '{var}' in COLUMNS. Available: {available:?}"
-                ))
-            })?;
-
-            let table_name = &pos_table_names[*var_idx];
-            let vtable = session.tables.get(table_name).ok_or_else(|| {
-                SqlError::Plan(format!("Table '{table_name}' not found"))
-            })?;
-            let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
-                SqlError::Plan(format!(
-                    "Column '{col}' not found in vertex table '{table_name}'"
-                ))
-            })?;
-
-            col_names.push(out_name);
-            col_specs.push(MhVarColKind::Property {
-                var_idx: *var_idx,
-                table_col_idx,
-                table_name: table_name.clone(),
-            });
+                )));
+            }
         } else {
             let lower = expr.to_lowercase();
             if lower.contains("path_length") || lower == "_depth" {
@@ -2107,6 +2206,27 @@ fn plan_multi_hop_variable(
                         *table_col_idx,
                         node_id as usize,
                     )?);
+                }
+                MhVarColKind::EdgeProperty { edge_idx, table_col_idx, edge_label, is_reverse } => {
+                    let left_node = bfs_result.node_ids[*edge_idx][row];
+                    let right_node = bfs_result.node_ids[*edge_idx + 1][row];
+                    let (edge_src, edge_dst) = if *is_reverse {
+                        (right_node, left_node)
+                    } else {
+                        (left_node, right_node)
+                    };
+                    let stored_rel = graph.edge_labels.get(edge_label.as_str()).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+                    })?;
+                    let edge_rows = stored_rel.edge_row_map.get(&(edge_src, edge_dst))
+                        .ok_or_else(|| SqlError::Plan(format!(
+                            "No edge found for ({edge_src}, {edge_dst}) in edge label '{edge_label}'"
+                        )))?;
+                    let edge_row = edge_rows[0];
+                    let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                    })?;
+                    csv.push_str(&get_cell_string(&edge_table.table, *table_col_idx, edge_row)?);
                 }
                 MhVarColKind::PathLength => {
                     csv.push_str(&bfs_result.path_lengths[row].to_string());
@@ -2368,11 +2488,18 @@ fn plan_multi_hop_fixed(
     // If cyclic, the last entry maps back to var 0 (already handled by truncating to n_vars)
     var_table_names.truncate(n_vars);
 
+    // Build edge variable map: edge variable name -> edge index
+    let mut edge_var_map: HashMap<String, usize> = HashMap::new();
+    for (i, edge) in edges.iter().enumerate() {
+        if let Some(ref var) = edge.variable {
+            edge_var_map.entry(var.clone()).or_insert(i);
+        }
+    }
+
     // Project COLUMNS
-    struct ColSpec {
-        var_idx: usize,    // which _v column to read the node ID from
-        table_col_idx: usize, // which column in the vertex table to read
-        table_name: String,
+    enum ColSpec {
+        Node { var_idx: usize, table_col_idx: usize, table_name: String },
+        Edge { edge_idx: usize, table_col_idx: usize, edge_label: String, is_reverse: bool },
     }
     let mut col_names: Vec<String> = Vec::new();
     let mut col_specs: Vec<ColSpec> = Vec::new();
@@ -2386,29 +2513,56 @@ fn plan_multi_hop_fixed(
             let col = expr[dot_pos + 1..].trim().to_lowercase();
             let out_name = alias.unwrap_or(&col).to_string();
 
-            let var_idx = var_map.get(&var).ok_or_else(|| {
-                let available: Vec<_> = var_map.keys().collect();
-                SqlError::Plan(format!(
+            if let Some(var_idx) = var_map.get(&var) {
+                let table_name = &var_table_names[*var_idx];
+                let vtable = session.tables.get(table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Table '{table_name}' not found"))
+                })?;
+                let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{col}' not found in vertex table '{table_name}'"
+                    ))
+                })?;
+
+                col_names.push(out_name);
+                col_specs.push(ColSpec::Node {
+                    var_idx: *var_idx,
+                    table_col_idx,
+                    table_name: table_name.clone(),
+                });
+            } else if let Some(edge_idx) = edge_var_map.get(&var) {
+                let edge = &edges[*edge_idx];
+                let edge_label_name = edge.label.as_deref().ok_or_else(|| {
+                    SqlError::Plan("Edge variable requires a label to access properties".into())
+                })?;
+                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
+                })?;
+                let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                    SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                })?;
+                let table_col_idx = find_col_idx(&edge_table.table, &col).ok_or_else(|| {
+                    SqlError::Plan(format!(
+                        "Column '{col}' not found in edge table '{}'",
+                        stored_rel.edge_label.table_name
+                    ))
+                })?;
+                let is_reverse = edge.direction == MatchDirection::Reverse;
+
+                col_names.push(out_name);
+                col_specs.push(ColSpec::Edge {
+                    edge_idx: *edge_idx,
+                    table_col_idx,
+                    edge_label: edge_label_name.to_string(),
+                    is_reverse,
+                });
+            } else {
+                let mut available: Vec<_> = var_map.keys().collect();
+                available.extend(edge_var_map.keys());
+                return Err(SqlError::Plan(format!(
                     "Unknown variable '{var}' in COLUMNS. Available: {available:?}"
-                ))
-            })?;
-
-            let table_name = &var_table_names[*var_idx];
-            let vtable = session.tables.get(table_name).ok_or_else(|| {
-                SqlError::Plan(format!("Table '{table_name}' not found"))
-            })?;
-            let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
-                SqlError::Plan(format!(
-                    "Column '{col}' not found in vertex table '{table_name}'"
-                ))
-            })?;
-
-            col_names.push(out_name);
-            col_specs.push(ColSpec {
-                var_idx: *var_idx,
-                table_col_idx,
-                table_name: table_name.clone(),
-            });
+                )));
+            }
         } else {
             return Err(SqlError::Plan(format!(
                 "COLUMNS expression must be in 'var.col' format, got: {expr}"
@@ -2434,17 +2588,44 @@ fn plan_multi_hop_fixed(
             if i > 0 {
                 csv.push(',');
             }
-            let val = node_ids[spec.var_idx][row];
-            if val < 0 {
-                return Err(SqlError::Plan(format!(
-                    "Negative node index {} for _v{} at row {}", val, spec.var_idx, row
-                )));
+            match spec {
+                ColSpec::Node { var_idx, table_col_idx, table_name } => {
+                    let val = node_ids[*var_idx][row];
+                    if val < 0 {
+                        return Err(SqlError::Plan(format!(
+                            "Negative node index {} for _v{} at row {}", val, var_idx, row
+                        )));
+                    }
+                    let node_row = val as usize;
+                    let vtable = session.tables.get(table_name.as_str()).ok_or_else(|| {
+                        SqlError::Plan(format!("Table '{}' not found", table_name))
+                    })?;
+                    csv.push_str(&get_cell_string(&vtable.table, *table_col_idx, node_row)?);
+                }
+                ColSpec::Edge { edge_idx, table_col_idx, edge_label, is_reverse } => {
+                    // For edge at index i, the node pair is (node[i], node[i+1])
+                    let left_node = node_ids[*edge_idx][row];
+                    let right_node = node_ids[*edge_idx + 1][row];
+                    // Convert to edge's natural direction for edge_row_map lookup
+                    let (edge_src, edge_dst) = if *is_reverse {
+                        (right_node, left_node)
+                    } else {
+                        (left_node, right_node)
+                    };
+                    let stored_rel = graph.edge_labels.get(edge_label.as_str()).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+                    })?;
+                    let edge_rows = stored_rel.edge_row_map.get(&(edge_src, edge_dst))
+                        .ok_or_else(|| SqlError::Plan(format!(
+                            "No edge found for ({edge_src}, {edge_dst}) in edge label '{edge_label}'"
+                        )))?;
+                    let edge_row = edge_rows[0];
+                    let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                    })?;
+                    csv.push_str(&get_cell_string(&edge_table.table, *table_col_idx, edge_row)?);
+                }
             }
-            let node_row = val as usize;
-            let vtable = session.tables.get(&spec.table_name).ok_or_else(|| {
-                SqlError::Plan(format!("Table '{}' not found", spec.table_name))
-            })?;
-            csv.push_str(&get_cell_string(&vtable.table, spec.table_col_idx, node_row)?);
         }
         csv.push('\n');
     }
@@ -2553,7 +2734,7 @@ fn plan_var_length(
     let result = g.execute(var_exp)?;
 
     // var_expand result has: _start, _end, _depth
-    project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table)
+    project_var_length_columns(session, &result, columns, src_node, dst_node, src_table, dst_table, edge)
 }
 
 /// Project COLUMNS from var_expand results.
@@ -2566,9 +2747,11 @@ fn project_var_length_columns(
     dst_node: &NodePattern,
     src_table: &Table,
     dst_table: &Table,
+    edge_pattern: &EdgePattern,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
+    let edge_var = edge_pattern.variable.as_deref();
 
     let nrows = checked_nrows(var_result)?;
 
@@ -2633,9 +2816,18 @@ fn project_var_length_columns(
                     .ok_or_else(|| SqlError::Plan(format!("Column '{col}' not found in destination table")))?;
                 col_names.push(out_name);
                 col_specs.push(ColSpec { kind: VarColKind::Dst, table_col_idx: col_idx });
-            } else {
+            } else if edge_var.is_some() && var == edge_var.unwrap() {
                 return Err(SqlError::Plan(format!(
-                    "Unknown variable '{var}' in COLUMNS"
+                    "Edge property access on variable-length edges is not supported. \
+                     Edge variable '{var}' cannot be used with property access in variable-length patterns."
+                )));
+            } else {
+                let mut available = format!("{src_var}, {dst_var}");
+                if let Some(ev) = edge_var {
+                    available.push_str(&format!(", {ev}"));
+                }
+                return Err(SqlError::Plan(format!(
+                    "Unknown variable '{var}' in COLUMNS. Available: {available}"
                 )));
             }
         } else {

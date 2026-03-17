@@ -259,3 +259,8 @@ fn slt_pgq_natural_keys() {
 fn slt_pgq_filters() {
     run_slt("tests/slt/pgq_filters.slt");
 }
+
+#[test]
+fn slt_pgq_edge_props() {
+    run_slt("tests/slt/pgq_edge_props.slt");
+}

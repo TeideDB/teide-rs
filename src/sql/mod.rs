@@ -550,7 +550,7 @@ impl Session {
                         el.dst_ref_table, el.dst_ref_col
                     )))?;
 
-                let rel = pgq::remap_and_build_rel(
+                let (rel, edge_row_map) = pgq::remap_and_build_rel(
                     self, edge_stored, src_vl, dst_vl, el, n_src, n_dst,
                 )?;
                 new_edges.push((
@@ -558,6 +558,7 @@ impl Session {
                     pgq::StoredRel {
                         rel,
                         edge_label: el.clone(),
+                        edge_row_map,
                     },
                 ));
             }
