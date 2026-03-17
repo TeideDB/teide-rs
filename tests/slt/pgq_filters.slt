@@ -1,0 +1,71 @@
+# SQL/PGQ: Rich WHERE filters
+
+statement ok
+CREATE TABLE rf_persons (id INTEGER, name VARCHAR, age INTEGER)
+
+statement ok
+INSERT INTO rf_persons VALUES (0, 'Alice', 30), (1, 'Bob', 25), (2, 'Carol', 35), (3, 'Dave', 25)
+
+statement ok
+CREATE TABLE rf_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO rf_knows VALUES (0, 1), (0, 2), (0, 3), (1, 2)
+
+statement ok
+CREATE PROPERTY GRAPH rf_graph VERTEX TABLES (rf_persons LABEL Person) EDGE TABLES (rf_knows SOURCE KEY (src) REFERENCES rf_persons (id) DESTINATION KEY (dst) REFERENCES rf_persons (id) LABEL Knows)
+
+# Greater-than filter: Alice (age=30) and Carol (age=35) match age > 28
+# but Carol has no outgoing Knows edges, so only Alice's edges appear
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age > 28)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+
+# IN filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name IN ('Alice', 'Bob'))-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+Bob Carol
+
+# AND filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age >= 25 AND a.name != 'Dave')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+Bob Carol
+
+# OR filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name = 'Carol' OR a.name = 'Bob')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# Less-than filter
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age < 30)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Bob Carol
+
+# NOT equal filter using !=
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.age != 25)-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY src, dst
+----
+Alice Bob
+Alice Carol
+Alice Dave
+
+# Backward compat: simple equality still works
+query TT
+SELECT * FROM GRAPH_TABLE (rf_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+Alice Dave

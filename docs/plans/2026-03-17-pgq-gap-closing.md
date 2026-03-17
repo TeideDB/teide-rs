@@ -226,7 +226,7 @@ git commit -m "feat(pgq): natural key support — remove 0-based sequential key 
 - Modify: `src/sql/pgq_parser.rs:766-829` — parse WHERE into `Expr`
 - Test: `tests/slt/pgq_filters.slt` — new SLT test file
 
-### Step 2.1: Write the failing SLT test
+### Step 2.1: Write the failing SLT test [x]
 
 Create `tests/slt/pgq_filters.slt`:
 
@@ -285,12 +285,12 @@ fn slt_pgq_filters() {
 }
 ```
 
-### Step 2.2: Run test to verify it fails
+### Step 2.2: Run test to verify it fails [x]
 
 Run: `cargo test --all-features -- slt_pgq_filters`
 Expected: FAIL — "Unsupported operator" or similar error from `extract_node_id_from_filter`
 
-### Step 2.3: Add `filter_expr` to `NodePattern`
+### Step 2.3: Add `filter_expr` to `NodePattern` [x]
 
 In `src/sql/pgq.rs` (line 154):
 
@@ -309,7 +309,7 @@ use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser as SqlParser;
 ```
 
-### Step 2.4: Parse WHERE text into `Expr`
+### Step 2.4: Parse WHERE text into `Expr` [x]
 
 In `src/sql/pgq_parser.rs`, after building the `filter` string in `parse_node_pattern` (line 816-818), also parse it into an Expr. This can be done in `pgq.rs` when the `NodePattern` is first used, or in the parser itself. Preferred: do it in `pgq.rs` at planning time since `pgq_parser.rs` doesn't use sqlparser.
 
@@ -326,7 +326,7 @@ fn parse_filter_expr(filter_text: &str) -> Result<sqlparser::ast::Expr, SqlError
 }
 ```
 
-### Step 2.5: Implement `evaluate_filter`
+### Step 2.5: Implement `evaluate_filter` [x]
 
 New function in `src/sql/pgq.rs`:
 
@@ -391,7 +391,7 @@ fn evaluate_filter(
 
 Also implement `eval_scalar` (returns a comparable `ScalarValue` enum) and `compare_scalars`.
 
-### Step 2.6: Replace filter extraction in all planners
+### Step 2.6: Replace filter extraction in all planners [x]
 
 In `plan_single_hop`, `plan_var_length`, `plan_multi_hop_fixed`, `plan_multi_hop_variable`, and `plan_shortest_path`:
 
@@ -420,17 +420,17 @@ fn resolve_filtered_node_ids(
 }
 ```
 
-### Step 2.7: Run test and iterate
+### Step 2.7: Run test and iterate [x]
 
 Run: `cargo test --all-features -- slt_pgq_filters`
 Expected: PASS
 
-### Step 2.8: Run full test suite
+### Step 2.8: Run full test suite [x]
 
 Run: `cargo test --all-features -- --skip server_ --skip extended_`
 Expected: ALL pass
 
-### Step 2.9: Commit
+### Step 2.9: Commit [x]
 
 ```bash
 git add src/sql/pgq.rs src/sql/pgq_parser.rs tests/slt/pgq_filters.slt tests/slt_runner.rs

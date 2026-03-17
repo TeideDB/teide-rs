@@ -254,3 +254,8 @@ fn slt_pgq_multi_hop() {
 fn slt_pgq_natural_keys() {
     run_slt("tests/slt/pgq_natural_keys.slt");
 }
+
+#[test]
+fn slt_pgq_filters() {
+    run_slt("tests/slt/pgq_filters.slt");
+}

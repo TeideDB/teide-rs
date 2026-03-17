@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::{ffi, Column, Graph, HnswIndex, Rel, Table};
+use crate::{ffi, HnswIndex, Rel, Table};
+use sqlparser::ast as sql_ast;
+use sqlparser::dialect::DuckDbDialect;
+use sqlparser::parser::Parser as SqlParser;
 
 /// Monotonic counter for unique temp file names.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -720,13 +723,7 @@ fn plan_single_hop(
 
     // Determine source node row indices
     let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
-        let row = extract_node_id_from_filter(
-            src_node,
-            &src_label.table_name,
-            filter_text,
-            session,
-        )?;
-        vec![row]
+        resolve_filtered_node_ids(filter_text, src_node, src_stored)?
     } else {
         let nrows = checked_logical_nrows(src_stored)?;
         (0..nrows as i64).collect()
@@ -805,69 +802,6 @@ fn validate_node_table_for_edge(
         }
     }
     Ok(())
-}
-
-/// Apply a WHERE filter from a node pattern.
-/// Parses filter text like "a.name = 'Alice'" and applies it.
-#[allow(dead_code)]
-fn apply_node_filter(
-    g: &mut Graph,
-    ids: Column,
-    filter_text: &str,
-    variable: Option<&str>,
-) -> Result<Column, SqlError> {
-    // Split on '=' first, then check only the LHS for unsupported operators.
-    // Checking the full filter_text would false-reject values containing
-    // operator characters (e.g. a.name = 'A>B').
-    let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
-    if parts.len() != 2 {
-        return Err(SqlError::Plan(format!(
-            "Unsupported node filter syntax: {filter_text}. Only 'col = value' is supported."
-        )));
-    }
-    let lhs = parts[0].trim();
-    // After splitting on '=', a trailing '!', '>', or '<' on the LHS means
-    // the original expression used !=, >=, or <= — reject those.
-    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
-        return Err(SqlError::Plan(format!(
-            "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
-        )));
-    }
-    let col_name = if let Some(var) = variable {
-        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
-        let mut s = lhs.to_string();
-        for p in &prefixes {
-            if let Some(stripped) = s.strip_prefix(p.as_str()) {
-                s = stripped.to_string();
-                break;
-            }
-        }
-        s.trim().to_lowercase()
-    } else {
-        lhs.to_lowercase()
-    };
-    let value = parts[1].trim();
-    // Remove internal spaces from value to handle tokenizer artifacts (e.g., "- 1" -> "-1")
-    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-
-    let scan_col = g.scan(&col_name)?;
-
-    let const_col = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        let s = value[1..value.len() - 1].replace("''", "'");
-        g.const_str(&s)?
-    } else if let Ok(n) = value_nospace.parse::<i64>() {
-        g.const_i64(n)?
-    } else if let Ok(f) = value_nospace.parse::<f64>() {
-        g.const_f64(f)?
-    } else {
-        return Err(SqlError::Plan(format!(
-            "Unsupported filter value: {value}"
-        )));
-    };
-
-    let pred = g.eq(scan_col, const_col)?;
-    let filtered = g.filter(ids, pred)?;
-    Ok(filtered)
 }
 
 /// Project COLUMNS from expand results.
@@ -1130,6 +1064,304 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlE
 fn csv_quote(s: &str) -> String {
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+// ---------------------------------------------------------------------------
+// Rich WHERE filter evaluation
+// ---------------------------------------------------------------------------
+
+/// A scalar value produced during filter expression evaluation.
+#[derive(Debug, Clone, PartialEq)]
+enum ScalarValue {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Null,
+}
+
+impl PartialOrd for ScalarValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (ScalarValue::Int(a), ScalarValue::Int(b)) => a.partial_cmp(b),
+            (ScalarValue::Float(a), ScalarValue::Float(b)) => a.partial_cmp(b),
+            (ScalarValue::Int(a), ScalarValue::Float(b)) => (*a as f64).partial_cmp(b),
+            (ScalarValue::Float(a), ScalarValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+            (ScalarValue::Str(a), ScalarValue::Str(b)) => a.partial_cmp(b),
+            _ => None,
+        }
+    }
+}
+
+/// Normalize filter text from PGQ tokenizer output.
+/// The PGQ tokenizer splits multi-character operators (>=, <=, !=, <>) into
+/// separate tokens joined by spaces. This reassembles them for sqlparser.
+/// Also normalizes "a . col" → "a.col" compound identifiers.
+fn normalize_filter_text(filter_text: &str) -> String {
+    let mut result = String::with_capacity(filter_text.len());
+    let tokens: Vec<&str> = filter_text.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        if i > 0 {
+            // Check if we should suppress the space (for compound identifiers)
+            let prev = tokens[i - 1];
+            let curr = tokens[i];
+            if prev == "." || curr == "." {
+                // Don't add space around dots: "a . name" -> "a.name"
+            } else {
+                result.push(' ');
+            }
+        }
+        let tok = tokens[i];
+        // Try to merge multi-char operators
+        if i + 1 < tokens.len() {
+            let next = tokens[i + 1];
+            let merged = match (tok, next) {
+                (">", "=") => Some(">="),
+                ("<", "=") => Some("<="),
+                ("!", "=") => Some("!="),
+                ("<", ">") => Some("<>"),
+                _ => None,
+            };
+            if let Some(op) = merged {
+                result.push_str(op);
+                i += 2;
+                continue;
+            }
+        }
+        result.push_str(tok);
+        i += 1;
+    }
+    result
+}
+
+/// Parse a WHERE filter text into a sqlparser Expr AST.
+fn parse_filter_expr(filter_text: &str) -> Result<sql_ast::Expr, SqlError> {
+    let normalized = normalize_filter_text(filter_text);
+    let dialect = DuckDbDialect {};
+    let mut parser = SqlParser::new(&dialect)
+        .try_with_sql(&normalized)
+        .map_err(|e| SqlError::Parse(format!("Failed to parse WHERE filter: {e}")))?;
+    parser
+        .parse_expr()
+        .map_err(|e| SqlError::Parse(format!("Invalid WHERE expression: {e}")))
+}
+
+/// Evaluate a scalar expression against a table row, returning a ScalarValue.
+fn eval_scalar(
+    expr: &sql_ast::Expr,
+    table: &Table,
+    row: usize,
+    var_name: &str,
+) -> Result<ScalarValue, SqlError> {
+    match expr {
+        sql_ast::Expr::CompoundIdentifier(parts) => {
+            // e.g. a.name — parts[0] is variable, parts[1] is column
+            if parts.len() == 2 {
+                let var = parts[0].value.to_lowercase();
+                let col = parts[1].value.to_lowercase();
+                if var == var_name {
+                    return read_scalar_from_table(table, &col, row);
+                }
+            }
+            Err(SqlError::Plan(format!(
+                "Unsupported identifier in filter: {}",
+                expr
+            )))
+        }
+        sql_ast::Expr::Identifier(ident) => {
+            // Bare column name (no variable prefix)
+            let col = ident.value.to_lowercase();
+            read_scalar_from_table(table, &col, row)
+        }
+        sql_ast::Expr::Value(val) => match val {
+            sql_ast::Value::Number(n, _) => {
+                if let Ok(i) = n.parse::<i64>() {
+                    Ok(ScalarValue::Int(i))
+                } else if let Ok(f) = n.parse::<f64>() {
+                    Ok(ScalarValue::Float(f))
+                } else {
+                    Err(SqlError::Plan(format!("Cannot parse number: {n}")))
+                }
+            }
+            sql_ast::Value::SingleQuotedString(s) => Ok(ScalarValue::Str(s.clone())),
+            sql_ast::Value::Boolean(b) => Ok(ScalarValue::Bool(*b)),
+            sql_ast::Value::Null => Ok(ScalarValue::Null),
+            _ => Err(SqlError::Plan(format!(
+                "Unsupported value in filter: {val}"
+            ))),
+        },
+        sql_ast::Expr::UnaryOp {
+            op: sql_ast::UnaryOperator::Minus,
+            expr: inner,
+        } => {
+            let v = eval_scalar(inner, table, row, var_name)?;
+            match v {
+                ScalarValue::Int(i) => Ok(ScalarValue::Int(-i)),
+                ScalarValue::Float(f) => Ok(ScalarValue::Float(-f)),
+                _ => Err(SqlError::Plan(format!(
+                    "Cannot negate non-numeric value: {expr}"
+                ))),
+            }
+        }
+        _ => Err(SqlError::Plan(format!(
+            "Unsupported scalar expression in filter: {expr}"
+        ))),
+    }
+}
+
+/// Read a scalar value from a table cell by column name.
+fn read_scalar_from_table(
+    table: &Table,
+    col_name: &str,
+    row: usize,
+) -> Result<ScalarValue, SqlError> {
+    let col_idx = find_col_idx(table, col_name).ok_or_else(|| {
+        SqlError::Plan(format!("Column '{col_name}' not found in table"))
+    })?;
+    let typ = table.col_type(col_idx);
+    match typ {
+        ffi::TD_BOOL => match table.get_i64(col_idx, row) {
+            Some(v) => Ok(ScalarValue::Bool(v != 0)),
+            None => Ok(ScalarValue::Null),
+        },
+        ffi::TD_I16 | ffi::TD_I32 | ffi::TD_I64 => match table.get_i64(col_idx, row) {
+            Some(v) => Ok(ScalarValue::Int(v)),
+            None => Ok(ScalarValue::Null),
+        },
+        ffi::TD_F64 | ffi::TD_F32 => match table.get_f64(col_idx, row) {
+            Some(v) => Ok(ScalarValue::Float(v)),
+            None => Ok(ScalarValue::Null),
+        },
+        ffi::TD_SYM => match table.get_str(col_idx, row) {
+            Some(s) => Ok(ScalarValue::Str(s)),
+            None => Ok(ScalarValue::Null),
+        },
+        _ => Err(SqlError::Plan(format!(
+            "Unsupported column type {typ} in filter evaluation"
+        ))),
+    }
+}
+
+/// Compare two scalar values with a binary operator, returning a boolean.
+fn compare_scalars(
+    lhs: &ScalarValue,
+    rhs: &ScalarValue,
+    op: &sql_ast::BinaryOperator,
+) -> Result<bool, SqlError> {
+    use sql_ast::BinaryOperator;
+    if matches!(lhs, ScalarValue::Null) || matches!(rhs, ScalarValue::Null) {
+        return Ok(false); // NULL comparisons are false (SQL three-valued logic)
+    }
+    match op {
+        BinaryOperator::Eq => Ok(lhs == rhs),
+        BinaryOperator::NotEq => Ok(lhs != rhs),
+        BinaryOperator::Lt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Less)),
+        BinaryOperator::LtEq => Ok(matches!(
+            lhs.partial_cmp(rhs),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )),
+        BinaryOperator::Gt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Greater)),
+        BinaryOperator::GtEq => Ok(matches!(
+            lhs.partial_cmp(rhs),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )),
+        _ => Err(SqlError::Plan(format!(
+            "Unsupported comparison operator: {op}"
+        ))),
+    }
+}
+
+/// Evaluate a parsed filter expression against a table row.
+/// Returns true if the row passes the filter.
+fn evaluate_filter(
+    expr: &sql_ast::Expr,
+    table: &Table,
+    row: usize,
+    var_name: &str,
+) -> Result<bool, SqlError> {
+    match expr {
+        sql_ast::Expr::BinaryOp { left, op, right } => match op {
+            sql_ast::BinaryOperator::And => {
+                Ok(evaluate_filter(left, table, row, var_name)?
+                    && evaluate_filter(right, table, row, var_name)?)
+            }
+            sql_ast::BinaryOperator::Or => {
+                Ok(evaluate_filter(left, table, row, var_name)?
+                    || evaluate_filter(right, table, row, var_name)?)
+            }
+            _ => {
+                let lhs = eval_scalar(left, table, row, var_name)?;
+                let rhs = eval_scalar(right, table, row, var_name)?;
+                compare_scalars(&lhs, &rhs, op)
+            }
+        },
+        sql_ast::Expr::UnaryOp {
+            op: sql_ast::UnaryOperator::Not,
+            expr: inner,
+        } => Ok(!evaluate_filter(inner, table, row, var_name)?),
+        sql_ast::Expr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
+            let val = eval_scalar(inner, table, row, var_name)?;
+            let found = list.iter().any(|item| {
+                eval_scalar(item, table, row, var_name)
+                    .map(|v| v == val)
+                    .unwrap_or(false)
+            });
+            Ok(if *negated { !found } else { found })
+        }
+        sql_ast::Expr::Between {
+            expr: inner,
+            negated,
+            low,
+            high,
+        } => {
+            let val = eval_scalar(inner, table, row, var_name)?;
+            let lo = eval_scalar(low, table, row, var_name)?;
+            let hi = eval_scalar(high, table, row, var_name)?;
+            let in_range = val >= lo && val <= hi;
+            Ok(if *negated { !in_range } else { in_range })
+        }
+        sql_ast::Expr::IsNull(inner) => {
+            Ok(eval_scalar(inner, table, row, var_name)? == ScalarValue::Null)
+        }
+        sql_ast::Expr::IsNotNull(inner) => {
+            Ok(eval_scalar(inner, table, row, var_name)? != ScalarValue::Null)
+        }
+        sql_ast::Expr::Nested(inner) => evaluate_filter(inner, table, row, var_name),
+        _ => {
+            // Try evaluating as a scalar — if it's a boolean, use that
+            let v = eval_scalar(expr, table, row, var_name)?;
+            match v {
+                ScalarValue::Bool(b) => Ok(b),
+                _ => Err(SqlError::Plan(format!(
+                    "Unsupported filter expression: {expr}"
+                ))),
+            }
+        }
+    }
+}
+
+/// Resolve all row indices in a vertex table that match a WHERE filter.
+/// Returns the matching row indices.
+fn resolve_filtered_node_ids(
+    filter_text: &str,
+    node: &NodePattern,
+    stored: &super::StoredTable,
+) -> Result<Vec<i64>, SqlError> {
+    let expr = parse_filter_expr(filter_text)?;
+    let var = node.variable.as_deref().unwrap_or("");
+    let nrows = checked_logical_nrows(stored)?;
+    let mut matching = Vec::new();
+    for row in 0..nrows {
+        if evaluate_filter(&expr, &stored.table, row, var)? {
+            matching.push(row as i64);
+        }
+    }
+    Ok(matching)
 }
 
 // ---------------------------------------------------------------------------
@@ -1490,16 +1722,8 @@ fn plan_multi_hop_variable(
     })?;
 
     let start_nodes: Vec<i64> = if let Some(ref filter_text) = nodes[0].filter {
-        // Try to extract a single node ID from the WHERE filter
-        let src_id = extract_node_id_from_filter(
-            &nodes[0],
-            first_src_table_name,
-            filter_text,
-            session,
-        )?;
-        vec![src_id]
+        resolve_filtered_node_ids(filter_text, &nodes[0], first_src_stored)?
     } else {
-        // All nodes in the first vertex table
         let nrows = checked_logical_nrows(first_src_stored)?;
         (0..nrows as i64).collect()
     };
@@ -1636,92 +1860,6 @@ fn plan_multi_hop_variable(
     Ok((result, col_names))
 }
 
-/// Extract a single node row index from a WHERE filter text.
-/// Similar to `extract_node_id` but takes a filter string directly rather
-/// than requiring the node to have a filter.
-fn extract_node_id_from_filter(
-    node: &NodePattern,
-    table_name: &str,
-    filter_text: &str,
-    session: &Session,
-) -> Result<i64, SqlError> {
-    let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
-    if parts.len() != 2 {
-        return Err(SqlError::Plan(format!(
-            "Cannot extract node ID from filter: {filter_text}"
-        )));
-    }
-    let lhs = parts[0].trim();
-    if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
-        return Err(SqlError::Plan(format!(
-            "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
-        )));
-    }
-    let var = node.variable.as_deref().unwrap_or("");
-    let col_name = if !var.is_empty() {
-        let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
-        let mut s = lhs.to_string();
-        for p in &prefixes {
-            if let Some(stripped) = s.strip_prefix(p.as_str()) {
-                s = stripped.to_string();
-                break;
-            }
-        }
-        s.trim().to_lowercase()
-    } else {
-        lhs.to_lowercase()
-    };
-    let value = parts[1].trim();
-    let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-
-    let stored = session.tables.get(table_name).ok_or_else(|| {
-        SqlError::Plan(format!("Table '{table_name}' not found"))
-    })?;
-
-    let nrows = checked_logical_nrows(stored)?;
-    let col_idx = find_col_idx(&stored.table, &col_name).ok_or_else(|| {
-        SqlError::Plan(format!("Column '{col_name}' not found in '{table_name}'"))
-    })?;
-
-    let str_val = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        Some(value[1..value.len() - 1].replace("''", "'"))
-    } else {
-        None
-    };
-
-    let int_val = if str_val.is_none() { value_nospace.parse::<i64>().ok() } else { None };
-    let float_val = if str_val.is_none() && int_val.is_none() {
-        value_nospace.parse::<f64>().ok()
-    } else {
-        None
-    };
-
-    let mut found_row: Option<usize> = None;
-    for row in 0..nrows {
-        let matched = if let Some(ref sv) = str_val {
-            stored.table.get_str(col_idx, row).as_deref() == Some(sv.as_str())
-        } else if let Some(iv) = int_val {
-            stored.table.get_i64(col_idx, row) == Some(iv)
-        } else if let Some(fv) = float_val {
-            stored.table.get_f64(col_idx, row) == Some(fv)
-        } else {
-            false
-        };
-
-        if matched {
-            if found_row.is_some() {
-                return Err(SqlError::Plan(format!(
-                    "Ambiguous node filter: '{filter_text}' matches multiple rows in '{table_name}'."
-                )));
-            }
-            found_row = Some(row);
-        }
-    }
-
-    found_row.map(|r| r as i64).ok_or_else(|| {
-        SqlError::Plan(format!("No matching row for filter: {filter_text}"))
-    })
-}
 
 /// Plan a multi-hop fixed MATCH: (a)-[e1]->(b)-[e2]->(c) ... where all edges
 /// have `PathQuantifier::One`. Uses `wco_join` (Leapfrog Triejoin) to find
@@ -1926,36 +2064,9 @@ fn plan_multi_hop_fixed(
     }
 
     // Apply source node (v0) WHERE filter if present
-    let src_filter = nodes[0].filter.as_deref();
-    let row_mask: Vec<bool> = if let Some(filter_text) = src_filter {
-        // Parse the filter to extract column name and value
-        let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
-        if parts.len() != 2 {
-            return Err(SqlError::Plan(format!(
-                "Unsupported node filter syntax: {filter_text}. Only 'col = value' is supported."
-            )));
-        }
-        let lhs = parts[0].trim();
-        if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
-            return Err(SqlError::Plan(format!(
-                "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
-            )));
-        }
-        let col_name = if let Some(var) = nodes[0].variable.as_deref() {
-            let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
-            let mut s = lhs.to_string();
-            for p in &prefixes {
-                if let Some(stripped) = s.strip_prefix(p.as_str()) {
-                    s = stripped.to_string();
-                    break;
-                }
-            }
-            s.trim().to_lowercase()
-        } else {
-            lhs.to_lowercase()
-        };
-        let value = parts[1].trim();
-
+    let row_mask: Vec<bool> = if let Some(filter_text) = nodes[0].filter.as_deref() {
+        let expr = parse_filter_expr(filter_text)?;
+        let var_name = nodes[0].variable.as_deref().unwrap_or("");
         let src_table = session
             .tables
             .get(&segments[0].src_table_name)
@@ -1965,14 +2076,6 @@ fn plan_multi_hop_fixed(
                     segments[0].src_table_name
                 ))
             })?;
-        let filter_col_idx = find_col_idx(&src_table.table, &col_name).ok_or_else(|| {
-            SqlError::Plan(format!(
-                "Column '{col_name}' not found in source table '{}'",
-                segments[0].src_table_name
-            ))
-        })?;
-
-        // For each row in wco_result, check if the source node's column matches the filter value
         let mut mask = Vec::with_capacity(nrows);
         for row in 0..nrows {
             let val = node_ids[0][row];
@@ -1980,34 +2083,7 @@ fn plan_multi_hop_fixed(
                 return Err(SqlError::Plan(format!("Negative node index {val} for _v0 at row {row}")));
             }
             let node_row = val as usize;
-            let matches = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-                let s = value[1..value.len() - 1].replace("''", "'");
-                src_table
-                    .table
-                    .get_str(filter_col_idx, node_row)
-                    .map(|v| v == s)
-                    .unwrap_or(false)
-            } else if let Ok(int_val) = value.parse::<i64>() {
-                src_table
-                    .table
-                    .get_i64(filter_col_idx, node_row)
-                    .map(|v| v == int_val)
-                    .unwrap_or(false)
-            } else {
-                let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-                if let Ok(int_val) = value_nospace.parse::<i64>() {
-                    src_table
-                        .table
-                        .get_i64(filter_col_idx, node_row)
-                        .map(|v| v == int_val)
-                        .unwrap_or(false)
-                } else {
-                    return Err(SqlError::Plan(format!(
-                        "Unsupported filter value: {value}"
-                    )));
-                }
-            };
-            mask.push(matches);
+            mask.push(evaluate_filter(&expr, &src_table.table, node_row, var_name)?);
         }
         mask
     } else {
@@ -2189,10 +2265,7 @@ fn plan_var_length(
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?;
     let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
-        let row = extract_node_id_from_filter(
-            src_node, &src_label.table_name, filter_text, session,
-        )?;
-        vec![row]
+        resolve_filtered_node_ids(filter_text, src_node, src_stored)?
     } else {
         let nrows = checked_logical_nrows(src_stored)?;
         (0..nrows as i64).collect()
@@ -2709,7 +2782,7 @@ fn reconstruct_shortest_path(
 }
 
 /// Extract a node's row index from a WHERE filter.
-/// Delegates to `extract_node_id_from_filter` after unwrapping the filter text.
+/// Uses the rich filter evaluator and requires exactly one matching row.
 fn extract_node_id(
     node: &NodePattern,
     table_name: &str,
@@ -2721,7 +2794,17 @@ fn extract_node_id(
             "SHORTEST_PATH requires WHERE filters on both source and destination nodes".into(),
         )
     })?;
-    extract_node_id_from_filter(node, table_name, filter, session)
+    let stored = session.tables.get(table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{table_name}' not found"))
+    })?;
+    let matches = resolve_filtered_node_ids(filter, node, stored)?;
+    match matches.len() {
+        0 => Err(SqlError::Plan(format!("No matching row for filter: {filter}"))),
+        1 => Ok(matches[0]),
+        n => Err(SqlError::Plan(format!(
+            "SHORTEST_PATH filter must match exactly one node, but '{filter}' matched {n} rows in '{table_name}'"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
