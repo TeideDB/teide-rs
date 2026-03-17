@@ -244,3 +244,8 @@ fn slt_pgq_algorithms() {
 fn slt_vector() {
     run_slt("tests/slt/vector.slt");
 }
+
+#[test]
+fn slt_pgq_multi_hop() {
+    run_slt("tests/slt/pgq_multi_hop.slt");
+}

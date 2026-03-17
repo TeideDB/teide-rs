@@ -1,0 +1,36 @@
+# SQL/PGQ: Multi-hop fixed patterns
+
+# Setup: Person -[Knows]-> Person -[LivesIn]-> City
+statement ok
+CREATE TABLE mh_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO mh_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')
+
+statement ok
+CREATE TABLE mh_cities (id INTEGER, city VARCHAR)
+
+statement ok
+INSERT INTO mh_cities VALUES (0, 'NYC'), (1, 'SF')
+
+statement ok
+CREATE TABLE mh_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO mh_knows VALUES (0, 1), (0, 2), (1, 2)
+
+statement ok
+CREATE TABLE mh_lives (person_id INTEGER, city_id INTEGER)
+
+statement ok
+INSERT INTO mh_lives VALUES (0, 0), (1, 1), (2, 0)
+
+statement ok
+CREATE PROPERTY GRAPH mh_graph VERTEX TABLES (mh_persons LABEL Person, mh_cities LABEL City) EDGE TABLES (mh_knows SOURCE KEY (src) REFERENCES mh_persons (id) DESTINATION KEY (dst) REFERENCES mh_persons (id) LABEL Knows, mh_lives SOURCE KEY (person_id) REFERENCES mh_persons (id) DESTINATION KEY (city_id) REFERENCES mh_cities (id) LABEL LivesIn)
+
+# 2-hop: Alice knows someone who lives in a city
+query TT
+SELECT * FROM GRAPH_TABLE (mh_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person)-[:LivesIn]->(c:City) COLUMNS (b.name, c.city)) ORDER BY b.name
+----
+Bob SF
+Carol NYC

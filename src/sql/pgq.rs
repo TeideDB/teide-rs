@@ -606,20 +606,20 @@ pub(crate) fn plan_graph_table(
         (1, 0, _) => {
             plan_algorithm_query(session, graph, pattern, &expr.columns)
         }
-        _ => {
-            if pattern.nodes.len() >= 3 {
-                Err(SqlError::Plan(
-                    "Multi-hop and cyclic MATCH patterns are not yet supported. \
-                     Use single-hop (a)-[e]->(b)."
-                        .into(),
-                ))
+        _ if pattern.nodes.len() >= 3 && pattern.edges.len() >= 2 => {
+            let all_fixed = pattern.edges.iter().all(|e| matches!(e.quantifier, PathQuantifier::One));
+            if all_fixed {
+                plan_multi_hop_fixed(session, graph, pattern, &expr.columns, &match_clause.mode)
             } else {
-                Err(SqlError::Plan(format!(
-                    "Unsupported MATCH pattern: {} nodes, {} edges",
-                    pattern.nodes.len(),
-                    pattern.edges.len()
-                )))
+                plan_multi_hop_variable(session, graph, pattern, &expr.columns, &match_clause.mode)
             }
+        }
+        _ => {
+            Err(SqlError::Plan(format!(
+                "Unsupported MATCH pattern: {} nodes, {} edges",
+                pattern.nodes.len(),
+                pattern.edges.len()
+            )))
         }
     }
 }
@@ -1045,6 +1045,369 @@ fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlE
 fn csv_quote(s: &str) -> String {
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+// ---------------------------------------------------------------------------
+// Multi-hop fixed-length path planner (wco_join)
+// ---------------------------------------------------------------------------
+
+/// Stub: multi-hop patterns where at least one edge has a variable-length quantifier.
+fn plan_multi_hop_variable(
+    _session: &Session,
+    _graph: &PropertyGraph,
+    _pattern: &PathPattern,
+    _columns: &[ColumnEntry],
+    _mode: &PathMode,
+) -> Result<(Table, Vec<String>), SqlError> {
+    Err(SqlError::Plan(
+        "Multi-hop patterns with variable-length edges are not yet supported.".into(),
+    ))
+}
+
+/// Plan a multi-hop fixed MATCH: (a)-[e1]->(b)-[e2]->(c) ... where all edges
+/// have `PathQuantifier::One`. Uses `wco_join` (Leapfrog Triejoin) to find
+/// matching node tuples.
+fn plan_multi_hop_fixed(
+    session: &Session,
+    graph: &PropertyGraph,
+    pattern: &PathPattern,
+    columns: &[ColumnEntry],
+    _mode: &PathMode,
+) -> Result<(Table, Vec<String>), SqlError> {
+    let nodes = &pattern.nodes;
+    let edges = &pattern.edges;
+
+    // Collect per-segment info: resolve each edge label and validate node-table
+    // continuity between adjacent segments.
+    struct Segment<'a> {
+        stored_rel: &'a StoredRel,
+        src_table_name: String,
+        dst_table_name: String,
+    }
+    let mut segments: Vec<Segment> = Vec::with_capacity(edges.len());
+
+    for (i, edge) in edges.iter().enumerate() {
+        let left_node = &nodes[i];
+        let right_node = &nodes[i + 1];
+
+        let edge_label = edge.label.as_deref().ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Edge {} in multi-hop pattern must specify a label: -[:Label]->",
+                i
+            ))
+        })?;
+        let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
+            SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+        })?;
+
+        // Determine left/right default tables based on edge direction
+        let is_reverse = edge.direction == MatchDirection::Reverse;
+        let (left_default_table, right_default_table) = if is_reverse {
+            (
+                &stored_rel.edge_label.dst_ref_table,
+                &stored_rel.edge_label.src_ref_table,
+            )
+        } else {
+            (
+                &stored_rel.edge_label.src_ref_table,
+                &stored_rel.edge_label.dst_ref_table,
+            )
+        };
+
+        let left_label = resolve_node_label(left_node, left_default_table, graph)?;
+        let right_label = resolve_node_label(right_node, right_default_table, graph)?;
+
+        // Validate explicit node labels match edge expectations
+        validate_node_table_for_edge(
+            left_node,
+            &left_label.table_name,
+            left_default_table,
+            edge_label,
+            "source",
+        )?;
+        validate_node_table_for_edge(
+            right_node,
+            &right_label.table_name,
+            right_default_table,
+            edge_label,
+            "destination",
+        )?;
+
+        // Verify vertex table continuity: segment[i].dst == segment[i+1].src
+        if let Some(prev) = segments.last() {
+            if prev.dst_table_name != left_label.table_name {
+                return Err(SqlError::Plan(format!(
+                    "Vertex table mismatch between segment {} and {}: '{}' vs '{}'. \
+                     Adjacent segments must share a vertex table.",
+                    i - 1,
+                    i,
+                    prev.dst_table_name,
+                    left_label.table_name
+                )));
+            }
+        }
+
+        // Reject undirected edges on heterogeneous segments (same limitation as single-hop)
+        if edge.direction == MatchDirection::Undirected
+            && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+        {
+            return Err(SqlError::Plan(
+                "Undirected traversals are not supported on edges with different source and \
+                 destination vertex tables (heterogeneous graphs). Use directed patterns instead."
+                    .into(),
+            ));
+        }
+
+        segments.push(Segment {
+            stored_rel,
+            src_table_name: left_label.table_name.clone(),
+            dst_table_name: right_label.table_name.clone(),
+        });
+    }
+
+    // Detect cyclic variable binding: first and last node share the same variable name
+    let is_cyclic = match (&nodes[0].variable, &nodes[nodes.len() - 1].variable) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+
+    // n_vars: number of distinct node positions
+    let n_nodes = nodes.len();
+    let n_vars = if is_cyclic { n_nodes - 1 } else { n_nodes };
+
+    // Build the wco_join Rel references.
+    // For a chain pattern, rel[i] connects var i -> var i+1 (as the C LFTJ expects).
+    let rel_refs: Vec<&Rel> = segments.iter().map(|s| &s.stored_rel.rel).collect();
+
+    let n_vars_u8: u8 = n_vars
+        .try_into()
+        .map_err(|_| SqlError::Plan("Too many node variables in pattern".into()))?;
+
+    // Build the graph on the first segment's source vertex table
+    let first_src_table = session
+        .tables
+        .get(&segments[0].src_table_name)
+        .ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Table '{}' not found",
+                segments[0].src_table_name
+            ))
+        })?;
+
+    let g = session.ctx.graph(&first_src_table.table)?;
+    let wco_result_col = g.wco_join(&rel_refs, n_vars_u8)?;
+    let wco_result = g.execute(wco_result_col)?;
+
+    // If the source node has a WHERE filter, apply it by filtering the wco_result
+    // rows based on the _v0 column values.
+    // We need to filter the result table rather than pre-filtering input since
+    // wco_join operates on the full CSR.
+
+    let nrows = checked_nrows(&wco_result)?;
+
+    // Build a mapping: node variable name -> var index (position in the pattern)
+    let mut var_map: HashMap<String, usize> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(ref var) = node.variable {
+            let idx = if is_cyclic && i == n_nodes - 1 { 0 } else { i };
+            var_map.entry(var.clone()).or_insert(idx);
+        }
+    }
+
+    // Collect _v0, _v1, ... column indices from wco_result
+    let mut v_col_indices: Vec<usize> = Vec::with_capacity(n_vars);
+    for v in 0..n_vars {
+        let col_name = format!("_v{v}");
+        let idx = find_col_idx(&wco_result, &col_name).ok_or_else(|| {
+            SqlError::Plan(format!("wco_join result missing column '{col_name}'"))
+        })?;
+        v_col_indices.push(idx);
+    }
+
+    // Read all node ID arrays from wco_result
+    let mut node_ids: Vec<Vec<i64>> = Vec::with_capacity(n_vars);
+    for v in 0..n_vars {
+        let mut ids = Vec::with_capacity(nrows);
+        for row in 0..nrows {
+            let val = wco_result.get_i64(v_col_indices[v], row).ok_or_else(|| {
+                SqlError::Plan(format!("NULL _v{v} at row {row}"))
+            })?;
+            ids.push(val);
+        }
+        node_ids.push(ids);
+    }
+
+    // Apply source node (v0) WHERE filter if present
+    let src_filter = nodes[0].filter.as_deref();
+    let row_mask: Vec<bool> = if let Some(filter_text) = src_filter {
+        // Parse the filter to extract column name and value
+        let parts: Vec<&str> = filter_text.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return Err(SqlError::Plan(format!(
+                "Unsupported node filter syntax: {filter_text}. Only 'col = value' is supported."
+            )));
+        }
+        let lhs = parts[0].trim();
+        if lhs.ends_with('!') || lhs.ends_with('>') || lhs.ends_with('<') {
+            return Err(SqlError::Plan(format!(
+                "Unsupported operator in node filter: {filter_text}. Only 'col = value' is supported."
+            )));
+        }
+        let col_name = if let Some(var) = nodes[0].variable.as_deref() {
+            let prefixes = [format!("{var} . "), format!("{var} ."), format!("{var}.")];
+            let mut s = lhs.to_string();
+            for p in &prefixes {
+                if let Some(stripped) = s.strip_prefix(p.as_str()) {
+                    s = stripped.to_string();
+                    break;
+                }
+            }
+            s.trim().to_lowercase()
+        } else {
+            lhs.to_lowercase()
+        };
+        let value = parts[1].trim();
+
+        let src_table = session
+            .tables
+            .get(&segments[0].src_table_name)
+            .ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Table '{}' not found",
+                    segments[0].src_table_name
+                ))
+            })?;
+        let filter_col_idx = find_col_idx(&src_table.table, &col_name).ok_or_else(|| {
+            SqlError::Plan(format!(
+                "Column '{col_name}' not found in source table '{}'",
+                segments[0].src_table_name
+            ))
+        })?;
+
+        // For each row in wco_result, check if the source node's column matches the filter value
+        let mut mask = Vec::with_capacity(nrows);
+        for row in 0..nrows {
+            let node_row = node_ids[0][row] as usize;
+            let matches = if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+                let s = value[1..value.len() - 1].replace("''", "'");
+                src_table
+                    .table
+                    .get_str(filter_col_idx, node_row)
+                    .map(|v| v == s)
+                    .unwrap_or(false)
+            } else if let Ok(int_val) = value.parse::<i64>() {
+                src_table
+                    .table
+                    .get_i64(filter_col_idx, node_row)
+                    .map(|v| v == int_val)
+                    .unwrap_or(false)
+            } else {
+                let value_nospace: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+                if let Ok(int_val) = value_nospace.parse::<i64>() {
+                    src_table
+                        .table
+                        .get_i64(filter_col_idx, node_row)
+                        .map(|v| v == int_val)
+                        .unwrap_or(false)
+                } else {
+                    return Err(SqlError::Plan(format!(
+                        "Unsupported filter value: {value}"
+                    )));
+                }
+            };
+            mask.push(matches);
+        }
+        mask
+    } else {
+        vec![true; nrows]
+    };
+
+    // Build a lookup: for each node variable position, which vertex table does it reference?
+    let mut var_table_names: Vec<String> = Vec::with_capacity(n_vars);
+    var_table_names.push(segments[0].src_table_name.clone());
+    for seg in &segments {
+        var_table_names.push(seg.dst_table_name.clone());
+    }
+    // If cyclic, the last entry maps back to var 0 (already handled by truncating to n_vars)
+    var_table_names.truncate(n_vars);
+
+    // Project COLUMNS
+    struct ColSpec {
+        var_idx: usize,    // which _v column to read the node ID from
+        table_col_idx: usize, // which column in the vertex table to read
+        table_name: String,
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_specs: Vec<ColSpec> = Vec::new();
+
+    for entry in columns {
+        let expr = &entry.expr;
+        let alias = entry.alias.as_deref();
+
+        if let Some(dot_pos) = expr.find('.') {
+            let var = expr[..dot_pos].trim().to_lowercase();
+            let col = expr[dot_pos + 1..].trim().to_lowercase();
+            let out_name = alias.unwrap_or(&col).to_string();
+
+            let var_idx = var_map.get(&var).ok_or_else(|| {
+                let available: Vec<_> = var_map.keys().collect();
+                SqlError::Plan(format!(
+                    "Unknown variable '{var}' in COLUMNS. Available: {available:?}"
+                ))
+            })?;
+
+            let table_name = &var_table_names[*var_idx];
+            let vtable = session.tables.get(table_name).ok_or_else(|| {
+                SqlError::Plan(format!("Table '{table_name}' not found"))
+            })?;
+            let table_col_idx = find_col_idx(&vtable.table, &col).ok_or_else(|| {
+                SqlError::Plan(format!(
+                    "Column '{col}' not found in vertex table '{table_name}'"
+                ))
+            })?;
+
+            col_names.push(out_name);
+            col_specs.push(ColSpec {
+                var_idx: *var_idx,
+                table_col_idx,
+                table_name: table_name.clone(),
+            });
+        } else {
+            return Err(SqlError::Plan(format!(
+                "COLUMNS expression must be in 'var.col' format, got: {expr}"
+            )));
+        }
+    }
+
+    if col_specs.is_empty() {
+        return Err(SqlError::Plan("COLUMNS clause is empty".into()));
+    }
+
+    // Build result via CSV
+    let csv_col_names: Vec<String> = (0..col_names.len()).map(|i| format!("__c{i}")).collect();
+
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    for row in 0..nrows {
+        if !row_mask[row] {
+            continue;
+        }
+        for (i, spec) in col_specs.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            let node_row = node_ids[spec.var_idx][row] as usize;
+            let vtable = session.tables.get(&spec.table_name).ok_or_else(|| {
+                SqlError::Plan(format!("Table '{}' not found", spec.table_name))
+            })?;
+            csv.push_str(&get_cell_string(&vtable.table, spec.table_col_idx, node_row)?);
+        }
+        csv.push('\n');
+    }
+
+    let result = csv_to_table(session, &csv, &col_names)?;
+    Ok((result, col_names))
 }
 
 // ---------------------------------------------------------------------------
