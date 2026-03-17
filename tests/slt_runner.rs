@@ -301,3 +301,8 @@ fn slt_pgq_bidir() {
 fn slt_pgq_quantifiers() {
     run_slt("tests/slt/pgq_quantifiers.slt");
 }
+
+#[test]
+fn slt_pgq_multi_match() {
+    run_slt("tests/slt/pgq_multi_match.slt");
+}

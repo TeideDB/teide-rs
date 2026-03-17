@@ -1,0 +1,59 @@
+# SQL/PGQ: Multiple comma-separated MATCH patterns
+#
+# Tests that comma-separated MATCH patterns are merged into a single chain
+# by joining on shared variables at the junction point.
+
+# Setup: Person -[Knows]-> Person, Person -[LivesIn]-> City
+statement ok
+CREATE TABLE mm_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO mm_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE mm_cities (id INTEGER, city VARCHAR)
+
+statement ok
+INSERT INTO mm_cities VALUES (0, 'NYC'), (1, 'SF'), (2, 'LA')
+
+statement ok
+CREATE TABLE mm_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO mm_knows VALUES (0, 1), (0, 2), (1, 2)
+
+statement ok
+CREATE TABLE mm_lives (person_id INTEGER, city_id INTEGER)
+
+statement ok
+INSERT INTO mm_lives VALUES (0, 0), (1, 1), (2, 0), (3, 2)
+
+statement ok
+CREATE PROPERTY GRAPH mm_graph VERTEX TABLES (mm_persons LABEL Person, mm_cities LABEL City) EDGE TABLES (mm_knows SOURCE KEY (src) REFERENCES mm_persons (id) DESTINATION KEY (dst) REFERENCES mm_persons (id) LABEL Knows, mm_lives SOURCE KEY (person_id) REFERENCES mm_persons (id) DESTINATION KEY (city_id) REFERENCES mm_cities (id) LABEL LivesIn)
+
+# Two patterns joined on shared variable 'b':
+#   (a)-[:Knows]->(b), (b)-[:LivesIn]->(c)
+# is equivalent to:
+#   (a)-[:Knows]->(b)-[:LivesIn]->(c)
+query TTT
+SELECT * FROM GRAPH_TABLE (mm_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person), (b)-[:LivesIn]->(c:City) COLUMNS (a.name AS an, b.name AS bn, c.city AS cn)) ORDER BY bn
+----
+Alice Bob SF
+Alice Carol NYC
+
+# Three patterns chained: (a)-[:Knows]->(b), (b)-[:Knows]->(c), (c)-[:LivesIn]->(d)
+query TTTT
+SELECT * FROM GRAPH_TABLE (mm_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person), (b)-[:Knows]->(c:Person), (c)-[:LivesIn]->(d:City) COLUMNS (a.name AS an, b.name AS bn, c.name AS cn, d.city AS dn)) ORDER BY bn, cn
+----
+Alice Bob Carol NYC
+
+# Same two-pattern query but with label on shared variable in second pattern
+query TTT
+SELECT * FROM GRAPH_TABLE (mm_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b), (b:Person)-[:LivesIn]->(c:City) COLUMNS (a.name AS an, b.name AS bn, c.city AS cn)) ORDER BY bn
+----
+Alice Bob SF
+Alice Carol NYC
+
+# Error: patterns that do not share a junction variable
+statement error
+SELECT * FROM GRAPH_TABLE (mm_graph MATCH (a:Person)-[:Knows]->(b:Person), (x:Person)-[:LivesIn]->(y:City) COLUMNS (a.name AS an))

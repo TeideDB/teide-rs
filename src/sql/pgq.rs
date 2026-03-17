@@ -1,6 +1,6 @@
 // SQL/PGQ: Property graph catalog and MATCH pattern planner.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{ffi, HnswIndex, Rel, Table};
@@ -114,6 +114,31 @@ impl KeyValue {
     }
 }
 
+/// Which columns are visible in GRAPH_TABLE COLUMNS for this label.
+#[derive(Debug, Clone)]
+pub(crate) enum ColumnVisibility {
+    /// Default: all columns visible.
+    All,
+    /// PROPERTIES (col1, col2): only these columns are visible.
+    Only(HashSet<String>),
+    /// PROPERTIES ARE ALL COLUMNS EXCEPT (col): all except these.
+    AllExcept(HashSet<String>),
+    /// NO PROPERTIES: no columns visible.
+    None,
+}
+
+impl ColumnVisibility {
+    /// Check whether a column name is visible under this visibility rule.
+    pub(crate) fn is_visible(&self, col_name: &str) -> bool {
+        match self {
+            ColumnVisibility::All => true,
+            ColumnVisibility::Only(cols) => cols.contains(col_name),
+            ColumnVisibility::AllExcept(cols) => !cols.contains(col_name),
+            ColumnVisibility::None => false,
+        }
+    }
+}
+
 /// A vertex label mapping: label name -> session table name, with key maps
 /// for translating between user-facing key values and internal row indices.
 pub(crate) struct VertexLabel {
@@ -123,6 +148,8 @@ pub(crate) struct VertexLabel {
     pub key_column: String,
     pub user_to_row: HashMap<KeyValue, usize>,
     pub row_to_user: Vec<KeyValue>,
+    /// Column visibility restriction from PROPERTIES clause.
+    pub visibility: ColumnVisibility,
 }
 
 /// An edge label mapping: label name -> edge table with source/dest references.
@@ -139,6 +166,8 @@ pub(crate) struct EdgeLabel {
     pub dst_ref_table: String,
     #[allow(dead_code)]
     pub dst_ref_col: String,
+    /// Column visibility restriction from PROPERTIES clause.
+    pub visibility: ColumnVisibility,
 }
 
 /// Stored relationship: the built CSR index + its edge label metadata.
@@ -301,6 +330,7 @@ pub(crate) fn build_property_graph(
                 key_column: key_col_name.to_string(),
                 user_to_row,
                 row_to_user,
+                visibility: vt.visibility.clone(),
             },
         );
     }
@@ -365,6 +395,7 @@ pub(crate) fn build_property_graph(
             dst_col: et.dst_col.clone(),
             dst_ref_table: et.dst_ref_table.clone(),
             dst_ref_col: et.dst_ref_col.clone(),
+            visibility: et.visibility.clone(),
         };
 
         // Remap edge FK values through vertex key maps and build CSR
@@ -437,6 +468,12 @@ pub(crate) fn execute_pgq(
                 )))
             }
         }
+        PgqStatement::DescribePropertyGraph(name) => {
+            let graph = session.graphs.get(&name).ok_or_else(|| {
+                SqlError::Plan(format!("Property graph '{name}' not found"))
+            })?;
+            describe_property_graph(session, graph)
+        }
         PgqStatement::CreateVectorIndex(parsed) => {
             execute_create_vector_index(session, parsed)
         }
@@ -456,6 +493,65 @@ pub(crate) fn execute_pgq(
             }
         }
     }
+}
+
+/// Build a result set describing a property graph's vertex and edge labels.
+fn describe_property_graph(
+    session: &Session,
+    graph: &PropertyGraph,
+) -> Result<ExecResult, SqlError> {
+    let col_names = vec![
+        "element_type".to_string(),
+        "label".to_string(),
+        "table_name".to_string(),
+        "key_column".to_string(),
+        "src_table".to_string(),
+        "dst_table".to_string(),
+    ];
+    let csv_col_names: Vec<String> = (0..col_names.len()).map(|i| format!("__c{i}")).collect();
+    let mut csv = csv_col_names.join(",");
+    csv.push('\n');
+
+    // Collect and sort vertex labels by label name for deterministic output.
+    let mut vertex_entries: Vec<(&String, &VertexLabel)> =
+        graph.vertex_labels.iter().collect();
+    vertex_entries.sort_by_key(|(name, _)| name.clone());
+    for (label_name, vl) in &vertex_entries {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            csv_quote("VERTEX"),
+            csv_quote(label_name),
+            csv_quote(&vl.table_name),
+            csv_quote(&vl.key_column),
+            csv_quote("-"),
+            csv_quote("-"),
+        ));
+    }
+
+    // Collect and sort edge labels by label name for deterministic output.
+    let mut edge_entries: Vec<(&String, &StoredRel)> =
+        graph.edge_labels.iter().collect();
+    edge_entries.sort_by_key(|(name, _)| name.clone());
+    for (label_name, stored_rel) in &edge_entries {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            csv_quote("EDGE"),
+            csv_quote(label_name),
+            csv_quote(&stored_rel.edge_label.table_name),
+            csv_quote(&stored_rel.edge_label.src_col),
+            csv_quote(&stored_rel.edge_label.src_ref_table),
+            csv_quote(&stored_rel.edge_label.dst_ref_table),
+        ));
+    }
+
+    let table = csv_to_table(session, &csv, &col_names)?;
+    let nrows = checked_nrows(&table)?;
+    Ok(ExecResult::Query(super::SqlResult {
+        table,
+        columns: col_names,
+        embedding_dims: HashMap::new(),
+        nrows,
+    }))
 }
 
 fn execute_create_vector_index(
@@ -582,6 +678,80 @@ fn execute_create_vector_index(
 // GRAPH_TABLE planner: translate MATCH patterns into engine ops
 // ---------------------------------------------------------------------------
 
+/// Merge multiple comma-separated MATCH patterns into a single chain by
+/// joining on shared variables at junction points.
+///
+/// For example, `(a)-[:E1]->(b), (b)-[:E2]->(c)` becomes
+/// `(a)-[:E1]->(b)-[:E2]->(c)` because variable `b` is shared between
+/// the last node of the first pattern and the first node of the second.
+///
+/// If the shared node has labels or filters in both patterns they are merged:
+/// labels must agree (or one is unset), and filters are ANDed.
+fn merge_patterns(patterns: &[PathPattern]) -> Result<PathPattern, SqlError> {
+    debug_assert!(!patterns.is_empty());
+    let mut merged = patterns[0].clone();
+
+    for pattern in &patterns[1..] {
+        if pattern.nodes.is_empty() {
+            return Err(SqlError::Plan("Empty MATCH pattern".into()));
+        }
+
+        let last_node = merged.nodes.last().ok_or_else(|| {
+            SqlError::Plan("Empty MATCH pattern".into())
+        })?;
+        let first_node = &pattern.nodes[0];
+
+        // Check that the two patterns share a named variable at the junction.
+        let shared = matches!(
+            (&last_node.variable, &first_node.variable),
+            (Some(a), Some(b)) if a == b
+        );
+        if !shared {
+            return Err(SqlError::Plan(
+                "Multiple MATCH patterns must share a variable at the junction point. \
+                 E.g., (a)-[:E1]->(b), (b)-[:E2]->(c) where 'b' is shared."
+                    .into(),
+            ));
+        }
+
+        // Merge labels: if both specify a label, they must agree.
+        let merged_label = match (&last_node.label, &first_node.label) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(SqlError::Plan(format!(
+                    "Conflicting labels on shared variable '{}': '{}' vs '{}'",
+                    last_node.variable.as_deref().unwrap_or("?"),
+                    a,
+                    b
+                )));
+            }
+            (Some(a), _) => Some(a.clone()),
+            (_, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+
+        // Merge filters: AND them together if both present.
+        let merged_filter = match (&last_node.filter, &first_node.filter) {
+            (Some(a), Some(b)) => Some(format!("({a}) AND ({b})")),
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+
+        // Update the junction node in the merged pattern with the combined
+        // label and filter.
+        let junction = merged.nodes.last_mut().unwrap();
+        junction.label = merged_label;
+        junction.filter = merged_filter;
+
+        // Append the new pattern's edges and remaining nodes (skip the
+        // first node since it is the shared junction already present).
+        merged.edges.extend(pattern.edges.iter().cloned());
+        merged.nodes.extend(pattern.nodes[1..].iter().cloned());
+    }
+
+    Ok(merged)
+}
+
 /// Plan and execute a GRAPH_TABLE expression.
 /// Returns the result table with the requested COLUMNS.
 pub(crate) fn plan_graph_table(
@@ -601,15 +771,14 @@ pub(crate) fn plan_graph_table(
         return Err(SqlError::Plan("MATCH requires at least one pattern".into()));
     }
 
-    if match_clause.patterns.len() > 1 {
-        return Err(SqlError::Plan(
-            "Multiple comma-separated MATCH patterns are not yet supported. \
-             Use a single pattern: (a)-[e]->(b)."
-                .into(),
-        ));
-    }
-
-    let pattern = &match_clause.patterns[0];
+    // Merge multiple comma-separated patterns into a single chain if possible.
+    let merged_pattern;
+    let pattern = if match_clause.patterns.len() > 1 {
+        merged_pattern = merge_patterns(&match_clause.patterns)?;
+        &merged_pattern
+    } else {
+        &match_clause.patterns[0]
+    };
 
     // Check for variable-length edge first.
     let is_var_length = pattern.edges.len() == 1
