@@ -13,7 +13,15 @@
       "WebFetch(domain:docs.falkordb.com)",
       "WebFetch(domain:partiql.org)",
       "WebFetch(domain:duckpgq.org)",
-      "WebFetch(domain:duckdb.org)"
+      "WebFetch(domain:duckdb.org)",
+      "WebFetch(domain:blogs.oracle.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:archive.fosdem.org)",
+      "WebFetch(domain:blobs.duckdb.org)",
+      "WebFetch(domain:www.cidrdb.org)",
+      "WebFetch(domain:www.vldb.org)",
+      "WebFetch(domain:podscripts.co)",
+      "WebFetch(domain:www.enterprisedb.com)"
     ],
     "deny": [],
     "ask": []
