@@ -329,13 +329,18 @@ pub(crate) fn build_property_graph(
         )))? as i64;
 
         // Look up vertex labels for source and destination to get key maps
-        let src_vl = vertex_labels.values().find(|vl| vl.table_name == et.src_ref_table)
+        // Prefer matching by both table_name and key_column for disambiguation
+        let src_vl = vertex_labels.values()
+            .find(|vl| vl.table_name == et.src_ref_table && vl.key_column == et.src_ref_col)
             .ok_or_else(|| SqlError::Plan(format!(
-                "No vertex label found for source table '{}'", et.src_ref_table
+                "No vertex label found for source table '{}' with key column '{}'",
+                et.src_ref_table, et.src_ref_col
             )))?;
-        let dst_vl = vertex_labels.values().find(|vl| vl.table_name == et.dst_ref_table)
+        let dst_vl = vertex_labels.values()
+            .find(|vl| vl.table_name == et.dst_ref_table && vl.key_column == et.dst_ref_col)
             .ok_or_else(|| SqlError::Plan(format!(
-                "No vertex label found for destination table '{}'", et.dst_ref_table
+                "No vertex label found for destination table '{}' with key column '{}'",
+                et.dst_ref_table, et.dst_ref_col
             )))?;
 
         let label = et
@@ -676,11 +681,15 @@ fn plan_single_hop(
     let src_label = resolve_node_label(src_node, left_default_table, graph)?;
     let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
 
-    // Validate that explicit node labels match the edge's expected tables.
-    // Without this check, a query like (a:City)-[:knows]->(b:Person) could
-    // silently bind nodes to wrong table domains in heterogeneous graphs.
-    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source")?;
-    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination")?;
+    // Validate that explicit node labels match the edge's expected tables
+    // and key columns.
+    let (left_ref_col, right_ref_col) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_col, &stored_rel.edge_label.src_ref_col)
+    } else {
+        (&stored_rel.edge_label.src_ref_col, &stored_rel.edge_label.dst_ref_col)
+    };
+    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source", Some(&src_label.key_column), Some(left_ref_col))?;
+    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination", Some(&dst_label.key_column), Some(right_ref_col))?;
 
     let src_stored = session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
@@ -779,6 +788,8 @@ fn validate_node_table_for_edge(
     expected_table: &str,
     edge_label: &str,
     position: &str,
+    resolved_key_col: Option<&str>,
+    expected_ref_col: Option<&str>,
 ) -> Result<(), SqlError> {
     if let Some(label) = &node.label {
         if resolved_table != expected_table {
@@ -786,6 +797,14 @@ fn validate_node_table_for_edge(
                 "Node label '{label}' resolves to table '{resolved_table}', but edge \
                  '{edge_label}' expects {position} table '{expected_table}'"
             )));
+        }
+        if let (Some(resolved_kc), Some(expected_rc)) = (resolved_key_col, expected_ref_col) {
+            if resolved_kc != expected_rc {
+                return Err(SqlError::Plan(format!(
+                    "Node label '{label}' uses key column '{resolved_kc}', but edge \
+                     '{edge_label}' references {position} key column '{expected_rc}'"
+                )));
+            }
         }
     }
     Ok(())
@@ -1266,6 +1285,7 @@ fn eval_scalar(
         } => {
             let v = eval_scalar(inner, table, row, var_name)?;
             match v {
+                ScalarValue::Null => Ok(ScalarValue::Null),
                 ScalarValue::Int(i) => Ok(ScalarValue::Int(i.checked_neg().ok_or_else(
                     || SqlError::Plan(format!("Integer overflow negating {i}")),
                 )?)),
@@ -1314,52 +1334,82 @@ fn read_scalar_from_table(
     }
 }
 
-/// Compare two scalar values with a binary operator, returning a boolean.
+/// Compare two scalar values with a binary operator.
+/// Returns `None` (SQL UNKNOWN) when either operand is NULL.
 fn compare_scalars(
     lhs: &ScalarValue,
     rhs: &ScalarValue,
     op: &sql_ast::BinaryOperator,
-) -> Result<bool, SqlError> {
+) -> Result<Option<bool>, SqlError> {
     use sql_ast::BinaryOperator;
     if matches!(lhs, ScalarValue::Null) || matches!(rhs, ScalarValue::Null) {
-        return Ok(false); // NULL comparisons are false (SQL three-valued logic)
+        return Ok(None); // NULL comparison → UNKNOWN
     }
     match op {
-        BinaryOperator::Eq => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Equal)),
-        BinaryOperator::NotEq => Ok(lhs.partial_cmp(rhs).map_or(false, |o| o != std::cmp::Ordering::Equal)),
-        BinaryOperator::Lt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Less)),
-        BinaryOperator::LtEq => Ok(matches!(
+        BinaryOperator::Eq => Ok(Some(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Equal))),
+        BinaryOperator::NotEq => Ok(Some(lhs.partial_cmp(rhs).map_or(false, |o| o != std::cmp::Ordering::Equal))),
+        BinaryOperator::Lt => Ok(Some(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Less))),
+        BinaryOperator::LtEq => Ok(Some(matches!(
             lhs.partial_cmp(rhs),
             Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        )),
-        BinaryOperator::Gt => Ok(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Greater)),
-        BinaryOperator::GtEq => Ok(matches!(
+        ))),
+        BinaryOperator::Gt => Ok(Some(lhs.partial_cmp(rhs) == Some(std::cmp::Ordering::Greater))),
+        BinaryOperator::GtEq => Ok(Some(matches!(
             lhs.partial_cmp(rhs),
             Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        )),
+        ))),
         _ => Err(SqlError::Plan(format!(
             "Unsupported comparison operator: {op}"
         ))),
     }
 }
 
+/// SQL three-valued AND: false AND _ = false, true AND true = true,
+/// otherwise UNKNOWN.
+fn tri_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+/// SQL three-valued OR: true OR _ = true, false OR false = false,
+/// otherwise UNKNOWN.
+fn tri_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// SQL three-valued NOT: NOT UNKNOWN = UNKNOWN.
+fn tri_not(a: Option<bool>) -> Option<bool> {
+    a.map(|v| !v)
+}
+
 /// Evaluate a parsed filter expression against a table row.
-/// Returns true if the row passes the filter.
+/// Returns `Some(true)` if the row passes, `Some(false)` if it doesn't,
+/// or `None` for SQL UNKNOWN (NULL-involved comparisons).
+/// Callers should treat `None` as "exclude row" (i.e. `unwrap_or(false)`).
 fn evaluate_filter(
     expr: &sql_ast::Expr,
     table: &Table,
     row: usize,
     var_name: &str,
-) -> Result<bool, SqlError> {
+) -> Result<Option<bool>, SqlError> {
     match expr {
         sql_ast::Expr::BinaryOp { left, op, right } => match op {
             sql_ast::BinaryOperator::And => {
-                Ok(evaluate_filter(left, table, row, var_name)?
-                    && evaluate_filter(right, table, row, var_name)?)
+                let l = evaluate_filter(left, table, row, var_name)?;
+                let r = evaluate_filter(right, table, row, var_name)?;
+                Ok(tri_and(l, r))
             }
             sql_ast::BinaryOperator::Or => {
-                Ok(evaluate_filter(left, table, row, var_name)?
-                    || evaluate_filter(right, table, row, var_name)?)
+                let l = evaluate_filter(left, table, row, var_name)?;
+                let r = evaluate_filter(right, table, row, var_name)?;
+                Ok(tri_or(l, r))
             }
             _ => {
                 let lhs = eval_scalar(left, table, row, var_name)?;
@@ -1370,7 +1420,7 @@ fn evaluate_filter(
         sql_ast::Expr::UnaryOp {
             op: sql_ast::UnaryOperator::Not,
             expr: inner,
-        } => Ok(!evaluate_filter(inner, table, row, var_name)?),
+        } => Ok(tri_not(evaluate_filter(inner, table, row, var_name)?)),
         sql_ast::Expr::InList {
             expr: inner,
             list,
@@ -1378,18 +1428,29 @@ fn evaluate_filter(
         } => {
             let val = eval_scalar(inner, table, row, var_name)?;
             if matches!(val, ScalarValue::Null) {
-                // NULL IN (...) is unknown → false per SQL three-valued logic
-                return Ok(false);
+                return Ok(None); // NULL IN (...) → UNKNOWN
             }
-            let found = list.iter().any(|item| {
-                eval_scalar(item, table, row, var_name)
-                    .map(|v| {
-                        !matches!(v, ScalarValue::Null)
-                            && v.partial_cmp(&val) == Some(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap_or(false)
-            });
-            Ok(if *negated { !found } else { found })
+            let mut found = false;
+            let mut has_null = false;
+            for item in list {
+                let v = eval_scalar(item, table, row, var_name)?;
+                if matches!(v, ScalarValue::Null) {
+                    has_null = true;
+                } else if v.partial_cmp(&val) == Some(std::cmp::Ordering::Equal) {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                // val IN list → true; val NOT IN list → false
+                Ok(Some(!*negated))
+            } else if has_null {
+                // No match found but NULL in list → UNKNOWN
+                Ok(if *negated { None } else { None })
+            } else {
+                // No match, no NULLs → definite false/true
+                Ok(Some(*negated))
+            }
         }
         sql_ast::Expr::Between {
             expr: inner,
@@ -1400,28 +1461,28 @@ fn evaluate_filter(
             let val = eval_scalar(inner, table, row, var_name)?;
             let lo = eval_scalar(low, table, row, var_name)?;
             let hi = eval_scalar(high, table, row, var_name)?;
-            // NULL in any operand -> unknown -> exclude row (SQL three-valued logic)
             if matches!(&val, ScalarValue::Null)
                 || matches!(&lo, ScalarValue::Null)
                 || matches!(&hi, ScalarValue::Null)
             {
-                return Ok(false);
+                return Ok(None); // NULL in any operand → UNKNOWN
             }
             let in_range = val >= lo && val <= hi;
-            Ok(if *negated { !in_range } else { in_range })
+            Ok(Some(if *negated { !in_range } else { in_range }))
         }
         sql_ast::Expr::IsNull(inner) => {
-            Ok(eval_scalar(inner, table, row, var_name)? == ScalarValue::Null)
+            // IS NULL is never UNKNOWN — it always returns true or false
+            Ok(Some(eval_scalar(inner, table, row, var_name)? == ScalarValue::Null))
         }
         sql_ast::Expr::IsNotNull(inner) => {
-            Ok(eval_scalar(inner, table, row, var_name)? != ScalarValue::Null)
+            Ok(Some(eval_scalar(inner, table, row, var_name)? != ScalarValue::Null))
         }
         sql_ast::Expr::Nested(inner) => evaluate_filter(inner, table, row, var_name),
         _ => {
-            // Try evaluating as a scalar — if it's a boolean, use that
             let v = eval_scalar(expr, table, row, var_name)?;
             match v {
-                ScalarValue::Bool(b) => Ok(b),
+                ScalarValue::Bool(b) => Ok(Some(b)),
+                ScalarValue::Null => Ok(None),
                 _ => Err(SqlError::Plan(format!(
                     "Unsupported filter expression: {expr}"
                 ))),
@@ -1442,7 +1503,7 @@ fn resolve_filtered_node_ids(
     let nrows = checked_logical_nrows(stored)?;
     let mut matching = Vec::new();
     for row in 0..nrows {
-        if evaluate_filter(&expr, &stored.table, row, var)? {
+        if evaluate_filter(&expr, &stored.table, row, var)?.unwrap_or(false) {
             matching.push(row as i64);
         }
     }
@@ -1704,13 +1765,20 @@ fn plan_multi_hop_variable(
         let left_label = resolve_node_label(left_node, left_default_table, graph)?;
         let right_label = resolve_node_label(right_node, right_default_table, graph)?;
 
-        // Validate explicit node labels match edge expectations
+        // Validate explicit node labels match edge expectations (table + key column)
+        let (left_ref_col, right_ref_col) = if is_reverse {
+            (&stored_rel.edge_label.dst_ref_col, &stored_rel.edge_label.src_ref_col)
+        } else {
+            (&stored_rel.edge_label.src_ref_col, &stored_rel.edge_label.dst_ref_col)
+        };
         validate_node_table_for_edge(
             left_node,
             &left_label.table_name,
             left_default_table,
             edge_label,
             "source",
+            Some(&left_label.key_column),
+            Some(left_ref_col),
         )?;
         validate_node_table_for_edge(
             right_node,
@@ -1718,6 +1786,8 @@ fn plan_multi_hop_variable(
             right_default_table,
             edge_label,
             "destination",
+            Some(&right_label.key_column),
+            Some(right_ref_col),
         )?;
 
         // Verify vertex table continuity: segment[i].dst == segment[i+1].src
@@ -1999,13 +2069,20 @@ fn plan_multi_hop_fixed(
         let left_label = resolve_node_label(left_node, left_default_table, graph)?;
         let right_label = resolve_node_label(right_node, right_default_table, graph)?;
 
-        // Validate explicit node labels match edge expectations
+        // Validate explicit node labels match edge expectations (table + key column)
+        let (left_ref_col, right_ref_col) = if is_reverse {
+            (&stored_rel.edge_label.dst_ref_col, &stored_rel.edge_label.src_ref_col)
+        } else {
+            (&stored_rel.edge_label.src_ref_col, &stored_rel.edge_label.dst_ref_col)
+        };
         validate_node_table_for_edge(
             left_node,
             &left_label.table_name,
             left_default_table,
             edge_label,
             "source",
+            Some(&left_label.key_column),
+            Some(left_ref_col),
         )?;
         validate_node_table_for_edge(
             right_node,
@@ -2013,6 +2090,8 @@ fn plan_multi_hop_fixed(
             right_default_table,
             edge_label,
             "destination",
+            Some(&right_label.key_column),
+            Some(right_ref_col),
         )?;
 
         // Verify vertex table continuity: segment[i].dst == segment[i+1].src
@@ -2168,7 +2247,7 @@ fn plan_multi_hop_fixed(
                 return Err(SqlError::Plan(format!("Negative node index {val} for _v0 at row {row}")));
             }
             let node_row = val as usize;
-            mask.push(evaluate_filter(&expr, &src_table.table, node_row, var_name)?);
+            mask.push(evaluate_filter(&expr, &src_table.table, node_row, var_name)?.unwrap_or(false));
         }
         mask
     } else {
@@ -2320,14 +2399,19 @@ fn plan_var_length(
         ));
     }
 
+    let (left_ref_col_vl, right_ref_col_vl) = if is_reverse {
+        (&stored_rel.edge_label.dst_ref_col, &stored_rel.edge_label.src_ref_col)
+    } else {
+        (&stored_rel.edge_label.src_ref_col, &stored_rel.edge_label.dst_ref_col)
+    };
     let src_label = resolve_node_label(src_node, left_default_table, graph)?;
-    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source")?;
+    validate_node_table_for_edge(src_node, &src_label.table_name, left_default_table, edge_label, "source", Some(&src_label.key_column), Some(left_ref_col_vl))?;
     let src_table = &session.tables.get(&src_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?.table;
 
     let dst_label = resolve_node_label(dst_node, right_default_table, graph)?;
-    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination")?;
+    validate_node_table_for_edge(dst_node, &dst_label.table_name, right_default_table, edge_label, "destination", Some(&dst_label.key_column), Some(right_ref_col_vl))?;
     let dst_table = &session.tables.get(&dst_label.table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{}' not found", dst_label.table_name))
     })?.table;
@@ -2530,7 +2614,20 @@ fn plan_shortest_path(
         (&stored_rel.edge_label.src_ref_table, &stored_rel.edge_label.dst_ref_table)
     };
 
-    // Validate explicit node labels against the edge's expected tables.
+    // Validate explicit node labels against the edge's expected tables and
+    // key columns.  Checking only table_name is insufficient when the graph
+    // defines multiple vertex labels over the same table with different KEY
+    // columns — the label must also match the edge's referenced key column.
+    let left_ref_col_for_validate = if is_reverse {
+        &stored_rel.edge_label.dst_ref_col
+    } else {
+        &stored_rel.edge_label.src_ref_col
+    };
+    let right_ref_col_for_validate = if is_reverse {
+        &stored_rel.edge_label.src_ref_col
+    } else {
+        &stored_rel.edge_label.dst_ref_col
+    };
     if let Some(label) = &src_node.label {
         let src_vl = graph.vertex_labels.get(label).ok_or_else(|| {
             SqlError::Plan(format!("Vertex label '{label}' not found in graph"))
@@ -2540,6 +2637,13 @@ fn plan_shortest_path(
                 "Node label '{label}' resolves to table '{}', but edge '{edge_label}' \
                  expects source table '{left_table}'",
                 src_vl.table_name
+            )));
+        }
+        if src_vl.key_column != *left_ref_col_for_validate {
+            return Err(SqlError::Plan(format!(
+                "Node label '{label}' uses key column '{}', but edge '{edge_label}' \
+                 references source key column '{left_ref_col_for_validate}'",
+                src_vl.key_column
             )));
         }
     }
@@ -2554,16 +2658,40 @@ fn plan_shortest_path(
                 dst_vl.table_name
             )));
         }
+        if dst_vl.key_column != *right_ref_col_for_validate {
+            return Err(SqlError::Plan(format!(
+                "Node label '{label}' uses key column '{}', but edge '{edge_label}' \
+                 references destination key column '{right_ref_col_for_validate}'",
+                dst_vl.key_column
+            )));
+        }
+    }
+
+    // Undirected traversals on heterogeneous edges (different src/dst tables)
+    // would mix node IDs from different tables in the BFS, producing wrong results.
+    // This mirrors the same check in plan_single_hop.
+    if edge.direction == MatchDirection::Undirected
+        && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+    {
+        return Err(SqlError::Plan(
+            "Undirected traversals are not supported on edges with different source and \
+             destination vertex tables (heterogeneous graphs). Use a directed pattern instead."
+                .into(),
+        ));
     }
 
     // Shortest-path BFS requires src and dst to reference the same vertex table.
+    // When both sides reference the same table (even with different key columns),
+    // n_src == n_dst so BFS over row indices is safe.
     // Range{1,1} and PathQuantifier::One are semantically single-hop, so skip
     // this check for them (same exemption as plan_var_length).
     let is_single_hop = matches!(edge.quantifier, PathQuantifier::One | PathQuantifier::Range { min: 1, max: 1 });
-    if !is_single_hop && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
+    if !is_single_hop
+        && stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table
+    {
         return Err(SqlError::Plan(
-            "SHORTEST_PATH is not supported on edges with different source and \
-             destination vertex tables (heterogeneous graphs)."
+            "SHORTEST_PATH with variable-length quantifiers is not supported on edges \
+             whose source and destination reference different vertex tables (heterogeneous endpoints)."
                 .into(),
         ));
     }
@@ -2571,12 +2699,40 @@ fn plan_shortest_path(
     let src_id = extract_node_id(src_node, left_table, session)?;
     let dst_id = extract_node_id(dst_node, right_table, session)?;
 
-    // Look up the vertex label for _node output (row index -> user key).
-    let vertex_label = graph.vertex_labels.values()
-        .find(|vl| vl.table_name == *left_table)
+    // Look up vertex labels for _node output (row index -> user key).
+    // Match on both table name and key column (from the edge's ref column) to
+    // handle graphs with multiple labels on the same table keyed differently.
+    let left_ref_col = if is_reverse {
+        &stored_rel.edge_label.dst_ref_col
+    } else {
+        &stored_rel.edge_label.src_ref_col
+    };
+    let left_vertex_label = graph.vertex_labels.values()
+        .find(|vl| vl.table_name == *left_table && vl.key_column == *left_ref_col)
         .ok_or_else(|| SqlError::Plan(format!(
-            "No vertex label found for table '{left_table}'"
+            "No vertex label found for table '{left_table}' with key column '{left_ref_col}'"
         )))?;
+    // The destination nodes may need a separate vertex label: either because
+    // they belong to a different table, or because they reference the same
+    // table with a different key column.  This applies to both single-hop and
+    // multi-hop paths (for multi-hop same-table edges with mixed keys, the
+    // terminal node must be decoded via the destination key map).
+    let right_vertex_label = {
+        let right_ref_col = if is_reverse {
+            &stored_rel.edge_label.src_ref_col
+        } else {
+            &stored_rel.edge_label.dst_ref_col
+        };
+        if left_table != right_table || left_ref_col != right_ref_col {
+            Some(graph.vertex_labels.values()
+                .find(|vl| vl.table_name == *right_table && vl.key_column == *right_ref_col)
+                .ok_or_else(|| SqlError::Plan(format!(
+                    "No vertex label found for table '{right_table}' with key column '{right_ref_col}'"
+                )))?)
+        } else {
+            None
+        }
+    };
 
     let (min_depth, max_depth): (u8, u8) = match edge.quantifier {
         PathQuantifier::Range { min, max } => (min, max),
@@ -2627,7 +2783,7 @@ fn plan_shortest_path(
             return Err(SqlError::Plan("COLUMNS clause is empty".into()));
         }
         // Build CSV with correct values: node=user_key, depth=0, path_length=0
-        let src_key = vertex_label.row_to_user.get(src_id as usize)
+        let src_key = left_vertex_label.row_to_user.get(src_id as usize)
             .ok_or_else(|| SqlError::Plan(format!(
                 "Row index {src_id} out of bounds in vertex table '{left_table}'"
             )))?;
@@ -2760,10 +2916,24 @@ fn plan_shortest_path(
     let mut csv = csv_col_names.join(",");
     csv.push('\n');
 
+    let last_idx = path.len().saturating_sub(1);
     for (depth, &node_id) in path.iter().enumerate() {
-        let user_key = vertex_label.row_to_user.get(node_id as usize)
+        // For single-hop heterogeneous edges, the last node in the path
+        // belongs to the right (destination) table and needs a different
+        // vertex label for correct key decoding.
+        let vl = if depth == last_idx && right_vertex_label.is_some() {
+            right_vertex_label.unwrap()
+        } else {
+            left_vertex_label
+        };
+        let decode_table = if depth == last_idx && right_vertex_label.is_some() {
+            right_table
+        } else {
+            left_table
+        };
+        let user_key = vl.row_to_user.get(node_id as usize)
             .ok_or_else(|| SqlError::Plan(format!(
-                "Row index {node_id} out of bounds in vertex table '{left_table}'"
+                "Row index {node_id} out of bounds in vertex table '{decode_table}'"
             )))?;
         for (i, &col_idx) in col_indices.iter().enumerate() {
             if i > 0 { csv.push(','); }
@@ -2883,6 +3053,61 @@ fn extract_node_id(
 }
 
 // ---------------------------------------------------------------------------
+// Quote-aware argument parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Split a string on commas, but respect single-quoted SQL literals so that
+/// commas inside quotes are not treated as separators.
+fn split_respecting_quotes(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if in_quote {
+                // Check for escaped quote ('')
+                if chars.peek() == Some(&'\'') {
+                    current.push('\'');
+                    current.push('\'');
+                    chars.next();
+                } else {
+                    current.push(ch);
+                    in_quote = false;
+                }
+            } else {
+                current.push(ch);
+                in_quote = true;
+            }
+        } else if ch == ',' && !in_quote {
+            args.push(current.trim().to_string());
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() || !args.is_empty() {
+        args.push(trimmed);
+    }
+    args
+}
+
+/// Unescape a SQL string literal: strip surrounding single quotes and replace
+/// doubled single quotes ('') with a single quote (').
+fn unescape_sql_string(s: &str) -> String {
+    let trimmed = s.trim();
+    let inner = if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        return trimmed.to_string();
+    };
+    inner.replace("''", "'")
+}
+
+// ---------------------------------------------------------------------------
 // Graph algorithm planner
 // ---------------------------------------------------------------------------
 
@@ -2903,7 +3128,7 @@ fn parse_algo_function(expr: &str) -> Option<(String, Vec<String>)> {
     if inner.is_empty() {
         return Some((func_name, Vec::new()));
     }
-    let args: Vec<String> = inner.split(',').map(|s| s.trim().to_lowercase()).collect();
+    let args: Vec<String> = split_respecting_quotes(&inner);
     Some((func_name, args))
 }
 
@@ -2982,7 +3207,7 @@ fn plan_algorithm_query(
                         graph.name, args.len(),
                     )));
                 }
-                if args[0] != graph.name.to_lowercase() {
+                if args[0].to_lowercase() != graph.name.to_lowercase() {
                     return Err(SqlError::Plan(format!(
                         "First argument '{}' does not match graph name '{}'.",
                         args[0], graph.name,
@@ -2996,14 +3221,14 @@ fn plan_algorithm_query(
                         func_name.to_uppercase(), graph.name, node_var, args.len(),
                     )));
                 }
-                if args[0] != graph.name.to_lowercase() {
+                if args[0].to_lowercase() != graph.name.to_lowercase() {
                     return Err(SqlError::Plan(format!(
                         "Algorithm argument '{}' does not match graph name '{}'. \
                          Expected: {}({}, {})",
                         args[0], graph.name, func_name.to_uppercase(), graph.name, node_var,
                     )));
                 }
-                if args[1] != node_var {
+                if args[1].to_lowercase() != node_var {
                     return Err(SqlError::Plan(format!(
                         "Algorithm argument '{}' does not match node variable '{}'. \
                          Expected: {}({}, {})",
@@ -3192,6 +3417,21 @@ fn execute_dijkstra_algorithm(
         SqlError::Plan(format!("Edge label '{edge_label_name}' not found"))
     })?;
 
+    // Dijkstra's C kernel allocates dist/visited/depth arrays sized by
+    // rel->fwd.n_nodes (source domain).  On heterogeneous edges where
+    // src and dst reference different tables, the CSR targets live in
+    // the destination domain which can exceed the source domain size
+    // and cause out-of-bounds access.  When both sides reference the
+    // same table (even with different key columns), n_src == n_dst so
+    // the kernel is safe.
+    if stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
+        return Err(SqlError::Plan(
+            "SHORTEST_DISTANCE is not supported on edges whose source and destination \
+             reference different vertex tables (heterogeneous endpoints)."
+                .into(),
+        ));
+    }
+
     // Strip surrounding quotes from weight column name
     let weight_col = args[3].trim_matches('\'').trim_matches('"');
 
@@ -3208,31 +3448,50 @@ fn execute_dijkstra_algorithm(
     })?.table;
 
     // Remap user-facing IDs to internal row indices via natural key maps
+    let dst_table_name = &stored_rel.edge_label.dst_ref_table;
     let src_vl = graph.vertex_labels.values()
-        .find(|vl| vl.table_name == *src_table_name)
+        .find(|vl| vl.table_name == *src_table_name && vl.key_column == stored_rel.edge_label.src_ref_col)
         .ok_or_else(|| {
-            SqlError::Plan(format!("No vertex label found for table '{src_table_name}'"))
+            SqlError::Plan(format!("No vertex label found for table '{src_table_name}' with key column '{}'",
+                stored_rel.edge_label.src_ref_col))
         })?;
-    // Determine key type from vertex label and construct appropriate KeyValue
-    let uses_string_keys = src_vl.row_to_user.first()
+    let dst_vl = graph.vertex_labels.values()
+        .find(|vl| vl.table_name == *dst_table_name && vl.key_column == stored_rel.edge_label.dst_ref_col)
+        .ok_or_else(|| {
+            SqlError::Plan(format!("No vertex label found for table '{dst_table_name}' with key column '{}'",
+                stored_rel.edge_label.dst_ref_col))
+        })?;
+    // Determine key type from each vertex label and construct appropriate KeyValue.
+    // Unescape SQL string literals (handles '' escaping and surrounding quotes).
+    let src_arg = unescape_sql_string(&args[1]);
+    let dst_arg = unescape_sql_string(&args[2]);
+    let src_uses_string_keys = src_vl.row_to_user.first()
         .map(|k| matches!(k, KeyValue::Str(_)))
         .unwrap_or(false);
-    let (src_key, dst_key) = if uses_string_keys {
-        (KeyValue::Str(args[1].clone()), KeyValue::Str(args[2].clone()))
+    let dst_uses_string_keys = dst_vl.row_to_user.first()
+        .map(|k| matches!(k, KeyValue::Str(_)))
+        .unwrap_or(false);
+    let src_key = if src_uses_string_keys {
+        KeyValue::Str(src_arg.to_string())
     } else {
-        let src_id: i64 = args[1].parse().map_err(|_| {
-            SqlError::Plan(format!("Invalid source node ID: '{}' (expected integer)", args[1]))
+        let src_id: i64 = src_arg.parse().map_err(|_| {
+            SqlError::Plan(format!("Invalid source node ID: '{}' (expected integer)", src_arg))
         })?;
-        let dst_id: i64 = args[2].parse().map_err(|_| {
-            SqlError::Plan(format!("Invalid destination node ID: '{}' (expected integer)", args[2]))
+        KeyValue::Int(src_id)
+    };
+    let dst_key = if dst_uses_string_keys {
+        KeyValue::Str(dst_arg.to_string())
+    } else {
+        let dst_id: i64 = dst_arg.parse().map_err(|_| {
+            SqlError::Plan(format!("Invalid destination node ID: '{}' (expected integer)", dst_arg))
         })?;
-        (KeyValue::Int(src_id), KeyValue::Int(dst_id))
+        KeyValue::Int(dst_id)
     };
     let internal_src = *src_vl.user_to_row.get(&src_key).ok_or_else(|| {
         SqlError::Plan(format!("Source node '{}' not found in vertex table '{src_table_name}'", args[1]))
     })? as i64;
-    let internal_dst = *src_vl.user_to_row.get(&dst_key).ok_or_else(|| {
-        SqlError::Plan(format!("Destination node '{}' not found in vertex table '{src_table_name}'", args[2]))
+    let internal_dst = *dst_vl.user_to_row.get(&dst_key).ok_or_else(|| {
+        SqlError::Plan(format!("Destination node '{}' not found in vertex table '{dst_table_name}'", args[2]))
     })? as i64;
 
     let g = session.ctx.graph(src_table)?;

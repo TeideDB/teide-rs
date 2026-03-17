@@ -419,8 +419,72 @@ impl Session {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // First rebuild vertex key maps for any affected vertex tables
+        // Save old vertex key maps so we can roll back if edge rebuild fails
+        let mut saved_key_maps: Vec<(String, String, HashMap<pgq::KeyValue, usize>, Vec<pgq::KeyValue>)> = Vec::new();
         for graph_name in &affected {
+            let graph = self.graphs.get(graph_name).unwrap();
+            for (label, vl) in &graph.vertex_labels {
+                if vl.table_name == table_name {
+                    saved_key_maps.push((
+                        graph_name.clone(),
+                        label.clone(),
+                        vl.user_to_row.clone(),
+                        vl.row_to_user.clone(),
+                    ));
+                }
+            }
+        }
+
+        // Rebuild vertex key maps for any affected vertex tables.
+        // On any error, roll back all key maps already rebuilt.
+        if let Err(e) = self.rebuild_vertex_key_maps_for_table(&affected, table_name) {
+            self.restore_vertex_key_maps(&saved_key_maps);
+            return Err(e);
+        }
+
+        // Collect all rebuilt edges first, only apply if ALL graphs validate.
+        // Any error in this phase must roll back vertex key maps.
+        let rebuilt = self.rebuild_edges_for_graphs(&affected);
+        let rebuilt = match rebuilt {
+            Ok(r) => r,
+            Err(e) => {
+                self.restore_vertex_key_maps(&saved_key_maps);
+                return Err(e);
+            }
+        };
+
+        // All graphs validated successfully — apply all updates atomically
+        for (graph_name, new_edges) in rebuilt {
+            let graph = self.graphs.get_mut(&graph_name).unwrap();
+            graph.edge_labels = new_edges.into_iter().collect();
+        }
+        Ok(())
+    }
+
+    /// Restore saved vertex key maps (used to roll back after failed edge rebuild).
+    fn restore_vertex_key_maps(
+        &mut self,
+        saved: &[(String, String, HashMap<pgq::KeyValue, usize>, Vec<pgq::KeyValue>)],
+    ) {
+        for (graph_name, label, user_to_row, row_to_user) in saved {
+            if let Some(graph) = self.graphs.get_mut(graph_name) {
+                if let Some(vl) = graph.vertex_labels.get_mut(label) {
+                    vl.user_to_row = user_to_row.clone();
+                    vl.row_to_user = row_to_user.clone();
+                }
+            }
+        }
+    }
+
+    /// Rebuild vertex key maps for all vertex labels in the given graphs
+    /// that reference `table_name`.  Returns an error if any rebuild fails;
+    /// callers are responsible for rolling back via `restore_vertex_key_maps`.
+    fn rebuild_vertex_key_maps_for_table(
+        &mut self,
+        affected: &[String],
+        table_name: &str,
+    ) -> Result<(), SqlError> {
+        for graph_name in affected {
             let graph = self.graphs.get_mut(graph_name).unwrap();
             for vl in graph.vertex_labels.values_mut() {
                 if vl.table_name == table_name {
@@ -434,11 +498,19 @@ impl Session {
                 }
             }
         }
+        Ok(())
+    }
 
-        // Collect all rebuilt edges first, only apply if ALL graphs validate
-        let mut rebuilt: Vec<(String, Vec<(String, pgq::StoredRel)>)> = Vec::new();
-
-        for graph_name in &affected {
+    /// Rebuild edge labels (CSR relations) for the given graphs.
+    /// Returns the rebuilt edges grouped by graph name, or an error if any
+    /// graph fails validation.  Callers are responsible for rolling back
+    /// vertex key maps on error.
+    fn rebuild_edges_for_graphs(
+        &self,
+        affected: &[String],
+    ) -> Result<Vec<(String, Vec<(String, pgq::StoredRel)>)>, SqlError> {
+        let mut rebuilt = Vec::new();
+        for graph_name in affected {
             let graph = self.graphs.get(graph_name).unwrap();
             let mut new_edges: Vec<(String, pgq::StoredRel)> = Vec::new();
             for (label, sr) in &graph.edge_labels {
@@ -465,16 +537,17 @@ impl Session {
                 let n_src = pgq::checked_logical_nrows(src_stored)? as i64;
                 let n_dst = pgq::checked_logical_nrows(dst_stored)? as i64;
 
-                // Look up vertex labels for key maps
                 let src_vl = graph.vertex_labels.values()
-                    .find(|vl| vl.table_name == el.src_ref_table)
+                    .find(|vl| vl.table_name == el.src_ref_table && vl.key_column == el.src_ref_col)
                     .ok_or_else(|| SqlError::Plan(format!(
-                        "No vertex label found for source table '{}'", el.src_ref_table
+                        "No vertex label found for source table '{}' with key column '{}'",
+                        el.src_ref_table, el.src_ref_col
                     )))?;
                 let dst_vl = graph.vertex_labels.values()
-                    .find(|vl| vl.table_name == el.dst_ref_table)
+                    .find(|vl| vl.table_name == el.dst_ref_table && vl.key_column == el.dst_ref_col)
                     .ok_or_else(|| SqlError::Plan(format!(
-                        "No vertex label found for destination table '{}'", el.dst_ref_table
+                        "No vertex label found for destination table '{}' with key column '{}'",
+                        el.dst_ref_table, el.dst_ref_col
                     )))?;
 
                 let rel = pgq::remap_and_build_rel(
@@ -490,13 +563,7 @@ impl Session {
             }
             rebuilt.push((graph_name.clone(), new_edges));
         }
-
-        // All graphs validated successfully — apply all updates atomically
-        for (graph_name, new_edges) in rebuilt {
-            let graph = self.graphs.get_mut(&graph_name).unwrap();
-            graph.edge_labels = new_edges.into_iter().collect();
-        }
-        Ok(())
+        Ok(rebuilt)
     }
 
     /// Remove any property graphs that reference the given table.
