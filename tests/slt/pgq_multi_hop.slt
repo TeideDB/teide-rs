@@ -110,3 +110,22 @@ SELECT * FROM GRAPH_TABLE (cycle_graph MATCH (p:Person WHERE p.name = 'Alice')-[
 Alice 2
 Alice 2
 Alice 3
+
+# --- ANY SHORTEST with multi-edge patterns ---
+
+# ANY SHORTEST multi-hop: find shortest 2-edge path from Alice through Knows then LivesIn
+# Using original mh_graph: Alice(0)→Bob(1), Alice(0)→Carol(2), Bob(1)→Carol(2)
+# LivesIn: Alice→NYC(0), Bob→SF(1), Carol→NYC(0)
+# Paths from Alice: Alice→Bob→SF, Alice→Carol→NYC (both depth 2, shortest possible)
+query TTT
+SELECT * FROM GRAPH_TABLE (mh_graph MATCH path = ANY SHORTEST (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person)-[:LivesIn]->(c:City) COLUMNS (a.name AS a, b.name AS b, c.city AS c)) ORDER BY 2
+----
+Alice Bob SF
+Alice Carol NYC
+
+# ANY SHORTEST with variable-length: find shortest transfer chain from Alice's account
+# Shortest chain: Checking_A → Checking_B (1 hop via Transfer, total depth 2 with Owns)
+query TTI
+SELECT * FROM GRAPH_TABLE (fin_graph MATCH path = ANY SHORTEST (p:Person WHERE p.name = 'Alice')-[:Owns]->(a1:Account)-[:Transfer]->+(a2:Account) COLUMNS (p.name AS p, a1.acct_name AS a1, path_length(p, a2) AS hops)) ORDER BY 2
+----
+Alice Checking_A 2
