@@ -286,3 +286,8 @@ fn slt_pgq_cheapest() {
 fn slt_pgq_path_accessors() {
     run_slt("tests/slt/pgq_path_accessors.slt");
 }
+
+#[test]
+fn slt_pgq_ddl_ext() {
+    run_slt("tests/slt/pgq_ddl_ext.slt");
+}

@@ -1,0 +1,30 @@
+# SQL/PGQ: CREATE OR REPLACE and IF NOT EXISTS
+
+statement ok
+CREATE TABLE ddl_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ddl_persons VALUES (0, 'Alice'), (1, 'Bob')
+
+statement ok
+CREATE TABLE ddl_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO ddl_knows VALUES (0, 1)
+
+statement ok
+CREATE PROPERTY GRAPH ddl_graph VERTEX TABLES (ddl_persons LABEL Person) EDGE TABLES (ddl_knows SOURCE KEY (src) REFERENCES ddl_persons (id) DESTINATION KEY (dst) REFERENCES ddl_persons (id) LABEL Knows)
+
+# IF NOT EXISTS: silently succeed if graph already exists
+statement ok
+CREATE PROPERTY GRAPH IF NOT EXISTS ddl_graph VERTEX TABLES (ddl_persons LABEL Person) EDGE TABLES (ddl_knows SOURCE KEY (src) REFERENCES ddl_persons (id) DESTINATION KEY (dst) REFERENCES ddl_persons (id) LABEL Knows)
+
+# OR REPLACE: drop and recreate
+statement ok
+CREATE OR REPLACE PROPERTY GRAPH ddl_graph VERTEX TABLES (ddl_persons LABEL Person) EDGE TABLES (ddl_knows SOURCE KEY (src) REFERENCES ddl_persons (id) DESTINATION KEY (dst) REFERENCES ddl_persons (id) LABEL Knows)
+
+# Verify graph still works after OR REPLACE
+query TT
+SELECT * FROM GRAPH_TABLE (ddl_graph MATCH (a:Person WHERE a.name = 'Alice')-[:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Bob

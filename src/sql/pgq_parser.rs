@@ -57,6 +57,8 @@ pub(crate) struct CreatePropertyGraph {
     pub name: String,
     pub vertex_tables: Vec<ParsedVertexTable>,
     pub edge_tables: Vec<ParsedEdgeTable>,
+    pub or_replace: bool,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug)]
@@ -124,7 +126,9 @@ pub(crate) fn try_parse_pgq(sql: &str) -> Result<Option<PgqStatement>, SqlError>
     let stripped = strip_leading_comments(sql);
     let upper = stripped.to_uppercase();
 
-    if upper.starts_with("CREATE PROPERTY GRAPH") {
+    if upper.starts_with("CREATE PROPERTY GRAPH")
+        || upper.starts_with("CREATE OR REPLACE PROPERTY GRAPH")
+    {
         // Pass the full original SQL (trimmed) to the parser so line positions are preserved
         return Ok(Some(parse_create_property_graph(stripped)?));
     }
@@ -336,8 +340,35 @@ fn tokenize(sql: &str) -> Vec<String> {
 fn parse_create_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
     let mut t = Tokens::new(sql);
     t.expect("CREATE")?;
+
+    // Check for OR REPLACE
+    let or_replace = if t.peek().map(|s| s.to_uppercase()) == Some("OR".into()) {
+        t.next()?; // consume OR
+        t.expect("REPLACE")?;
+        true
+    } else {
+        false
+    };
+
     t.expect("PROPERTY")?;
     t.expect("GRAPH")?;
+
+    // Check for IF NOT EXISTS
+    let if_not_exists = if t.peek().map(|s| s.to_uppercase()) == Some("IF".into()) {
+        t.next()?; // consume IF
+        t.expect("NOT")?;
+        t.expect("EXISTS")?;
+        true
+    } else {
+        false
+    };
+
+    if or_replace && if_not_exists {
+        return Err(SqlError::Parse(
+            "Cannot specify both OR REPLACE and IF NOT EXISTS".into(),
+        ));
+    }
+
     let name = t.next()?.to_lowercase();
 
     t.expect("VERTEX")?;
@@ -361,6 +392,8 @@ fn parse_create_property_graph(sql: &str) -> Result<PgqStatement, SqlError> {
         name,
         vertex_tables,
         edge_tables,
+        or_replace,
+        if_not_exists,
     }))
 }
 

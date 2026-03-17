@@ -398,10 +398,20 @@ pub(crate) fn execute_pgq(
     match stmt {
         PgqStatement::CreatePropertyGraph(parsed) => {
             let name = parsed.name.clone();
+            let or_replace = parsed.or_replace;
+            let if_not_exists = parsed.if_not_exists;
             if session.graphs.contains_key(&name) {
-                return Err(SqlError::Plan(format!(
-                    "Property graph '{name}' already exists"
-                )));
+                if if_not_exists {
+                    return Ok(ExecResult::Ddl(format!(
+                        "Property graph '{name}' already exists (skipped)"
+                    )));
+                } else if or_replace {
+                    session.graphs.remove(&name);
+                } else {
+                    return Err(SqlError::Plan(format!(
+                        "Property graph '{name}' already exists"
+                    )));
+                }
             }
             let n_vertices: usize = parsed.vertex_tables.len();
             let n_edges: usize = parsed.edge_tables.len();
