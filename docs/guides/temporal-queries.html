@@ -188,16 +188,16 @@ ORDER BY error_count DESC;</code></pre>
     <div class="output">
 day_of_week | error_count
 ------------+------------
-          6 |           4
+          6 |           6
           3 |           3
-          1 |           2
           2 |           1
           7 |           1
+          1 |           1
           4 |           1
     </div>
 
-    <p>Day 6 is Saturday and day 3 is Wednesday. Saturday errors likely come from
-    weekend deploys with fewer eyes on the dashboards &mdash; a pattern worth investigating.</p>
+    <p>Day 6 is Saturday and day 3 is Wednesday. Saturday dominates with 6 errors,
+    likely from weekend deploys with fewer eyes on the dashboards &mdash; a pattern worth investigating.</p>
 
     <h2>Bucketing with DATE_TRUNC</h2>
 
@@ -218,7 +218,7 @@ ORDER BY day;</code></pre>
     <div class="output">
 day                 | event_count | error_count
 --------------------+-------------+------------
-2025-03-01 00:00:00 |           5 |           3
+2025-03-01 00:00:00 |           5 |           4
 2025-03-02 00:00:00 |           1 |           0
 2025-03-03 00:00:00 |           1 |           0
 2025-03-04 00:00:00 |           1 |           1
@@ -233,7 +233,7 @@ day                 | event_count | error_count
 2025-03-13 00:00:00 |           1 |           1
     </div>
 
-    <p>March 1st and March 5th jump out immediately &mdash; both had 3 errors each.
+    <p>March 1st and March 5th jump out immediately &mdash; 4 and 3 errors respectively.
     And both coincide with deployments. We are building a picture.</p>
 
     <p>For a closer look at March 1st, let us bucket by hour:</p>
@@ -242,7 +242,7 @@ day                 | event_count | error_count
   DATE_TRUNC('hour', occurred_at) AS hour,
   COUNT(*) AS event_count
 FROM events
-WHERE occurred_at BETWEEN '2025-03-01 00:00:00' AND '2025-03-01 23:59:59'
+WHERE occurred_at BETWEEN CAST('2025-03-01 00:00:00' AS TIMESTAMP) AND CAST('2025-03-01 23:59:59' AS TIMESTAMP)
 GROUP BY DATE_TRUNC('hour', occurred_at)
 ORDER BY hour;</code></pre>
     <div class="output">
@@ -276,15 +276,14 @@ span_days
     </div>
 
     <p>Now a more interesting question: <strong>what is the average number of hours
-    between errors, per server?</strong> We can use a self-join to pair consecutive
-    errors on the same server and measure the gap:</p>
+    between errors, per server?</strong> We can use a self-join to pair errors
+    on the same server and measure the gaps:</p>
 
     <pre><code class="language-sql">SELECT
   e1.server_name,
   AVG(DATE_DIFF('hour', e1.occurred_at, e2.occurred_at)) AS avg_hours_between_errors
-FROM events e1
-JOIN events e2
-  ON e1.server_name = e2.server_name
+FROM events e1, events e2
+WHERE e1.server_name = e2.server_name
   AND e1.event_type = 'error'
   AND e2.event_type = 'error'
   AND e2.id &gt; e1.id
@@ -294,14 +293,14 @@ ORDER BY avg_hours_between_errors;</code></pre>
     <div class="output">
 server_name | avg_hours_between_errors
 ------------+-------------------------
-db-01       |                       36
-api-01      |                      129
-web-01      |                      110
+db-01       |                       38
+web-01      |                      112
+api-01      |                      164
 web-02      |                      203
     </div>
 
-    <p>db-01 has the tightest error clustering &mdash; just 36 hours on average between
-    errors. It is either fragile or getting hammered by something upstream.</p>
+    <p>db-01 has the tightest error clustering &mdash; the smallest average gap between
+    error pairs. It is either fragile or getting hammered by something upstream.</p>
 
     <h2>Filtering by Time Windows</h2>
 
@@ -313,7 +312,7 @@ SELECT id, server_name, severity, occurred_at
 FROM events
 WHERE event_type = 'error'
   AND severity &gt;= 4
-  AND occurred_at BETWEEN '2025-03-01 00:00:00' AND '2025-03-07 23:59:59'
+  AND occurred_at BETWEEN CAST('2025-03-01 00:00:00' AS TIMESTAMP) AND CAST('2025-03-07 23:59:59' AS TIMESTAMP)
 ORDER BY occurred_at;</code></pre>
     <div class="output">
 id | server_name | severity | occurred_at
@@ -334,7 +333,7 @@ id | server_name | severity | occurred_at
     <pre><code class="language-sql">-- All events after March 10
 SELECT id, server_name, event_type, occurred_at
 FROM events
-WHERE occurred_at &gt;= '2025-03-10 00:00:00'
+WHERE occurred_at &gt;= CAST('2025-03-10 00:00:00' AS TIMESTAMP)
 ORDER BY occurred_at;</code></pre>
     <div class="output">
 id | server_name | event_type | occurred_at
@@ -359,11 +358,10 @@ id | server_name | event_type | occurred_at
   e.severity,
   e.occurred_at,
   DATE_DIFF('minute', d.deployed_at, e.occurred_at) AS minutes_after_deploy
-FROM events e
-JOIN deployments d
-  ON e.occurred_at &gt;= d.deployed_at
-  AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) &lt;= 120
+FROM events e, deployments d
 WHERE e.event_type = 'error'
+  AND e.occurred_at &gt;= d.deployed_at
+  AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) &lt;= 120
 ORDER BY d.deployed_at, e.occurred_at;</code></pre>
     <div class="output">
 version | service_name | deployed_at         | server_name | severity | occurred_at         | minutes_after_deploy
@@ -393,11 +391,10 @@ v2.4.1  | web-app      | 2025-03-13 21:00:00 | api-01      |        5 | 2025-03-
   d.service_name,
   COUNT(*) AS errors_within_2h,
   MAX(e.severity) AS max_severity
-FROM events e
-JOIN deployments d
-  ON e.occurred_at &gt;= d.deployed_at
-  AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) &lt;= 120
+FROM events e, deployments d
 WHERE e.event_type = 'error'
+  AND e.occurred_at &gt;= d.deployed_at
+  AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) &lt;= 120
 GROUP BY d.version, d.service_name
 ORDER BY errors_within_2h DESC;</code></pre>
     <div class="output">
@@ -454,36 +451,29 @@ ORDER BY days_since;</code></pre>
   DATE_TRUNC('day', e.occurred_at) AS day,
   e.server_name,
   COUNT(*) AS error_count,
-  MAX(e.severity) AS max_severity,
-  CASE
-    WHEN EXISTS (
-      SELECT 1 FROM deployments d
-      WHERE DATE_TRUNC('day', d.deployed_at) = DATE_TRUNC('day', e.occurred_at)
-    ) THEN 'YES'
-    ELSE 'NO'
-  END AS deploy_day
+  MAX(e.severity) AS max_severity
 FROM events e
 WHERE e.event_type = 'error'
 GROUP BY DATE_TRUNC('day', e.occurred_at), e.server_name
 ORDER BY day, error_count DESC;</code></pre>
     <div class="output">
-day                 | server_name | error_count | max_severity | deploy_day
---------------------+-------------+-------------+--------------+-----------
-2025-03-01 00:00:00 | api-01      |           2 |            5 | YES
-2025-03-01 00:00:00 | web-01      |           1 |            3 | YES
-2025-03-01 00:00:00 | web-02      |           1 |            4 | YES
-2025-03-04 00:00:00 | api-01      |           1 |            3 | NO
-2025-03-05 00:00:00 | db-01       |           2 |            5 | YES
-2025-03-05 00:00:00 | web-01      |           1 |            4 | YES
-2025-03-08 00:00:00 | web-01      |           1 |            3 | NO
-2025-03-08 00:00:00 | db-01       |           1 |            4 | NO
-2025-03-09 00:00:00 | web-02      |           1 |            3 | NO
-2025-03-10 00:00:00 | api-01      |           1 |            4 | YES
-2025-03-13 00:00:00 | api-01      |           1 |            5 | YES
+day                 | server_name | error_count | max_severity
+--------------------+-------------+-------------+-------------
+2025-03-01 00:00:00 | api-01      |           2 |            5
+2025-03-01 00:00:00 | web-01      |           1 |            3
+2025-03-01 00:00:00 | web-02      |           1 |            4
+2025-03-04 00:00:00 | api-01      |           1 |            3
+2025-03-05 00:00:00 | db-01       |           2 |            5
+2025-03-05 00:00:00 | web-01      |           1 |            4
+2025-03-08 00:00:00 | web-01      |           1 |            3
+2025-03-08 00:00:00 | db-01       |           1 |            4
+2025-03-09 00:00:00 | web-02      |           1 |            3
+2025-03-10 00:00:00 | api-01      |           1 |            4
+2025-03-13 00:00:00 | api-01      |           1 |            5
     </div>
 
-    <p>The picture is clear: 7 out of 11 server-day error groups fall on deployment days.
-    The highest severity errors (5) cluster on deploy days. The data makes the case for
+    <p>Cross-reference with the deployments table: March 1, 5, 10, and 13 all had deploys.
+    The highest severity errors (5) cluster on those days. The data makes the case for
     staging environments and canary deploys better than any meeting ever could.</p>
 
     <h2>Challenges</h2>
@@ -501,9 +491,9 @@ day                 | server_name | error_count | max_severity | deploy_day
       <strong>Challenge 2: Deploy Blast Radius.</strong>
       For each deployment, compute the number of <em>distinct servers</em> that reported
       errors within 60 minutes (not 120). Which deployment affected the most servers?
-      Hint: use <code>COUNT(DISTINCT e.server_name)</code> with the same join pattern
-      from the investigation section, but tighten the <code>DATE_DIFF</code> threshold
-      to 60 minutes.
+      Hint: use <code>COUNT(DISTINCT e.server_name)</code> with the same cross-join
+      pattern from the investigation section, but tighten the <code>DATE_DIFF</code>
+      threshold to 60 minutes.
     </div>
 
     <h2>What's Next</h2>

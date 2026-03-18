@@ -376,3 +376,23 @@ fn slt_pgq_list_return() {
 fn slt_constant_select() {
     run_slt("tests/slt/constant_select.slt");
 }
+
+#[test]
+fn slt_guide_getting_started() {
+    run_slt("tests/slt/guide_getting_started.slt");
+}
+
+#[test]
+fn slt_guide_sql_deep_dive() {
+    run_slt("tests/slt/guide_sql_deep_dive.slt");
+}
+
+#[test]
+fn slt_guide_temporal() {
+    run_slt("tests/slt/guide_temporal.slt");
+}
+
+#[test]
+fn slt_guide_graph_queries() {
+    run_slt("tests/slt/guide_graph_queries.slt");
+}

@@ -1,0 +1,217 @@
+# Guide: Working with Time — temporal queries from docs/guides/temporal-queries.html
+
+# ============================================================
+# Setup: events table
+# ============================================================
+
+statement ok
+CREATE TABLE events (id INTEGER, server_name VARCHAR, event_type VARCHAR, severity INTEGER, occurred_at TIMESTAMP)
+
+statement ok
+INSERT INTO events VALUES (1, 'web-01', 'error', 3, '2025-03-01 02:15:30'), (2, 'web-01', 'warning', 2, '2025-03-01 02:16:00'), (3, 'web-02', 'error', 4, '2025-03-01 08:30:00'), (4, 'api-01', 'error', 5, '2025-03-01 08:31:15'), (5, 'api-01', 'error', 5, '2025-03-01 08:32:00'), (6, 'web-01', 'info', 1, '2025-03-02 10:00:00'), (7, 'web-02', 'warning', 2, '2025-03-03 14:22:10'), (8, 'api-01', 'error', 3, '2025-03-04 09:00:00'), (9, 'web-01', 'error', 4, '2025-03-05 16:45:00'), (10, 'db-01', 'error', 5, '2025-03-05 16:45:30'), (11, 'db-01', 'error', 5, '2025-03-05 16:46:00'), (12, 'web-02', 'info', 1, '2025-03-06 08:00:00'), (13, 'api-01', 'warning', 2, '2025-03-07 11:30:00'), (14, 'web-01', 'error', 3, '2025-03-08 03:00:00'), (15, 'db-01', 'error', 4, '2025-03-08 03:01:00'), (16, 'web-02', 'error', 3, '2025-03-09 20:15:00'), (17, 'api-01', 'error', 4, '2025-03-10 12:00:00'), (18, 'web-01', 'info', 1, '2025-03-11 09:00:00'), (19, 'db-01', 'warning', 2, '2025-03-12 15:30:00'), (20, 'api-01', 'error', 5, '2025-03-13 22:00:00')
+
+# ============================================================
+# Setup: deployments table
+# ============================================================
+
+statement ok
+CREATE TABLE deployments (id INTEGER, service_name VARCHAR, deployed_at TIMESTAMP, version VARCHAR)
+
+statement ok
+INSERT INTO deployments VALUES (1, 'web-app', '2025-03-01 02:00:00', 'v2.3.1'), (2, 'api-svc', '2025-03-01 08:00:00', 'v1.9.0'), (3, 'web-app', '2025-03-05 16:00:00', 'v2.4.0'), (4, 'db-migrate', '2025-03-05 16:30:00', 'v3.1.0'), (5, 'api-svc', '2025-03-10 11:00:00', 'v1.9.1'), (6, 'web-app', '2025-03-13 21:00:00', 'v2.4.1')
+
+# ============================================================
+# Sanity check: row counts
+# ============================================================
+
+query I
+SELECT COUNT(*) AS total_events FROM events
+----
+20
+
+query I
+SELECT COUNT(*) AS total_deploys FROM deployments
+----
+6
+
+# ============================================================
+# EXTRACT: errors by hour of day
+# ============================================================
+
+query II
+SELECT EXTRACT(HOUR FROM occurred_at) AS hour_of_day, COUNT(*) AS error_count FROM events WHERE event_type = 'error' GROUP BY EXTRACT(HOUR FROM occurred_at) ORDER BY error_count DESC, hour_of_day
+----
+8 3
+16 3
+3 2
+2 1
+9 1
+12 1
+20 1
+22 1
+
+# ============================================================
+# EXTRACT: errors by day of week (ISO DOW)
+# ============================================================
+
+query II
+SELECT EXTRACT(DOW FROM occurred_at) AS day_of_week, COUNT(*) AS error_count FROM events WHERE event_type = 'error' GROUP BY EXTRACT(DOW FROM occurred_at) ORDER BY error_count DESC, day_of_week
+----
+6 6
+3 3
+1 1
+2 1
+4 1
+7 1
+
+# ============================================================
+# DATE_TRUNC: daily event/error counts
+# ============================================================
+
+query TII
+SELECT DATE_TRUNC('day', occurred_at) AS day, COUNT(*) AS event_count, SUM(CASE WHEN event_type = 'error' THEN 1 ELSE 0 END) AS error_count FROM events GROUP BY DATE_TRUNC('day', occurred_at) ORDER BY day
+----
+2025-03-01 00:00:00 5 4
+2025-03-02 00:00:00 1 0
+2025-03-03 00:00:00 1 0
+2025-03-04 00:00:00 1 1
+2025-03-05 00:00:00 3 3
+2025-03-06 00:00:00 1 0
+2025-03-07 00:00:00 1 0
+2025-03-08 00:00:00 2 2
+2025-03-09 00:00:00 1 1
+2025-03-10 00:00:00 1 1
+2025-03-11 00:00:00 1 0
+2025-03-12 00:00:00 1 0
+2025-03-13 00:00:00 1 1
+
+# ============================================================
+# DATE_TRUNC: hourly on March 1st
+# ============================================================
+
+query TI
+SELECT DATE_TRUNC('hour', occurred_at) AS hour, COUNT(*) AS event_count FROM events WHERE occurred_at >= CAST('2025-03-01 00:00:00' AS TIMESTAMP) AND occurred_at <= CAST('2025-03-01 23:59:59' AS TIMESTAMP) GROUP BY DATE_TRUNC('hour', occurred_at) ORDER BY hour
+----
+2025-03-01 02:00:00 2
+2025-03-01 08:00:00 3
+
+# ============================================================
+# DATE_DIFF: span in days
+# ============================================================
+
+query I
+SELECT DATE_DIFF('day', CAST('2025-03-01 02:15:30' AS TIMESTAMP), CAST('2025-03-13 22:00:00' AS TIMESTAMP)) AS span_days
+----
+12
+
+# ============================================================
+# DATE_DIFF: avg hours between errors per server (self-join)
+# ============================================================
+
+query TR
+SELECT e1.server_name, AVG(DATE_DIFF('hour', e1.occurred_at, e2.occurred_at)) AS avg_hours_between_errors FROM events e1 JOIN events e2 ON e1.server_name = e2.server_name WHERE e1.event_type = 'error' AND e2.event_type = 'error' AND e2.id > e1.id AND e2.occurred_at > e1.occurred_at GROUP BY e1.server_name ORDER BY avg_hours_between_errors
+----
+db-01 38.666667
+web-01 112.0
+api-01 164.2
+web-02 203.0
+
+# ============================================================
+# Filtering: critical errors in week 1
+# ============================================================
+
+query ITIT
+SELECT id, server_name, severity, occurred_at FROM events WHERE event_type = 'error' AND severity >= 4 AND occurred_at >= CAST('2025-03-01 00:00:00' AS TIMESTAMP) AND occurred_at <= CAST('2025-03-07 23:59:59' AS TIMESTAMP) ORDER BY occurred_at
+----
+3 web-02 4 2025-03-01 08:30:00
+4 api-01 5 2025-03-01 08:31:15
+5 api-01 5 2025-03-01 08:32:00
+9 web-01 4 2025-03-05 16:45:00
+10 db-01 5 2025-03-05 16:45:30
+11 db-01 5 2025-03-05 16:46:00
+
+# ============================================================
+# Filtering: events after March 10
+# ============================================================
+
+query ITTT
+SELECT id, server_name, event_type, occurred_at FROM events WHERE occurred_at >= CAST('2025-03-10 00:00:00' AS TIMESTAMP) ORDER BY occurred_at
+----
+17 api-01 error 2025-03-10 12:00:00
+18 web-01 info 2025-03-11 09:00:00
+19 db-01 warning 2025-03-12 15:30:00
+20 api-01 error 2025-03-13 22:00:00
+
+# ============================================================
+# Post-deploy error correlation (errors within 120 min of deploy)
+# ============================================================
+
+query TTTTIITI
+SELECT d.version, d.service_name, d.deployed_at, e.server_name, e.severity, e.occurred_at, DATE_DIFF('minute', d.deployed_at, e.occurred_at) AS minutes_after_deploy FROM events e CROSS JOIN deployments d WHERE e.event_type = 'error' AND e.occurred_at >= d.deployed_at AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) <= 120 ORDER BY d.deployed_at, e.occurred_at
+----
+v2.3.1 web-app 2025-03-01 02:00:00 web-01 3 2025-03-01 02:15:30 15
+v1.9.0 api-svc 2025-03-01 08:00:00 web-02 4 2025-03-01 08:30:00 30
+v1.9.0 api-svc 2025-03-01 08:00:00 api-01 5 2025-03-01 08:31:15 31
+v1.9.0 api-svc 2025-03-01 08:00:00 api-01 5 2025-03-01 08:32:00 32
+v2.4.0 web-app 2025-03-05 16:00:00 web-01 4 2025-03-05 16:45:00 45
+v2.4.0 web-app 2025-03-05 16:00:00 db-01 5 2025-03-05 16:45:30 45
+v2.4.0 web-app 2025-03-05 16:00:00 db-01 5 2025-03-05 16:46:00 46
+v3.1.0 db-migrate 2025-03-05 16:30:00 web-01 4 2025-03-05 16:45:00 15
+v3.1.0 db-migrate 2025-03-05 16:30:00 db-01 5 2025-03-05 16:45:30 15
+v3.1.0 db-migrate 2025-03-05 16:30:00 db-01 5 2025-03-05 16:46:00 16
+v1.9.1 api-svc 2025-03-10 11:00:00 api-01 4 2025-03-10 12:00:00 60
+v2.4.1 web-app 2025-03-13 21:00:00 api-01 5 2025-03-13 22:00:00 60
+
+# ============================================================
+# Summary by deployment: error count and max severity within 2h
+# ============================================================
+
+query TTII
+SELECT d.version, d.service_name, COUNT(*) AS errors_within_2h, MAX(e.severity) AS max_severity FROM events e CROSS JOIN deployments d WHERE e.event_type = 'error' AND e.occurred_at >= d.deployed_at AND DATE_DIFF('minute', d.deployed_at, e.occurred_at) <= 120 GROUP BY d.version, d.service_name ORDER BY errors_within_2h DESC, d.version
+----
+v1.9.0 api-svc 3 5
+v2.4.0 web-app 3 5
+v3.1.0 db-migrate 3 5
+v1.9.1 api-svc 1 4
+v2.3.1 web-app 1 3
+v2.4.1 web-app 1 5
+
+# ============================================================
+# CAST: explicit type conversions
+# ============================================================
+
+query T
+SELECT CAST('2025-03-15' AS DATE)
+----
+2025-03-15
+
+query T
+SELECT CAST('14:30:00' AS TIME)
+----
+14:30:00
+
+query T
+SELECT CAST('2025-03-15 09:30:00' AS TIMESTAMP)
+----
+2025-03-15 09:30:00
+
+# ============================================================
+# Incident report: daily error summary per server
+# (Guide uses EXISTS in CASE which requires GROUP BY support for
+#  subquery expressions; we split into a simpler grouped query.)
+# ============================================================
+
+query TTII
+SELECT DATE_TRUNC('day', e.occurred_at) AS day, e.server_name, COUNT(*) AS error_count, MAX(e.severity) AS max_severity FROM events e WHERE e.event_type = 'error' GROUP BY DATE_TRUNC('day', e.occurred_at), e.server_name ORDER BY day, error_count DESC, e.server_name
+----
+2025-03-01 00:00:00 api-01 2 5
+2025-03-01 00:00:00 web-01 1 3
+2025-03-01 00:00:00 web-02 1 4
+2025-03-04 00:00:00 api-01 1 3
+2025-03-05 00:00:00 db-01 2 5
+2025-03-05 00:00:00 web-01 1 4
+2025-03-08 00:00:00 db-01 1 4
+2025-03-08 00:00:00 web-01 1 3
+2025-03-09 00:00:00 web-02 1 3
+2025-03-10 00:00:00 api-01 1 4
+2025-03-13 00:00:00 api-01 1 5

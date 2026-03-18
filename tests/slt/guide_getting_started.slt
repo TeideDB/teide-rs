@@ -1,0 +1,168 @@
+# SQL examples from docs/guides/getting-started.html
+# "Getting Started: From CSV to Insights in 5 Minutes"
+
+# ===== The Setup =====
+
+statement ok
+CREATE TABLE employees (id INTEGER, name VARCHAR, dept VARCHAR, title VARCHAR, salary REAL, hire_date DATE, active BOOLEAN)
+
+statement ok
+INSERT INTO employees VALUES (1, 'Alice Chen', 'engineering', 'Senior Engineer', 125000.0, '2021-03-15', true), (2, 'Bob Martinez', 'engineering', 'Staff Engineer', 145000.0, '2019-08-01', true), (3, 'Carol White', 'engineering', 'Junior Engineer', 85000.0, '2023-11-20', true), (4, 'Dave Kim', 'marketing', 'Marketing Manager', 95000.0, '2020-06-10', true), (5, 'Eve Johnson', 'marketing', 'Content Lead', 82000.0, '2022-01-05', true), (6, 'Frank Brown', 'marketing', 'SEO Specialist', 72000.0, '2024-02-14', true), (7, 'Grace Liu', 'sales', 'Sales Director', 130000.0, '2018-11-30', true), (8, 'Heidi Park', 'sales', 'Account Executive', 88000.0, '2022-07-22', true), (9, 'Ivan Torres', 'sales', 'SDR', 65000.0, '2024-08-01', true), (10, 'Judy Adams', 'product', 'Product Manager', 115000.0, '2020-04-15', true), (11, 'Karl Weber', 'product', 'UX Designer', 92000.0, '2021-09-01', true), (12, 'Lisa Patel', 'product', 'Data Analyst', 88000.0, '2023-03-12', true), (13, 'Mike Ross', 'engineering', 'DevOps Engineer', 110000.0, '2022-05-18', true), (14, 'Nina Chang', 'engineering', 'ML Engineer', 135000.0, '2021-01-10', true), (15, 'Oscar Diaz', 'marketing', 'VP Marketing', 155000.0, '2017-12-01', false)
+
+# Sanity check: 15 rows
+query I
+SELECT COUNT(*) AS total FROM employees
+----
+15
+
+# ===== Exploring the Data =====
+
+# Distinct departments
+query T
+SELECT DISTINCT dept FROM employees ORDER BY dept
+----
+engineering
+marketing
+product
+sales
+
+# Top 5 highest-paid employees
+query TTR
+SELECT name, dept, salary FROM employees ORDER BY salary DESC LIMIT 5
+----
+Oscar Diaz marketing 155000.0
+Bob Martinez engineering 145000.0
+Nina Chang engineering 135000.0
+Grace Liu sales 130000.0
+Alice Chen engineering 125000.0
+
+# ===== Filtering with WHERE =====
+
+# Engineers earning over $100k
+query TTR
+SELECT name, title, salary FROM employees WHERE dept = 'engineering' AND salary > 100000 ORDER BY salary DESC
+----
+Bob Martinez Staff Engineer 145000.0
+Nina Chang ML Engineer 135000.0
+Alice Chen Senior Engineer 125000.0
+Mike Ross DevOps Engineer 110000.0
+
+# Marketing team
+query TTR
+SELECT name, title, salary FROM employees WHERE dept IN ('marketing') ORDER BY salary DESC
+----
+Oscar Diaz VP Marketing 155000.0
+Dave Kim Marketing Manager 95000.0
+Eve Johnson Content Lead 82000.0
+Frank Brown SEO Specialist 72000.0
+
+# Active employees hired after 2023-01-01
+query TTT
+SELECT name, dept, hire_date FROM employees WHERE active = true AND hire_date > CAST('2023-01-01' AS DATE) ORDER BY hire_date
+----
+Lisa Patel product 2023-03-12
+Carol White engineering 2023-11-20
+Frank Brown marketing 2024-02-14
+Ivan Torres sales 2024-08-01
+
+# BETWEEN: salary $80k-$100k
+query TR
+SELECT name, salary FROM employees WHERE salary BETWEEN 80000 AND 100000 ORDER BY salary DESC
+----
+Dave Kim 95000.0
+Karl Weber 92000.0
+Heidi Park 88000.0
+Lisa Patel 88000.0
+Carol White 85000.0
+Eve Johnson 82000.0
+
+# ===== Answering Business Questions =====
+
+# Headcount and salary statistics by department (active only)
+# NOTE: guide uses ROUND(AVG(salary),0) but the planner does not yet recognise
+# ROUND wrapping an aggregate in GROUP BY context, so we use AVG directly.
+query TIRRR
+SELECT dept, COUNT(*) AS headcount, AVG(salary) AS avg_salary, MIN(salary) AS min_salary, MAX(salary) AS max_salary FROM employees WHERE active = true GROUP BY dept ORDER BY avg_salary DESC
+----
+engineering 5 120000.0 85000.0 145000.0
+product 3 98333.333333 88000.0 115000.0
+sales 3 94333.333333 65000.0 130000.0
+marketing 3 83000.0 72000.0 95000.0
+
+# HAVING: departments where avg salary > $90k
+query TR
+SELECT dept, AVG(salary) AS avg_salary FROM employees WHERE active = true GROUP BY dept HAVING AVG(salary) > 90000 ORDER BY avg_salary DESC
+----
+engineering 120000.0
+product 98333.333333
+sales 94333.333333
+
+# ===== Ranking and Comparing =====
+
+# ROW_NUMBER rank within department by salary
+query TTRI
+SELECT name, dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rank FROM employees WHERE active = true ORDER BY dept, rank
+----
+Bob Martinez engineering 145000.0 1
+Nina Chang engineering 135000.0 2
+Alice Chen engineering 125000.0 3
+Mike Ross engineering 110000.0 4
+Carol White engineering 85000.0 5
+Dave Kim marketing 95000.0 1
+Eve Johnson marketing 82000.0 2
+Frank Brown marketing 72000.0 3
+Judy Adams product 115000.0 1
+Karl Weber product 92000.0 2
+Lisa Patel product 88000.0 3
+Grace Liu sales 130000.0 1
+Heidi Park sales 88000.0 2
+Ivan Torres sales 65000.0 3
+
+# LAG: salary gap to previous employee in department
+query TTRRR
+SELECT name, dept, salary, LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS prev_salary, salary - LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS gap FROM employees WHERE active = true ORDER BY dept, salary DESC
+----
+Bob Martinez engineering 145000.0 NULL NULL
+Nina Chang engineering 135000.0 145000.0 -10000.0
+Alice Chen engineering 125000.0 135000.0 -10000.0
+Mike Ross engineering 110000.0 125000.0 -15000.0
+Carol White engineering 85000.0 110000.0 -25000.0
+Dave Kim marketing 95000.0 NULL NULL
+Eve Johnson marketing 82000.0 95000.0 -13000.0
+Frank Brown marketing 72000.0 82000.0 -10000.0
+Judy Adams product 115000.0 NULL NULL
+Karl Weber product 92000.0 115000.0 -23000.0
+Lisa Patel product 88000.0 92000.0 -4000.0
+Grace Liu sales 130000.0 NULL NULL
+Heidi Park sales 88000.0 130000.0 -42000.0
+Ivan Torres sales 65000.0 88000.0 -23000.0
+
+# ===== Deriving New Tables =====
+
+statement ok
+CREATE TABLE dept_summary AS SELECT dept, COUNT(*) AS headcount, AVG(salary) AS avg_salary, MIN(salary) AS min_salary, MAX(salary) AS max_salary FROM employees WHERE active = true GROUP BY dept
+
+query TIRRR
+SELECT * FROM dept_summary ORDER BY avg_salary DESC
+----
+engineering 5 120000.0 85000.0 145000.0
+product 3 98333.333333 88000.0 115000.0
+sales 3 94333.333333 65000.0 130000.0
+marketing 3 83000.0 72000.0 95000.0
+
+# ===== Quick Calculations =====
+
+query I
+SELECT 1 + 1
+----
+2
+
+query T
+SELECT 'foo' || 'bar'
+----
+foobar
+
+query T
+SELECT CAST('2025-01-15' AS DATE)
+----
+2025-01-15

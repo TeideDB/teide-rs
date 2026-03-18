@@ -175,7 +175,7 @@ Frank Brown	SEO Specialist	72000.0</div>
 
     <pre><code class="language-sql">SELECT name, dept, hire_date
 FROM employees
-WHERE active = true AND hire_date > '2023-01-01'
+WHERE active = true AND hire_date > CAST('2023-01-01' AS DATE)
 ORDER BY hire_date;</code></pre>
     <div class="output">name	dept	hire_date
 Lisa Patel	product	2023-03-12
@@ -216,7 +216,7 @@ Eve Johnson	82000.0</div>
     <pre><code class="language-sql">SELECT
   dept,
   COUNT(*) AS headcount,
-  ROUND(AVG(salary), 0) AS avg_salary,
+  AVG(salary) AS avg_salary,
   MIN(salary) AS min_salary,
   MAX(salary) AS max_salary
 FROM employees
@@ -224,10 +224,10 @@ WHERE active = true
 GROUP BY dept
 ORDER BY avg_salary DESC;</code></pre>
     <div class="output">dept	headcount	avg_salary	min_salary	max_salary
-engineering	5	120000	85000.0	145000.0
-product	3	98333	88000.0	115000.0
-sales	3	94333	65000.0	130000.0
-marketing	3	83000	72000.0	95000.0</div>
+engineering	5	120000.0	85000.0	145000.0
+product	3	98333.33333333333	88000.0	115000.0
+sales	3	94333.33333333333	65000.0	130000.0
+marketing	3	83000.0	72000.0	95000.0</div>
 
     <p>Engineering is both the largest team and the highest-paid on average. Marketing is the
     smallest active team (Oscar is inactive) and has the lowest average salary. That is the
@@ -236,16 +236,16 @@ marketing	3	83000	72000.0	95000.0</div>
     <p>What if you only want departments where the average salary exceeds $90k? Use
     <code>HAVING</code> to filter after aggregation:</p>
 
-    <pre><code class="language-sql">SELECT dept, ROUND(AVG(salary), 0) AS avg_salary
+    <pre><code class="language-sql">SELECT dept, AVG(salary) AS avg_salary
 FROM employees
 WHERE active = true
 GROUP BY dept
 HAVING AVG(salary) > 90000
 ORDER BY avg_salary DESC;</code></pre>
     <div class="output">dept	avg_salary
-engineering	120000
-product	98333
-sales	94333</div>
+engineering	120000.0
+product	98333.33333333333
+sales	94333.33333333333</div>
 
     <p>Marketing drops off. Three departments clear the $90k bar.</p>
 
@@ -325,7 +325,7 @@ Ivan Torres	sales	65000.0	88000.0	-23000.0</div>
 SELECT
   dept,
   COUNT(*) AS headcount,
-  ROUND(AVG(salary), 0) AS avg_salary,
+  AVG(salary) AS avg_salary,
   MIN(salary) AS min_salary,
   MAX(salary) AS max_salary
 FROM employees
@@ -336,10 +336,10 @@ GROUP BY dept;</code></pre>
 
     <pre><code class="language-sql">SELECT * FROM dept_summary ORDER BY avg_salary DESC;</code></pre>
     <div class="output">dept	headcount	avg_salary	min_salary	max_salary
-engineering	5	120000	85000.0	145000.0
-product	3	98333	88000.0	115000.0
-sales	3	94333	65000.0	130000.0
-marketing	3	83000	72000.0	95000.0</div>
+engineering	5	120000.0	85000.0	145000.0
+product	3	98333.33333333333	88000.0	115000.0
+sales	3	94333.33333333333	65000.0	130000.0
+marketing	3	83000.0	72000.0	95000.0</div>
 
     <p>This table is a first-class citizen. You can join it back to the original
     <code>employees</code> table, filter it, or export it. It persists for the lifetime of

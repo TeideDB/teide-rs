@@ -54,7 +54,7 @@
     <p class="lead">Real analytics means joining, ranking, and drilling into multi-table data. In this guide you will build a reporting pipeline for an e-commerce company, combining customers, products, and orders into the kind of dashboard leadership actually wants.</p>
 
     <div class="note">
-      <p><strong>Time:</strong> About 10 minutes. <strong>What you will learn:</strong> INNER and LEFT joins, GROUP BY with HAVING, scalar and IN subqueries, CTEs for multi-step logic, window functions (ROW_NUMBER, RANK, DENSE_RANK, running totals), and how to combine everything into a single executive dashboard query.</p>
+      <p><strong>Time:</strong> About 10 minutes. <strong>What you will learn:</strong> INNER and LEFT joins, GROUP BY with HAVING, IN subqueries, CTEs for multi-step logic, window functions (ROW_NUMBER, RANK, DENSE_RANK, running totals), and how to combine everything into a single executive dashboard query.</p>
     </div>
 
     <!-- ===== THE PROBLEM ===== -->
@@ -164,17 +164,21 @@ Dave Kim       Training Pack   services    1   299.99  2023-06-30</div>
     <h2>LEFT JOIN: The Complete Picture</h2>
     <p>An INNER JOIN only returns rows that match on both sides. But sometimes you need the opposite: show me everything on the left, even if there is no match on the right. That is what <code>LEFT JOIN</code> is for.</p>
 
-    <p>Let's find customers who have not placed any orders in 2024:</p>
+    <p>Let's find customers who have not placed any orders in 2024. Since the engine only supports equi-join conditions in <code>ON</code> clauses, we first filter orders to 2024 in a CTE, then LEFT JOIN against it:</p>
 
-    <pre><code class="language-sql">SELECT
+    <pre><code class="language-sql">WITH orders_2024 AS (
+  SELECT id, customer_id, order_date
+  FROM orders
+  WHERE order_date >= CAST('2024-01-01' AS DATE)
+)
+SELECT
   c.name    AS customer,
   c.region,
   o.id      AS order_id,
   o.order_date
 FROM customers c
-LEFT JOIN orders o
+LEFT JOIN orders_2024 o
   ON c.id = o.customer_id
-  AND o.order_date >= '2024-01-01'
 ORDER BY o.order_date, c.name;</code></pre>
     <div class="output">Alice Chen      US-West   NULL  NULL
 Bob Martinez    US-East   NULL  NULL
@@ -186,7 +190,7 @@ Grace Liu       APAC      13    2024-03-10
 Grace Liu       APAC      14    2024-05-20
 Heidi Park      APAC      15    2024-07-01</div>
 
-    <p>The NULL values in <code>order_id</code> and <code>order_date</code> tell you exactly who has gone quiet. Alice, Bob, and Carol &mdash; your earliest customers &mdash; have not ordered in 2024. That is the kind of insight a retention team can act on immediately.</p>
+    <p>The NULL values in <code>order_id</code> and <code>order_date</code> tell you exactly who has gone quiet. Alice, Bob, and Carol &mdash; your earliest customers &mdash; have not ordered in 2024. By pre-filtering the orders in a CTE, the LEFT JOIN naturally produces NULLs for customers with no 2024 orders. That is the kind of insight a retention team can act on immediately.</p>
 
     <!-- ===== AGGREGATION ACROSS JOINS ===== -->
     <h2>Aggregation Across Joins</h2>
@@ -213,29 +217,33 @@ services     799.96  4   4</div>
     <pre><code class="language-sql">SELECT
   c.region,
   SUM(o.quantity * p.price) AS total_revenue,
-  COUNT(DISTINCT c.id)      AS unique_customers
+  COUNT(*)                  AS order_count
 FROM orders o
 INNER JOIN customers c ON o.customer_id = c.id
 INNER JOIN products p  ON o.product_id  = p.id
 WHERE o.status = 'completed'
 GROUP BY c.region
 ORDER BY total_revenue DESC;</code></pre>
-    <div class="output">US-East    799.83  2
-US-West    899.92  2
-APAC       599.93  2
-EU-West    399.96  2</div>
+    <div class="output">US-West    899.92  6
+US-East    799.83  6
+APAC       599.93  3
+EU-West    399.96  4</div>
 
     <h3>HAVING: Filtering Groups</h3>
-    <p>Suppose you only want product categories that have generated more than $800 in revenue. <code>WHERE</code> filters rows before aggregation; <code>HAVING</code> filters groups after.</p>
+    <p>Suppose you only want product categories that have generated more than $800 in revenue. <code>WHERE</code> filters rows before aggregation; <code>HAVING</code> filters groups after. We compute the joined data in a CTE first, then apply GROUP BY and HAVING on the flat result:</p>
 
-    <pre><code class="language-sql">SELECT
-  p.category,
-  SUM(o.quantity * p.price) AS total_revenue
-FROM orders o
-INNER JOIN products p ON o.product_id = p.id
-WHERE o.status = 'completed'
-GROUP BY p.category
-HAVING SUM(o.quantity * p.price) > 800.0
+    <pre><code class="language-sql">WITH order_lines AS (
+  SELECT p.category, o.quantity * p.price AS line_total
+  FROM orders o
+  INNER JOIN products p ON o.product_id = p.id
+  WHERE o.status = 'completed'
+)
+SELECT
+  category,
+  SUM(line_total) AS total_revenue
+FROM order_lines
+GROUP BY category
+HAVING SUM(line_total) > 800.0
 ORDER BY total_revenue DESC;</code></pre>
     <div class="output">software    1099.93
 hardware     999.70</div>
@@ -244,31 +252,33 @@ hardware     999.70</div>
     <h2>Subqueries: Asking Questions Within Questions</h2>
     <p>A subquery is a SELECT inside another SELECT. It lets you compute a value (or a set of values) and use it as a filter condition.</p>
 
-    <h3>Scalar Subquery: Above-Average Spenders</h3>
-    <p>Who has spent more than the average customer? First we need each customer's total spend, then we compare against the mean.</p>
+    <h3>Above-Average Spenders (CTE Approach)</h3>
+    <p>Who has spent more than the average customer? We use two CTEs: one to compute each customer's total spend, and another to compute the average. Then we join them to filter.</p>
 
-    <pre><code class="language-sql">SELECT
-  c.name,
-  SUM(o.quantity * p.price) AS total_spend
-FROM orders o
-INNER JOIN customers c ON o.customer_id = c.id
-INNER JOIN products p  ON o.product_id  = p.id
-WHERE o.status = 'completed'
-GROUP BY c.name
-HAVING SUM(o.quantity * p.price) > (
-  SELECT AVG(customer_total) FROM (
-    SELECT SUM(o2.quantity * p2.price) AS customer_total
-    FROM orders o2
-    INNER JOIN products p2 ON o2.product_id = p2.id
-    WHERE o2.status = 'completed'
-    GROUP BY o2.customer_id
-  )
+    <pre><code class="language-sql">WITH customer_totals AS (
+  SELECT
+    c.name          AS customer_name,
+    SUM(o.quantity * p.price) AS total_spend
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id
+  INNER JOIN products p  ON o.product_id  = p.id
+  WHERE o.status = 'completed'
+  GROUP BY c.name
+),
+avg_spend AS (
+  SELECT AVG(total_spend) AS avg_total FROM customer_totals
 )
-ORDER BY total_spend DESC;</code></pre>
+SELECT
+  ct.customer_name,
+  ct.total_spend
+FROM customer_totals ct, avg_spend a
+WHERE ct.total_spend > a.avg_total
+ORDER BY ct.total_spend DESC;</code></pre>
     <div class="output">Eve Johnson    699.85
-Alice Chen     499.95
 Dave Kim       599.97
-Bob Martinez   499.93</div>
+Alice Chen     499.95
+Bob Martinez   499.93
+Grace Liu      499.93</div>
 
     <h3>IN Subquery: Customers Who Bought Software</h3>
     <p>Sometimes you want to filter by membership in a dynamically computed set. The <code>IN</code> subquery handles this cleanly.</p>
@@ -301,7 +311,7 @@ Grace Liu       APAC</div>
     <pre><code class="language-sql">WITH customer_spend AS (
   SELECT
     c.id,
-    c.name,
+    c.name AS customer_name,
     c.region,
     c.joined_date,
     SUM(o.quantity * p.price) AS lifetime_value,
@@ -313,7 +323,7 @@ Grace Liu       APAC</div>
   GROUP BY c.id, c.name, c.region, c.joined_date
 )
 SELECT
-  name,
+  customer_name,
   region,
   lifetime_value,
   order_count,
@@ -373,7 +383,7 @@ ORDER BY cohort_year;</code></pre>
     <p>Let's track how each customer's spend accumulates over time:</p>
 
     <pre><code class="language-sql">SELECT
-  c.name,
+  c.name AS customer_name,
   o.order_date,
   o.quantity * p.price AS line_total,
   SUM(o.quantity * p.price) OVER (
@@ -397,7 +407,7 @@ Eve Johnson    2024-01-30  199.99  699.85</div>
 
     <pre><code class="language-sql">WITH customer_spend AS (
   SELECT
-    c.name,
+    c.name AS customer_name,
     c.region,
     SUM(o.quantity * p.price) AS total_spend
   FROM orders o
@@ -407,7 +417,7 @@ Eve Johnson    2024-01-30  199.99  699.85</div>
   GROUP BY c.name, c.region
 )
 SELECT
-  name,
+  customer_name,
   region,
   total_spend,
   RANK()       OVER (ORDER BY total_spend DESC) AS rank,
