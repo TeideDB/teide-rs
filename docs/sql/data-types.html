@@ -76,6 +76,12 @@
       </thead>
       <tbody>
         <tr>
+          <td>SMALLINT</td>
+          <td>INT2</td>
+          <td>16-bit</td>
+          <td>Small signed integer</td>
+        </tr>
+        <tr>
           <td>INTEGER</td>
           <td>INT, INT4</td>
           <td>32-bit</td>
@@ -91,7 +97,7 @@
           <td>REAL</td>
           <td>DOUBLE, FLOAT, DOUBLE PRECISION</td>
           <td>64-bit</td>
-          <td>Floating-point number</td>
+          <td>Floating-point number (maps to F64 internally, not F32)</td>
         </tr>
       </tbody>
     </table>
@@ -156,8 +162,8 @@
         <tr>
           <td>TIME</td>
           <td></td>
-          <td>64-bit</td>
-          <td>Time of day</td>
+          <td>32-bit</td>
+          <td>Time of day (milliseconds since midnight)</td>
         </tr>
         <tr>
           <td>TIMESTAMP</td>
@@ -168,12 +174,59 @@
       </tbody>
     </table>
 
+    <h2>Temporal Literal Formats</h2>
+    <p>Temporal columns accept both string literals and raw integer values in INSERT statements:</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>String Format</th>
+          <th>Integer Meaning</th>
+          <th>Example</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>DATE</td>
+          <td><code>'YYYY-MM-DD'</code></td>
+          <td>Days since 2000-01-01</td>
+          <td><code>'2025-01-15'</code> or <code>9146</code></td>
+        </tr>
+        <tr>
+          <td>TIME</td>
+          <td><code>'HH:MM:SS[.mmm]'</code></td>
+          <td>Milliseconds since midnight</td>
+          <td><code>'12:30:00'</code> or <code>45000000</code></td>
+        </tr>
+        <tr>
+          <td>TIMESTAMP</td>
+          <td><code>'YYYY-MM-DD HH:MM:SS[.ffffff]'</code></td>
+          <td>Microseconds since 2000-01-01</td>
+          <td><code>'2025-01-15 09:30:00'</code></td>
+        </tr>
+      </tbody>
+    </table>
+    <pre><code class="language-sql">CREATE TABLE events (id INTEGER, name VARCHAR, event_date DATE, event_time TIME);
+INSERT INTO events VALUES (1, 'Launch', '2025-03-15', '09:00:00');
+INSERT INTO events VALUES (2, 'Update', '2025-06-01', '14:30:00');</code></pre>
+
     <h2>Type Casting</h2>
     <pre><code class="language-sql">-- CAST syntax
 SELECT CAST(42 AS REAL);
+SELECT CAST(3.14 AS INTEGER);
 
--- PostgreSQL :: shorthand
-SELECT 42::REAL;</code></pre>
+-- Temporal CAST from string literals
+SELECT CAST('2025-01-15' AS DATE);
+SELECT CAST('12:30:00' AS TIME);
+SELECT CAST('2025-01-15 09:30:00' AS TIMESTAMP);</code></pre>
+
+    <h2>NULL Representation</h2>
+    <p>Teide uses type-specific sentinel values for NULL:</p>
+    <ul>
+      <li>Float columns: NaN</li>
+      <li>Integer columns: 0</li>
+      <li>VARCHAR columns: empty string</li>
+    </ul>
 
     <nav class="page-nav">
       <a href="./" class="prev">SQL Overview</a>

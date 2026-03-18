@@ -502,6 +502,9 @@ git commit -m "feat: CAST string literals to DATE/TIME/TIMESTAMP"
 **Files:**
 - Modify: `docs/sql/data-types.html`
 
+- [x] Step 1: Make the edits to `docs/sql/data-types.html`
+- [x] Step 2: Commit
+
 **Changes:**
 - Add SMALLINT (I16) to numeric types table
 - Fix TIME storage: should say "32-bit" (ms as i32), not "64-bit"
