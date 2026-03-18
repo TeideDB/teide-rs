@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::{ffi, HnswIndex, Rel, Table};
+use crate::{ffi, sym_intern, Context, HnswIndex, Rel, Table};
 use sqlparser::ast as sql_ast;
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser as SqlParser;
@@ -11,7 +11,7 @@ use sqlparser::parser::Parser as SqlParser;
 /// Monotonic counter for unique temp file names.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 use super::pgq_parser::{CreatePropertyGraph as ParsedCPG, PgqStatement};
-use super::{ExecResult, Session, SqlError};
+use super::{ExecResult, Session, SqlError, StoredTable};
 
 /// Write CSV data to a secure temp file and read it back as a Table.
 /// Uses `create_new(true)` (O_CREAT|O_EXCL) to prevent symlink attacks:
@@ -115,7 +115,7 @@ impl KeyValue {
 }
 
 /// Which columns are visible in GRAPH_TABLE COLUMNS for this label.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ColumnVisibility {
     /// Default: all columns visible.
     All,
@@ -232,6 +232,9 @@ pub(crate) struct EdgePattern {
     /// Optional COST expression for weighted shortest path (Dijkstra).
     /// e.g. `COST e.weight` stores `"e.weight"`.
     pub cost_expr: Option<String>,
+    /// Optional WHERE filter on edge properties.
+    /// e.g. `[e:Knows WHERE e.since > 2020]` stores `"e.since > 2020"`.
+    pub filter: Option<String>,
 }
 
 /// A single path pattern: node-edge-node-edge-...-node
@@ -246,6 +249,7 @@ pub(crate) struct PathPattern {
 pub(crate) enum PathMode {
     Walk,        // default: all paths
     AnyShortest, // ANY SHORTEST
+    AllShortest, // ALL SHORTEST
 }
 
 /// A parsed MATCH clause.
@@ -452,16 +456,24 @@ pub(crate) fn execute_pgq(
             let n_edges: usize = parsed.edge_tables.len();
             let graph = build_property_graph(session, &parsed)?;
             session.graphs.insert(name.clone(), graph);
+            // Remove from pending if it was there
+            session.pending_graphs.remove(&name);
+            // Persist metadata to disk (best-effort; don't fail the DDL)
+            let _ = super::save_graph_metadata(&parsed);
             Ok(ExecResult::Ddl(format!(
                 "Created property graph '{name}' ({n_vertices} vertex labels, {n_edges} edge labels)"
             )))
         }
         PgqStatement::DropPropertyGraph { name, if_exists } => {
-            if session.graphs.remove(&name).is_some() {
+            let removed = session.graphs.remove(&name).is_some();
+            let pending_removed = session.pending_graphs.remove(&name).is_some();
+            if removed || pending_removed {
+                super::delete_graph_metadata(&name);
                 Ok(ExecResult::Ddl(format!(
                     "Dropped property graph '{name}'"
                 )))
             } else if if_exists {
+                super::delete_graph_metadata(&name);
                 Ok(ExecResult::Ddl(format!(
                     "Property graph '{name}' not found (skipped)"
                 )))
@@ -472,6 +484,10 @@ pub(crate) fn execute_pgq(
             }
         }
         PgqStatement::DescribePropertyGraph(name) => {
+            // Try loading from persisted metadata if not already built
+            if !session.graphs.contains_key(&name) {
+                session.try_load_pending_graph(&name);
+            }
             let graph = session.graphs.get(&name).ok_or_else(|| {
                 SqlError::Plan(format!("Property graph '{name}' not found"))
             })?;
@@ -756,6 +772,54 @@ fn merge_patterns(patterns: &[PathPattern]) -> Result<PathPattern, SqlError> {
 }
 
 /// Check whether any node in a pattern has multiple labels (label expression).
+/// Expand NOT label expressions (prefixed with `!`) to their complement.
+/// `!Bot` expands to all vertex labels in the graph except `Bot`.
+fn expand_not_labels(pattern: &PathPattern, graph: &PropertyGraph) -> Result<PathPattern, SqlError> {
+    let all_labels: Vec<String> = graph.vertex_labels.keys().cloned().collect();
+    let mut new_nodes = Vec::with_capacity(pattern.nodes.len());
+    for node in &pattern.nodes {
+        if let Some(labels) = &node.labels {
+            let mut expanded = Vec::new();
+            for label in labels {
+                if let Some(negated) = label.strip_prefix('!') {
+                    // Check that the negated label actually exists
+                    if !graph.vertex_labels.contains_key(negated) {
+                        return Err(SqlError::Plan(format!(
+                            "Negated vertex label '!{negated}' references unknown label '{negated}'"
+                        )));
+                    }
+                    // Add all labels except the negated one
+                    for l in &all_labels {
+                        if l != negated && !expanded.contains(l) {
+                            expanded.push(l.clone());
+                        }
+                    }
+                } else {
+                    if !expanded.contains(label) {
+                        expanded.push(label.clone());
+                    }
+                }
+            }
+            if expanded.is_empty() {
+                return Err(SqlError::Plan(
+                    "NOT label expression resolved to empty set".into()
+                ));
+            }
+            new_nodes.push(NodePattern {
+                variable: node.variable.clone(),
+                labels: Some(expanded),
+                filter: node.filter.clone(),
+            });
+        } else {
+            new_nodes.push(node.clone());
+        }
+    }
+    Ok(PathPattern {
+        nodes: new_nodes,
+        edges: pattern.edges.clone(),
+    })
+}
+
 fn has_multi_label_nodes(pattern: &PathPattern) -> bool {
     pattern.nodes.iter().any(|n| {
         n.labels.as_ref().map_or(false, |v| v.len() > 1)
@@ -843,6 +907,150 @@ fn union_result_tables(
     Ok((result, col_names))
 }
 
+/// Check if a COLUMNS expression is a simple `var.col` reference.
+fn is_simple_col_ref(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    // Simple: exactly one dot, no operators, no parens (except algorithm functions)
+    if let Some(dot_pos) = trimmed.find('.') {
+        let var = &trimmed[..dot_pos];
+        let col = &trimmed[dot_pos + 1..];
+        // Variable must be a simple identifier
+        let var_ok = var.chars().all(|c| c.is_alphanumeric() || c == '_');
+        // Column must be a simple identifier
+        let col_ok = col.chars().all(|c| c.is_alphanumeric() || c == '_');
+        var_ok && col_ok
+    } else {
+        // No dot — could be an algorithm function like PAGERANK(), vertices(p), etc.
+        // These are handled by existing code, not complex expressions.
+        true
+    }
+}
+
+/// Prepare COLUMNS for expression post-processing.
+/// Returns (effective_columns, post_process_info).
+/// If all columns are simple, returns the original columns and None.
+/// If any are complex, extracts referenced var.col columns and returns
+/// (expanded_simple_columns, Some(vec of (rewritten_expr, alias))).
+fn prepare_columns_for_expressions(
+    columns: &[ColumnEntry],
+) -> (Vec<ColumnEntry>, Option<Vec<(String, String)>>) {
+    let has_complex = columns.iter().any(|c| !is_simple_col_ref(&c.expr));
+    if !has_complex {
+        return (columns.to_vec(), None);
+    }
+
+    let mut simple_columns: Vec<ColumnEntry> = Vec::new();
+    let mut seen_cols: HashSet<String> = HashSet::new();
+    let mut post_process: Vec<(String, String)> = Vec::new();
+
+    // Use qualified names (var_col) to avoid collisions (a.name vs b.name).
+    fn qualified_name(var: &str, col: &str) -> String {
+        format!("{}_{}", var.to_lowercase(), col.to_lowercase())
+    }
+
+    for entry in columns {
+        let alias = entry.alias.clone().unwrap_or_else(|| entry.expr.clone());
+
+        if is_simple_col_ref(&entry.expr) {
+            // Simple var.col — add directly with qualified alias
+            let col_key = entry.expr.to_lowercase();
+            if !seen_cols.contains(&col_key) {
+                seen_cols.insert(col_key.clone());
+                if let Some(dot_pos) = entry.expr.find('.') {
+                    let var = entry.expr[..dot_pos].trim();
+                    let col = entry.expr[dot_pos + 1..].trim();
+                    let qname = qualified_name(var, col);
+                    simple_columns.push(ColumnEntry {
+                        expr: entry.expr.clone(),
+                        alias: Some(qname.clone()),
+                    });
+                } else {
+                    simple_columns.push(entry.clone());
+                }
+            }
+            // In post-processing, reference the qualified column name
+            if let Some(dot_pos) = entry.expr.find('.') {
+                let var = entry.expr[..dot_pos].trim();
+                let col = entry.expr[dot_pos + 1..].trim();
+                let qname = qualified_name(var, col);
+                post_process.push((qname, alias));
+            } else {
+                post_process.push((entry.expr.clone(), alias));
+            }
+        } else {
+            // Complex expression — extract all var.col references
+            let refs = extract_var_col_refs(&entry.expr);
+            for (var, col) in &refs {
+                let full = format!("{var}.{col}");
+                let key = full.to_lowercase();
+                if !seen_cols.contains(&key) {
+                    seen_cols.insert(key);
+                    let qname = qualified_name(var, col);
+                    simple_columns.push(ColumnEntry {
+                        expr: full,
+                        alias: Some(qname),
+                    });
+                }
+            }
+            // Rewrite expression: replace var.col with qualified name
+            let mut rewritten = entry.expr.clone();
+            for (var, col) in &refs {
+                let pattern = format!("{var}.{col}");
+                let qname = qualified_name(var, col);
+                rewritten = rewritten.replace(&pattern, &qname);
+                // Also handle case variations
+                let pattern_lower = pattern.to_lowercase();
+                if pattern_lower != pattern {
+                    rewritten = rewritten.replace(&pattern_lower, &qname);
+                }
+            }
+            post_process.push((rewritten, alias));
+        }
+    }
+
+    (simple_columns, Some(post_process))
+}
+
+/// Extract all `var.col` references from an expression string.
+fn extract_var_col_refs(expr: &str) -> Vec<(String, String)> {
+    let mut refs = Vec::new();
+    let mut seen = HashSet::new();
+    // Simple regex-like scan: look for identifier.identifier patterns
+    let chars: Vec<char> = expr.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        // Skip non-identifier chars
+        if !chars[i].is_alphabetic() && chars[i] != '_' {
+            i += 1;
+            continue;
+        }
+        // Read identifier
+        let start = i;
+        while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+            i += 1;
+        }
+        let var = &expr[start..i];
+        // Check for dot
+        if i < len && chars[i] == '.' {
+            i += 1; // skip dot
+            let col_start = i;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if i > col_start {
+                let col = &expr[col_start..i];
+                let key = format!("{}.{}", var.to_lowercase(), col.to_lowercase());
+                if !seen.contains(&key) {
+                    seen.insert(key);
+                    refs.push((var.to_string(), col.to_string()));
+                }
+            }
+        }
+    }
+    refs
+}
+
 /// Plan and execute a GRAPH_TABLE expression.
 /// Returns the result table with the requested COLUMNS.
 pub(crate) fn plan_graph_table(
@@ -870,6 +1078,10 @@ pub(crate) fn plan_graph_table(
     } else {
         &match_clause.patterns[0]
     };
+
+    // Expand NOT labels (e.g. !Bot) to their complement before multi-label expansion.
+    let pattern = expand_not_labels(pattern, graph)?;
+    let pattern = &pattern;
 
     // If any node has a multi-label expression (e.g. Person|Company), expand
     // into separate single-label patterns and union the results.
@@ -911,6 +1123,21 @@ pub(crate) fn plan_graph_table(
         return union_result_tables(session, results);
     }
 
+    // Check for complex expressions in COLUMNS and handle them via post-processing.
+    // A "simple" expression is `var.col` format; anything else (arithmetic, functions)
+    // is complex and needs a SQL post-processing pass.
+    let (effective_columns, post_process) = prepare_columns_for_expressions(&expr.columns);
+    let effective_expr = if post_process.is_some() {
+        GraphTableExpr {
+            graph_name: expr.graph_name.clone(),
+            match_clause: expr.match_clause.clone(),
+            columns: effective_columns,
+        }
+    } else {
+        expr.clone()
+    };
+    let expr = &effective_expr;
+
     // Check for variable-length edge first.
     let is_var_length = pattern.edges.len() == 1
         && !matches!(pattern.edges[0].quantifier, PathQuantifier::One);
@@ -933,17 +1160,38 @@ pub(crate) fn plan_graph_table(
                     .into(),
             ));
         }
+        // Note: cheapest path bypasses post-processing (no complex COLUMNS support yet)
         return plan_cheapest_path(session, graph, pattern, &expr.columns);
     }
 
-    match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
+    let result = match (pattern.nodes.len(), pattern.edges.len(), match_clause.mode) {
         // ANY SHORTEST always uses the shortest-path planner (supports dst filters,
         // _node/_depth columns).
         (2, 1, PathMode::AnyShortest) if !is_cyclic_binding => {
-            plan_shortest_path(session, graph, pattern, &expr.columns)
+            plan_shortest_path(session, graph, pattern, &expr.columns, &PathMode::AnyShortest)
+        }
+        (2, 1, PathMode::AllShortest) if !is_cyclic_binding => {
+            plan_shortest_path(session, graph, pattern, &expr.columns, &PathMode::AllShortest)
         }
         (2, 1, PathMode::Walk) if is_var_length && !is_cyclic_binding => {
-            plan_var_length(session, graph, pattern, &expr.columns)
+            // Check if COLUMNS reference edge properties — the C var_expand doesn't
+            // support edge property access, so route to the Rust BFS planner instead.
+            let needs_edge_props = {
+                let edge_var = pattern.edges[0].variable.as_deref();
+                edge_var.is_some() && expr.columns.iter().any(|c| {
+                    if let Some(dot_pos) = c.expr.find('.') {
+                        let var = c.expr[..dot_pos].trim().to_lowercase();
+                        var == edge_var.unwrap().to_lowercase()
+                    } else {
+                        false
+                    }
+                })
+            };
+            if needs_edge_props {
+                plan_multi_hop_variable(session, graph, pattern, &expr.columns, &match_clause.mode)
+            } else {
+                plan_var_length(session, graph, pattern, &expr.columns)
+            }
         }
         (2, 1, PathMode::Walk) if !is_var_length && !is_cyclic_binding => {
             plan_single_hop(session, graph, pattern, &expr.columns)
@@ -966,7 +1214,29 @@ pub(crate) fn plan_graph_table(
                 pattern.edges.len()
             )))
         }
+    };
+
+    // Post-process complex expressions if needed
+    if let (Ok((table, col_names)), Some(post)) = (&result, &post_process) {
+        let result_table = table.with_column_names(&col_names)?;
+        // Build SELECT with original expressions, replacing var.col with bare col names
+        let mut select_parts: Vec<String> = Vec::new();
+        for (sql_expr, alias) in post {
+            select_parts.push(format!("{sql_expr} AS \"{alias}\""));
+        }
+        let sql = format!("SELECT {} FROM __pgq_post_tmp", select_parts.join(", "));
+        // Execute via plan_and_execute with the result registered as a temp table
+        let mut temp_tables = session.tables.clone();
+        temp_tables.insert("__pgq_post_tmp".to_string(), StoredTable {
+            table: result_table,
+            columns: col_names.clone(),
+            embedding_dims: HashMap::new(),
+        });
+        let post_result = super::planner::plan_and_execute(&session.ctx, &sql, Some(&temp_tables))?;
+        return Ok((post_result.table, post_result.columns));
     }
+
+    result
 }
 
 /// Plan a single-hop MATCH: (a:Label)-[e:Label]->(b:Label)
@@ -980,13 +1250,8 @@ fn plan_single_hop(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    // Resolve edge label
-    let edge_label = edge.label.as_deref().ok_or_else(|| {
-        SqlError::Plan("Edge pattern must specify a label: -[:Label]->".into())
-    })?;
-    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
-    })?;
+    // Resolve edge label (supports anonymous edges when graph has a single label)
+    let (edge_label, stored_rel) = resolve_edge_label(edge, graph, "Single-hop pattern")?;
 
     // For reverse edges, the left node in the pattern is the edge destination
     // and the right node is the edge source, so swap the default table references.
@@ -1039,7 +1304,7 @@ fn plan_single_hop(
 
     // Determine source node row indices
     let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
-        resolve_filtered_node_ids(filter_text, src_node, src_stored)?
+        resolve_filtered_node_ids(filter_text, src_node, src_stored, Some(session))?
     } else {
         let nrows = checked_logical_nrows(src_stored)?;
         (0..nrows as i64).collect()
@@ -1065,6 +1330,13 @@ fn plan_single_hop(
     // Post-filter destination node
     let expand_result = if let Some(filter_text) = &dst_node.filter {
         post_filter_expand_result(session, &expand_result, filter_text, dst_node, &dst_stored.table, false)?
+    } else {
+        expand_result
+    };
+
+    // Post-filter by edge properties
+    let expand_result = if let Some(filter_text) = &edge.filter {
+        post_filter_expand_by_edge(session, &expand_result, filter_text, edge, stored_rel, is_reverse)?
     } else {
         expand_result
     };
@@ -1194,6 +1466,56 @@ fn post_filter_expand_result(
     csv_to_table(session, &csv, &["_src".to_string(), "_dst".to_string()])
 }
 
+/// Post-filter expand result by edge properties.
+///
+/// For each (src, dst) pair in the expand result, looks up the edge row(s) in
+/// the edge table via `edge_row_map` and evaluates the filter expression.
+/// Keeps only rows where at least one matching edge row passes the filter.
+fn post_filter_expand_by_edge(
+    session: &Session,
+    expand_result: &Table,
+    filter_text: &str,
+    edge: &EdgePattern,
+    stored_rel: &StoredRel,
+    is_reverse: bool,
+) -> Result<Table, SqlError> {
+    let expr = parse_filter_expr(filter_text)?;
+    let var_name = edge.variable.as_deref().unwrap_or("");
+    let nrows = checked_nrows(expand_result)?;
+    let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+    })?;
+
+    let src_col = find_col_idx(expand_result, "_src")
+        .ok_or_else(|| SqlError::Plan("expand result missing _src column".into()))?;
+    let dst_col = find_col_idx(expand_result, "_dst")
+        .ok_or_else(|| SqlError::Plan("expand result missing _dst column".into()))?;
+
+    let mut csv = String::from("_src,_dst\n");
+    for row in 0..nrows {
+        let src_val = expand_result.get_i64(src_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _src at row {row}")))?;
+        let dst_val = expand_result.get_i64(dst_col, row)
+            .ok_or_else(|| SqlError::Plan(format!("NULL _dst at row {row}")))?;
+        // Edge row map uses (actual_src, actual_dst) in the original CSR direction
+        let edge_key = if is_reverse { (dst_val, src_val) } else { (src_val, dst_val) };
+        if let Some(edge_rows) = stored_rel.edge_row_map.get(&edge_key) {
+            let mut any_match = false;
+            for &edge_row in edge_rows {
+                if evaluate_filter(&expr, &edge_table.table, edge_row, var_name)?.unwrap_or(false) {
+                    any_match = true;
+                    break;
+                }
+            }
+            if any_match {
+                csv.push_str(&format!("{src_val},{dst_val}\n"));
+            }
+        }
+    }
+
+    csv_to_table(session, &csv, &["_src".to_string(), "_dst".to_string()])
+}
+
 /// Build a 1-column table of I64 row indices for use as expand input.
 fn build_rowid_table(session: &Session, ids: &[i64]) -> Result<Table, SqlError> {
     let mut csv = String::from("_rowid\n");
@@ -1229,6 +1551,42 @@ fn resolve_node_label<'a>(
                     "No vertex label found for table '{default_table}'"
                 ))
             })
+    }
+}
+
+/// Resolve the edge label from an `EdgePattern`.
+///
+/// If the edge has an explicit label, it is looked up directly.
+/// If the edge has no label (anonymous edge, e.g. `(a)-[]->(b)`), the function
+/// auto-selects the sole edge label in the graph, or returns an error if the
+/// graph has zero or multiple edge labels (ambiguous).
+fn resolve_edge_label<'a>(
+    edge: &'a EdgePattern,
+    graph: &'a PropertyGraph,
+    context: &str,
+) -> Result<(&'a str, &'a StoredRel), SqlError> {
+    if let Some(label) = edge.label.as_deref() {
+        let stored_rel = graph.edge_labels.get(label).ok_or_else(|| {
+            SqlError::Plan(format!("Edge label '{label}' not found in graph"))
+        })?;
+        Ok((label, stored_rel))
+    } else {
+        // Anonymous edge: auto-select if exactly one edge label exists.
+        if graph.edge_labels.len() == 1 {
+            let (label, stored_rel) = graph.edge_labels.iter().next().unwrap();
+            Ok((label.as_str(), stored_rel))
+        } else if graph.edge_labels.is_empty() {
+            Err(SqlError::Plan(format!(
+                "{context}: graph has no edge labels"
+            )))
+        } else {
+            let available: Vec<&str> = graph.edge_labels.keys().map(|s| s.as_str()).collect();
+            Err(SqlError::Plan(format!(
+                "{context}: anonymous edge is ambiguous — graph has multiple edge labels: {}. \
+                 Specify a label: -[:Label]->",
+                available.join(", ")
+            )))
+        }
     }
 }
 
@@ -1345,12 +1703,7 @@ fn project_columns(
                 col_specs.push(ColSpec::Node { table_col_idx: col_idx, is_src: false });
             } else if edge_var.is_some() && var == edge_var.unwrap() {
                 // Edge variable: look up property from edge table
-                let edge_label_name = edge_pattern.label.as_deref().ok_or_else(|| {
-                    SqlError::Plan("Edge variable requires a label to access properties".into())
-                })?;
-                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
-                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
-                })?;
+                let (edge_label_name, stored_rel) = resolve_edge_label(edge_pattern, graph, "Edge property access")?;
                 // Check PROPERTIES visibility for edge label
                 check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
@@ -2132,14 +2485,133 @@ fn evaluate_filter(
     }
 }
 
+/// Resolve subqueries in a PGQ WHERE expression.
+/// Walks the expression tree and replaces:
+/// - InSubquery → InList (executes subquery, collects values)
+/// - Exists → Value(Boolean)
+/// - Subquery → literal value
+fn resolve_pgq_subqueries(
+    session: &Session,
+    expr: sql_ast::Expr,
+) -> Result<sql_ast::Expr, SqlError> {
+    use sql_ast::{Expr, Value};
+    match expr {
+        Expr::InSubquery { expr: inner, subquery, negated } => {
+            let sql = subquery.to_string();
+            let result = super::planner::plan_and_execute(
+                &session.ctx, &sql, Some(&session.tables),
+            )?;
+            if result.columns.len() != 1 {
+                return Err(SqlError::Plan(format!(
+                    "IN subquery must return exactly 1 column, got {}",
+                    result.columns.len()
+                )));
+            }
+            let nrows = result.nrows;
+            let mut values = Vec::with_capacity(nrows);
+            let col_type = result.table.col_type(0);
+            for r in 0..nrows {
+                match col_type {
+                    4..=6 => {
+                        if let Some(v) = result.table.get_i64(0, r) {
+                            values.push(Expr::Value(Value::Number(v.to_string(), false)));
+                        }
+                    }
+                    7 => {
+                        if let Some(v) = result.table.get_f64(0, r) {
+                            values.push(Expr::Value(Value::Number(v.to_string(), false)));
+                        }
+                    }
+                    20 => {
+                        if let Some(s) = result.table.get_str(0, r) {
+                            values.push(Expr::Value(Value::SingleQuotedString(s.to_string())));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let resolved_inner = resolve_pgq_subqueries(session, *inner)?;
+            Ok(Expr::InList {
+                expr: Box::new(resolved_inner),
+                list: values,
+                negated,
+            })
+        }
+        Expr::Exists { subquery, negated } => {
+            let sql = subquery.to_string();
+            let result = super::planner::plan_and_execute(
+                &session.ctx, &sql, Some(&session.tables),
+            )?;
+            let exists = result.nrows > 0;
+            Ok(Expr::Value(Value::Boolean(exists ^ negated)))
+        }
+        Expr::Subquery(subquery) => {
+            let sql = subquery.to_string();
+            let result = super::planner::plan_and_execute(
+                &session.ctx, &sql, Some(&session.tables),
+            )?;
+            if result.columns.len() != 1 || result.nrows != 1 {
+                return Err(SqlError::Plan(
+                    "Scalar subquery must return exactly 1 column and 1 row".into(),
+                ));
+            }
+            let col_type = result.table.col_type(0);
+            match col_type {
+                4..=6 => {
+                    if let Some(v) = result.table.get_i64(0, 0) {
+                        Ok(Expr::Value(Value::Number(v.to_string(), false)))
+                    } else {
+                        Ok(Expr::Value(Value::Null))
+                    }
+                }
+                7 => {
+                    if let Some(v) = result.table.get_f64(0, 0) {
+                        Ok(Expr::Value(Value::Number(v.to_string(), false)))
+                    } else {
+                        Ok(Expr::Value(Value::Null))
+                    }
+                }
+                20 => {
+                    if let Some(s) = result.table.get_str(0, 0) {
+                        Ok(Expr::Value(Value::SingleQuotedString(s.to_string())))
+                    } else {
+                        Ok(Expr::Value(Value::Null))
+                    }
+                }
+                _ => Ok(Expr::Value(Value::Null)),
+            }
+        }
+        // Recurse into compound expressions
+        Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
+            left: Box::new(resolve_pgq_subqueries(session, *left)?),
+            op,
+            right: Box::new(resolve_pgq_subqueries(session, *right)?),
+        }),
+        Expr::UnaryOp { op, expr: inner } => Ok(Expr::UnaryOp {
+            op,
+            expr: Box::new(resolve_pgq_subqueries(session, *inner)?),
+        }),
+        Expr::Nested(inner) => Ok(Expr::Nested(
+            Box::new(resolve_pgq_subqueries(session, *inner)?)
+        )),
+        // Leaf nodes pass through unchanged
+        other => Ok(other),
+    }
+}
+
 /// Resolve all row indices in a vertex table that match a WHERE filter.
 /// Returns the matching row indices.
 fn resolve_filtered_node_ids(
     filter_text: &str,
     node: &NodePattern,
     stored: &super::StoredTable,
+    session: Option<&Session>,
 ) -> Result<Vec<i64>, SqlError> {
-    let expr = parse_filter_expr(filter_text)?;
+    let mut expr = parse_filter_expr(filter_text)?;
+    // Resolve subqueries (IN (SELECT ...), EXISTS, etc.) if session is available
+    if let Some(sess) = session {
+        expr = resolve_pgq_subqueries(sess, expr)?;
+    }
     let var = node.variable.as_deref().unwrap_or("");
     let nrows = checked_logical_nrows(stored)?;
     let mut matching = Vec::new();
@@ -2172,6 +2644,10 @@ struct BfsResult {
     node_ids: Vec<Vec<i64>>,
     /// Total path length (sum of hops across all segments) per result row.
     path_lengths: Vec<i64>,
+    /// `segment_paths[seg_idx][row]` = full node sequence within that segment.
+    /// E.g. for a 3-hop segment: [start, hop1, hop2, end].
+    /// Used for edge property access on variable-length edges.
+    segment_paths: Vec<Vec<Vec<i64>>>,
     /// Number of result rows.
     nrows: usize,
 }
@@ -2199,6 +2675,7 @@ fn multi_segment_bfs(
 
     let mut result_node_ids: Vec<Vec<i64>> = vec![Vec::new(); n_positions];
     let mut result_path_lengths: Vec<i64> = Vec::new();
+    let mut result_seg_paths: Vec<Vec<Vec<i64>>> = vec![Vec::new(); segments.len()];
     let mut nrows: usize = 0;
 
     // For AnyShortest: track minimum total_depth found so we can prune longer paths
@@ -2212,6 +2689,8 @@ fn multi_segment_bfs(
         depth_in_seg: u8,
         path: Vec<i64>,      // node IDs at position boundaries filled so far
         total_depth: i64,
+        /// Per-segment node sequences. seg_paths[seg_idx] = [start, hop1, ..., current].
+        seg_paths: Vec<Vec<i64>>,
     }
 
     let mut queue: VecDeque<BfsState> = VecDeque::new();
@@ -2221,12 +2700,15 @@ fn multi_segment_bfs(
     for &start in start_nodes {
         let mut path = vec![-1i64; n_positions];
         path[0] = start;
+        let mut seg_paths = vec![Vec::new(); segments.len()];
+        seg_paths[0] = vec![start];
         queue.push_back(BfsState {
             seg_idx: 0,
             node_id: start,
             depth_in_seg: 0,
             path,
             total_depth: 0,
+            seg_paths,
         });
         n_states += 1;
     }
@@ -2267,6 +2749,10 @@ fn multi_segment_bfs(
                         ids.push(exit_path[pos]);
                     }
                     result_path_lengths.push(state.total_depth);
+                    // Record segment paths
+                    for (seg_idx, seg_path) in state.seg_paths.iter().enumerate() {
+                        result_seg_paths[seg_idx].push(seg_path.clone());
+                    }
                     nrows += 1;
 
                     // Update best_depth for pruning (may not be globally minimal yet)
@@ -2281,12 +2767,15 @@ fn multi_segment_bfs(
                 // Transition to next segment at depth 0
                 // The node exiting segment[seg_idx] becomes the start of segment[next_position]
                 // It enters at depth_in_seg=0 with the same node_id.
+                let mut exit_seg_paths = state.seg_paths.clone();
+                exit_seg_paths[next_position] = vec![state.node_id];
                 queue.push_back(BfsState {
                     seg_idx: next_position,
                     node_id: state.node_id,
                     depth_in_seg: 0,
                     path: exit_path,
                     total_depth: state.total_depth,
+                    seg_paths: exit_seg_paths,
                 });
                 n_states += 1;
             }
@@ -2313,12 +2802,15 @@ fn multi_segment_bfs(
                          path quantifier range too wide. Try narrowing the hop range."
                     )));
                 }
+                let mut next_seg_paths = state.seg_paths.clone();
+                next_seg_paths[state.seg_idx].push(next_node);
                 queue.push_back(BfsState {
                     seg_idx: state.seg_idx,
                     node_id: next_node,
                     depth_in_seg: state.depth_in_seg + 1,
                     path: state.path.clone(),
                     total_depth: state.total_depth + 1,
+                    seg_paths: next_seg_paths,
                 });
                 n_states += 1;
             }
@@ -2339,14 +2831,19 @@ fn multi_segment_bfs(
         if keep.len() < nrows {
             let mut new_node_ids = vec![Vec::with_capacity(keep.len()); n_positions];
             let mut new_path_lengths = Vec::with_capacity(keep.len());
+            let mut new_seg_paths = vec![Vec::with_capacity(keep.len()); segments.len()];
             for &i in &keep {
                 for (pos, ids) in new_node_ids.iter_mut().enumerate() {
                     ids.push(result_node_ids[pos][i]);
                 }
                 new_path_lengths.push(result_path_lengths[i]);
+                for (seg_idx, sp) in new_seg_paths.iter_mut().enumerate() {
+                    sp.push(result_seg_paths[seg_idx][i].clone());
+                }
             }
             result_node_ids = new_node_ids;
             result_path_lengths = new_path_lengths;
+            result_seg_paths = new_seg_paths;
             nrows = keep.len();
         }
     }
@@ -2354,6 +2851,7 @@ fn multi_segment_bfs(
     Ok(BfsResult {
         node_ids: result_node_ids,
         path_lengths: result_path_lengths,
+        segment_paths: result_seg_paths,
         nrows,
     })
 }
@@ -2379,15 +2877,7 @@ fn plan_multi_hop_variable(
         let left_node = &nodes[i];
         let right_node = &nodes[i + 1];
 
-        let edge_label = edge.label.as_deref().ok_or_else(|| {
-            SqlError::Plan(format!(
-                "Edge {} in multi-hop pattern must specify a label: -[:Label]->",
-                i
-            ))
-        })?;
-        let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-            SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
-        })?;
+        let (edge_label, stored_rel) = resolve_edge_label(edge, graph, &format!("Edge {i} in multi-hop pattern"))?;
 
         // Determine left/right default tables based on edge direction
         let is_reverse = edge.direction == MatchDirection::Reverse;
@@ -2534,7 +3024,7 @@ fn plan_multi_hop_variable(
     })?;
 
     let start_nodes: Vec<i64> = if let Some(ref filter_text) = nodes[0].filter {
-        resolve_filtered_node_ids(filter_text, &nodes[0], first_src_stored)?
+        resolve_filtered_node_ids(filter_text, &nodes[0], first_src_stored, Some(session))?
     } else {
         let nrows = checked_logical_nrows(first_src_stored)?;
         (0..nrows as i64).collect()
@@ -2580,17 +3070,24 @@ fn plan_multi_hop_variable(
                 .map(|_| Vec::with_capacity(new_nrows))
                 .collect();
             let mut new_path_lengths = Vec::with_capacity(new_nrows);
+            let mut new_seg_paths: Vec<Vec<Vec<i64>>> = (0..bfs_result.segment_paths.len())
+                .map(|_| Vec::with_capacity(new_nrows))
+                .collect();
             for row in 0..bfs_result.nrows {
                 if keep[row] {
                     for (pos, ids) in bfs_result.node_ids.iter().enumerate() {
                         new_node_ids[pos].push(ids[row]);
                     }
                     new_path_lengths.push(bfs_result.path_lengths[row]);
+                    for (seg_idx, sp) in bfs_result.segment_paths.iter().enumerate() {
+                        new_seg_paths[seg_idx].push(sp[row].clone());
+                    }
                 }
             }
             BfsResult {
                 node_ids: new_node_ids,
                 path_lengths: new_path_lengths,
+                segment_paths: new_seg_paths,
                 nrows: new_nrows,
             }
         }
@@ -2616,6 +3113,8 @@ fn plan_multi_hop_variable(
     enum MhVarColKind {
         Property { var_idx: usize, table_col_idx: usize, table_name: String },
         EdgeProperty { edge_idx: usize, table_col_idx: usize, edge_label: String, is_reverse: bool },
+        /// Edge property on a variable-length segment — outputs a list of values.
+        VarEdgeProperty { edge_idx: usize, table_col_idx: usize, edge_label: String, is_reverse: bool },
         PathLength,
     }
     let mut col_names: Vec<String> = Vec::new();
@@ -2657,12 +3156,7 @@ fn plan_multi_hop_variable(
                 });
             } else if let Some(edge_idx) = edge_var_map.get(&var) {
                 let edge = &edges[*edge_idx];
-                let edge_label_name = edge.label.as_deref().ok_or_else(|| {
-                    SqlError::Plan("Edge variable requires a label to access properties".into())
-                })?;
-                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
-                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
-                })?;
+                let (edge_label_name, stored_rel) = resolve_edge_label(edge, graph, "Edge property access")?;
                 // Check PROPERTIES visibility for this edge label
                 check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
@@ -2675,14 +3169,24 @@ fn plan_multi_hop_variable(
                     ))
                 })?;
                 let is_reverse = edge.direction == MatchDirection::Reverse;
+                let is_var_edge = !matches!(edge.quantifier, PathQuantifier::One);
 
                 col_names.push(out_name);
-                col_specs.push(MhVarColKind::EdgeProperty {
-                    edge_idx: *edge_idx,
-                    table_col_idx,
-                    edge_label: edge_label_name.to_string(),
-                    is_reverse,
-                });
+                if is_var_edge {
+                    col_specs.push(MhVarColKind::VarEdgeProperty {
+                        edge_idx: *edge_idx,
+                        table_col_idx,
+                        edge_label: edge_label_name.to_string(),
+                        is_reverse,
+                    });
+                } else {
+                    col_specs.push(MhVarColKind::EdgeProperty {
+                        edge_idx: *edge_idx,
+                        table_col_idx,
+                        edge_label: edge_label_name.to_string(),
+                        is_reverse,
+                    });
+                }
             } else {
                 let mut available: Vec<_> = var_map.keys().collect();
                 available.extend(edge_var_map.keys());
@@ -2769,6 +3273,34 @@ fn plan_multi_hop_variable(
                     })?;
                     csv.push_str(&get_cell_string(&edge_table.table, *table_col_idx, edge_row)?);
                 }
+                MhVarColKind::VarEdgeProperty { edge_idx, table_col_idx, edge_label, is_reverse } => {
+                    // Variable-length edge: use segment_paths to get full node sequence
+                    let seg_path = &bfs_result.segment_paths[*edge_idx][row];
+                    let stored_rel = graph.edge_labels.get(edge_label.as_str()).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
+                    })?;
+                    let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
+                        SqlError::Plan(format!("Edge table '{}' not found", stored_rel.edge_label.table_name))
+                    })?;
+                    // Build list of property values for each hop
+                    let mut vals = Vec::new();
+                    for hop in 0..seg_path.len().saturating_sub(1) {
+                        let (edge_src, edge_dst) = if *is_reverse {
+                            (seg_path[hop + 1], seg_path[hop])
+                        } else {
+                            (seg_path[hop], seg_path[hop + 1])
+                        };
+                        if let Some(edge_rows) = stored_rel.edge_row_map.get(&(edge_src, edge_dst)) {
+                            let edge_row = edge_rows[0];
+                            vals.push(get_cell_string(&edge_table.table, *table_col_idx, edge_row)?);
+                        }
+                    }
+                    // Output as [val1, val2, ...] — quoted to preserve as single CSV field
+                    let list_str = format!("[{}]", vals.join(", "));
+                    csv.push('"');
+                    csv.push_str(&list_str);
+                    csv.push('"');
+                }
                 MhVarColKind::PathLength => {
                     csv.push_str(&bfs_result.path_lengths[row].to_string());
                 }
@@ -2808,15 +3340,7 @@ fn plan_multi_hop_fixed(
         let left_node = &nodes[i];
         let right_node = &nodes[i + 1];
 
-        let edge_label = edge.label.as_deref().ok_or_else(|| {
-            SqlError::Plan(format!(
-                "Edge {} in multi-hop pattern must specify a label: -[:Label]->",
-                i
-            ))
-        })?;
-        let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-            SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
-        })?;
+        let (edge_label, stored_rel) = resolve_edge_label(edge, graph, &format!("Edge {i} in multi-hop pattern"))?;
 
         // Determine left/right default tables based on edge direction
         let is_reverse = edge.direction == MatchDirection::Reverse;
@@ -3112,12 +3636,7 @@ fn plan_multi_hop_fixed(
                 });
             } else if let Some(edge_idx) = edge_var_map.get(&var) {
                 let edge = &edges[*edge_idx];
-                let edge_label_name = edge.label.as_deref().ok_or_else(|| {
-                    SqlError::Plan("Edge variable requires a label to access properties".into())
-                })?;
-                let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
-                    SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
-                })?;
+                let (edge_label_name, stored_rel) = resolve_edge_label(edge, graph, "Edge property access")?;
                 // Check PROPERTIES visibility for this edge label
                 check_column_visible(&stored_rel.edge_label.visibility, &col, edge_label_name)?;
                 let edge_table = session.tables.get(&stored_rel.edge_label.table_name).ok_or_else(|| {
@@ -3231,12 +3750,7 @@ fn plan_var_length(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    let edge_label = edge.label.as_deref().ok_or_else(|| {
-        SqlError::Plan("Edge pattern must specify a label".into())
-    })?;
-    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-        SqlError::Plan(format!("Edge label '{edge_label}' not found in graph"))
-    })?;
+    let (edge_label, stored_rel) = resolve_edge_label(edge, graph, "Variable-length pattern")?;
 
     // For reverse edges, swap default table/column references (same as plan_single_hop)
     let is_reverse = edge.direction == MatchDirection::Reverse;
@@ -3298,7 +3812,7 @@ fn plan_var_length(
         SqlError::Plan(format!("Table '{}' not found", src_label.table_name))
     })?;
     let src_row_indices: Vec<i64> = if let Some(filter_text) = &src_node.filter {
-        resolve_filtered_node_ids(filter_text, src_node, src_stored)?
+        resolve_filtered_node_ids(filter_text, src_node, src_stored, Some(session))?
     } else {
         let nrows = checked_logical_nrows(src_stored)?;
         (0..nrows as i64).collect()
@@ -3511,10 +4025,181 @@ enum SpColKind {
     Vertices,
     /// `edges(p)` — list of edge pairs along the path as text
     Edges,
+    /// `element_id(p)` — interleaved vertex+edge IDs: [v0, (v0,v1), v1, ...]
+    ElementId,
     /// Source variable property lookup — column index in the left vertex table
     SrcProp(usize),
     /// Destination variable property lookup — column index in the right vertex table
     DstProp(usize),
+}
+
+/// Atom type for building real TD_LIST columns.
+#[derive(Clone)]
+enum ListAtom {
+    Int(i64),
+    Sym(String),
+}
+
+/// Build a raw TD_LIST column (list-of-lists) from collected atom data.
+///
+/// Each entry in `data` is one row's sub-list of atoms.
+/// Returns a raw `td_t*` pointer owned by the caller.
+unsafe fn build_list_column_raw(data: &[Vec<ListAtom>]) -> Result<*mut ffi::td_t, SqlError> {
+    let mut col = ffi::td_list_new(data.len() as i64);
+    if col.is_null() || ffi::td_is_err(col) {
+        return Err(SqlError::Plan("Failed to create LIST column".into()));
+    }
+    for row_atoms in data {
+        let mut sub = ffi::td_list_new(row_atoms.len() as i64);
+        if sub.is_null() || ffi::td_is_err(sub) {
+            ffi::td_release(col);
+            return Err(SqlError::Plan("Failed to create sub-list".into()));
+        }
+        for atom in row_atoms {
+            let a = match atom {
+                ListAtom::Int(v) => ffi::td_i64(*v),
+                ListAtom::Sym(s) => {
+                    let id = sym_intern(s).map_err(|e| {
+                        SqlError::Plan(format!("sym_intern failed: {e}"))
+                    })?;
+                    ffi::td_sym(id)
+                }
+            };
+            if a.is_null() || ffi::td_is_err(a) {
+                ffi::td_release(sub);
+                ffi::td_release(col);
+                return Err(SqlError::Plan("Failed to create list atom".into()));
+            }
+            let next = ffi::td_list_append(sub, a);
+            if next.is_null() || ffi::td_is_err(next) {
+                ffi::td_release(sub);
+                ffi::td_release(col);
+                return Err(SqlError::Plan("Failed to append to sub-list".into()));
+            }
+            sub = next;
+        }
+        let next = ffi::td_list_append(col, sub);
+        if next.is_null() || ffi::td_is_err(next) {
+            ffi::td_release(col);
+            return Err(SqlError::Plan("Failed to append sub-list to column".into()));
+        }
+        col = next;
+    }
+    Ok(col)
+}
+
+/// Parse a text string like "[0, 1, (2, 3)]" into list atoms.
+fn parse_list_text(text: &str) -> Vec<ListAtom> {
+    let text = text.trim();
+    if !text.starts_with('[') || !text.ends_with(']') {
+        return vec![];
+    }
+    let inner = text[1..text.len() - 1].trim();
+    if inner.is_empty() {
+        return vec![];
+    }
+    // Split at top-level commas (respecting parentheses)
+    let mut elems = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                elems.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    elems.push(inner[start..].trim());
+    elems
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if let Ok(v) = s.parse::<i64>() {
+                ListAtom::Int(v)
+            } else {
+                ListAtom::Sym(s.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Convert text columns (TD_SYM with "[...]" values) to real TD_LIST columns.
+///
+/// Called after the wrapper SQL has executed, so sort/filter operations
+/// work on the text representation; only the final result gets real LIST columns.
+pub(crate) fn convert_text_to_list_columns(
+    table: &Table,
+    columns: &[String],
+    list_col_names: &HashSet<String>,
+) -> Result<Table, SqlError> {
+    let nrows = table.nrows() as usize;
+    let ncols = columns.len();
+
+    // Find list column indices
+    let list_indices: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| list_col_names.contains(name.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    if list_indices.is_empty() {
+        // Nothing to convert — build a copy of the table
+        return table.with_column_names(columns)
+            .map_err(|e| SqlError::Plan(format!("Table copy failed: {e}")));
+    }
+
+    // Parse text values for each list column
+    let mut list_data: Vec<Vec<Vec<ListAtom>>> = Vec::with_capacity(list_indices.len());
+    for &ci in &list_indices {
+        let mut col_data = Vec::with_capacity(nrows);
+        for row in 0..nrows {
+            let text = table.get_str(ci, row).unwrap_or_else(|| "[]".to_string());
+            col_data.push(parse_list_text(&text));
+        }
+        list_data.push(col_data);
+    }
+
+    // Build new table with LIST columns replacing text columns
+    unsafe {
+        let mut tbl = ffi::td_table_new(ncols as i64);
+        if tbl.is_null() || ffi::td_is_err(tbl) {
+            return Err(SqlError::Plan("Failed to create table for LIST conversion".into()));
+        }
+        for (i, name) in columns.iter().enumerate() {
+            let name_id = sym_intern(name)
+                .map_err(|e| SqlError::Plan(format!("sym_intern failed: {e}")))?;
+            if let Some(li_pos) = list_indices.iter().position(|&ci| ci == i) {
+                let list_col = build_list_column_raw(&list_data[li_pos])?;
+                let next = ffi::td_table_add_col(tbl, name_id, list_col);
+                if next.is_null() || ffi::td_is_err(next) {
+                    ffi::td_release(list_col);
+                    ffi::td_release(tbl);
+                    return Err(SqlError::Plan("Failed to add LIST column".into()));
+                }
+                tbl = next;
+            } else {
+                let col_ptr = ffi::td_table_get_col_idx(table.as_raw(), i as i64);
+                if col_ptr.is_null() || ffi::td_is_err(col_ptr) {
+                    ffi::td_release(tbl);
+                    return Err(SqlError::Plan("Failed to get column for LIST conversion".into()));
+                }
+                ffi::td_retain(col_ptr);
+                let next = ffi::td_table_add_col(tbl, name_id, col_ptr);
+                if next.is_null() || ffi::td_is_err(next) {
+                    ffi::td_release(col_ptr);
+                    ffi::td_release(tbl);
+                    return Err(SqlError::Plan("Failed to add column during LIST conversion".into()));
+                }
+                tbl = next;
+            }
+        }
+        Table::from_raw(tbl).map_err(|e| SqlError::Plan(format!("LIST conversion table failed: {e}")))
+    }
 }
 
 /// Parse the COLUMNS clause for a shortest-path query, producing column names
@@ -3541,6 +4226,9 @@ fn parse_sp_columns(
         if compact.starts_with("vertices(") {
             col_names.push(alias.unwrap_or("vertices").to_string());
             col_kinds.push(SpColKind::Vertices);
+        } else if compact.starts_with("element_id(") {
+            col_names.push(alias.unwrap_or("element_id").to_string());
+            col_kinds.push(SpColKind::ElementId);
         } else if compact.starts_with("edges(") {
             col_names.push(alias.unwrap_or("edges").to_string());
             col_kinds.push(SpColKind::Edges);
@@ -3622,17 +4310,13 @@ fn plan_shortest_path(
     graph: &PropertyGraph,
     pattern: &PathPattern,
     columns: &[ColumnEntry],
+    mode: &PathMode,
 ) -> Result<(Table, Vec<String>), SqlError> {
     let src_node = &pattern.nodes[0];
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    let edge_label = edge.label.as_deref().ok_or_else(|| {
-        SqlError::Plan("Edge pattern must specify a label".into())
-    })?;
-    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-        SqlError::Plan(format!("Edge label '{edge_label}' not found"))
-    })?;
+    let (edge_label, stored_rel) = resolve_edge_label(edge, graph, "Shortest path pattern")?;
 
     // For reverse edges, swap default table/column references
     let is_reverse = edge.direction == MatchDirection::Reverse;
@@ -3803,6 +4487,10 @@ fn plan_shortest_path(
                     // 0-hop: no edges
                     csv.push_str(&csv_quote("[]"));
                 }
+                SpColKind::ElementId => {
+                    // 0-hop: single node, no edges
+                    csv.push_str(&csv_quote(&format!("[{}]", src_key.to_csv())));
+                }
                 SpColKind::SrcProp(idx) => {
                     let t = left_stored.ok_or_else(|| {
                         SqlError::Plan(format!("Table '{left_table}' not found"))
@@ -3833,12 +4521,19 @@ fn plan_shortest_path(
         }
     };
 
-    // BFS over the CSR to find the shortest qualifying path
-    let mut path = reconstruct_shortest_path(
-        src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
-    )?;
+    // BFS over the CSR to find shortest path(s)
+    let all_paths = if *mode == PathMode::AllShortest {
+        reconstruct_all_shortest_paths(
+            src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
+        )?
+    } else {
+        let p = reconstruct_shortest_path(
+            src_id, dst_id, min_depth as i64, max_depth as i64, stored_rel, direction,
+        )?;
+        if p.is_empty() { vec![] } else { vec![p] }
+    };
 
-    if path.is_empty() {
+    if all_paths.is_empty() {
         // No path found → return empty result table with proper column names
         // so that the outer query can resolve column references (e.g. ORDER BY _depth).
         let src_var = src_node.variable.as_deref().unwrap_or("__src");
@@ -3854,16 +4549,19 @@ fn plan_shortest_path(
         return Ok((result, display_names));
     }
 
-    path.reverse(); // path is built backwards, reverse to get src -> dst order
+    // For AnyShortest, reconstruct_shortest_path returns a reversed path; AllShortest returns forward paths.
+    // Normalize: any-shortest path needs reversing.
+    let all_paths: Vec<Vec<i64>> = if *mode == PathMode::AllShortest {
+        all_paths
+    } else {
+        all_paths.into_iter().map(|mut p| { p.reverse(); p }).collect()
+    };
 
     // Parse COLUMNS clause
     let src_var = src_node.variable.as_deref().unwrap_or("__src");
     let dst_var = dst_node.variable.as_deref().unwrap_or("__dst");
     let (col_names, col_kinds) =
         parse_sp_columns(columns, src_var, dst_var, left_table, right_table, session, graph)?;
-
-    // Total path length = number of edges = number of nodes - 1
-    let total_path_length = if path.is_empty() { 0 } else { path.len() - 1 };
 
     // Pre-fetch table references for property lookups (only if needed)
     let left_stored = session.tables.get(left_table.as_str());
@@ -3876,102 +4574,102 @@ fn plan_shortest_path(
     let mut csv = csv_col_names.join(",");
     csv.push('\n');
 
-    let last_idx = path.len().saturating_sub(1);
-
-    // Pre-compute vertices(p) and edges(p) strings (constant per path).
-    // These are CSV-quoted because they contain commas.
     let needs_vertices = col_kinds.iter().any(|k| matches!(k, SpColKind::Vertices));
     let needs_edges = col_kinds.iter().any(|k| matches!(k, SpColKind::Edges));
-    let vertices_str = if needs_vertices {
-        let mut parts = Vec::with_capacity(path.len());
-        for (i, &nid) in path.iter().enumerate() {
-            let vl = if i == last_idx && right_vertex_label.is_some() {
+    let needs_element_id = col_kinds.iter().any(|k| matches!(k, SpColKind::ElementId));
+
+    // Helper closure: build path-level string columns for a given path.
+    let build_path_str = |path: &[i64], kind: &SpColKind| -> String {
+        let last_idx = path.len().saturating_sub(1);
+        let resolve_vl = |idx: usize| -> &VertexLabel {
+            if idx == last_idx && right_vertex_label.is_some() {
                 right_vertex_label.unwrap()
             } else {
                 left_vertex_label
-            };
-            parts.push(
-                vl.row_to_user
-                    .get(nid as usize)
-                    .map(|k| k.to_csv())
-                    .unwrap_or_else(|| nid.to_string()),
-            );
-        }
-        csv_quote(&format!("[{}]", parts.join(", ")))
-    } else {
-        String::new()
-    };
-    let edges_str = if needs_edges {
-        let mut parts = Vec::with_capacity(path.len().saturating_sub(1));
-        for i in 0..path.len().saturating_sub(1) {
-            let src_vl = if i == last_idx && right_vertex_label.is_some() {
-                right_vertex_label.unwrap()
-            } else {
-                left_vertex_label
-            };
-            let dst_vl = if i + 1 == last_idx && right_vertex_label.is_some() {
-                right_vertex_label.unwrap()
-            } else {
-                left_vertex_label
-            };
-            let sk = src_vl
-                .row_to_user
-                .get(path[i] as usize)
+            }
+        };
+        let resolve_key = |idx: usize| -> String {
+            let vl = resolve_vl(idx);
+            vl.row_to_user.get(path[idx] as usize)
                 .map(|k| k.to_csv())
-                .unwrap_or_else(|| path[i].to_string());
-            let dk = dst_vl
-                .row_to_user
-                .get(path[i + 1] as usize)
-                .map(|k| k.to_csv())
-                .unwrap_or_else(|| path[i + 1].to_string());
-            parts.push(format!("({sk}, {dk})"));
+                .unwrap_or_else(|| path[idx].to_string())
+        };
+        match kind {
+            SpColKind::Vertices => {
+                let parts: Vec<String> = (0..path.len()).map(|i| resolve_key(i)).collect();
+                csv_quote(&format!("[{}]", parts.join(", ")))
+            }
+            SpColKind::Edges => {
+                let parts: Vec<String> = (0..path.len().saturating_sub(1))
+                    .map(|i| format!("({}, {})", resolve_key(i), resolve_key(i + 1)))
+                    .collect();
+                csv_quote(&format!("[{}]", parts.join(", ")))
+            }
+            SpColKind::ElementId => {
+                let mut parts: Vec<String> = Vec::with_capacity(path.len() * 2);
+                for i in 0..path.len() {
+                    let key = resolve_key(i);
+                    parts.push(key.clone());
+                    if i < last_idx {
+                        let next_key = resolve_key(i + 1);
+                        parts.push(format!("({key}, {next_key})"));
+                    }
+                }
+                csv_quote(&format!("[{}]", parts.join(", ")))
+            }
+            _ => String::new(),
         }
-        csv_quote(&format!("[{}]", parts.join(", ")))
-    } else {
-        String::new()
     };
 
-    for (depth, &node_id) in path.iter().enumerate() {
-        // For single-hop heterogeneous edges, the last node in the path
-        // belongs to the right (destination) table and needs a different
-        // vertex label for correct key decoding.
-        let vl = if depth == last_idx && right_vertex_label.is_some() {
-            right_vertex_label.unwrap()
-        } else {
-            left_vertex_label
-        };
-        let decode_table = if depth == last_idx && right_vertex_label.is_some() {
-            right_table
-        } else {
-            left_table
-        };
-        let user_key = vl.row_to_user.get(node_id as usize)
-            .ok_or_else(|| SqlError::Plan(format!(
-                "Row index {node_id} out of bounds in vertex table '{decode_table}'"
-            )))?;
-        for (i, kind) in col_kinds.iter().enumerate() {
-            if i > 0 { csv.push(','); }
-            match kind {
-                SpColKind::Node => csv.push_str(&user_key.to_csv()),
-                SpColKind::Depth => csv.push_str(&depth.to_string()),
-                SpColKind::PathLength => csv.push_str(&total_path_length.to_string()),
-                SpColKind::Vertices => csv.push_str(&vertices_str),
-                SpColKind::Edges => csv.push_str(&edges_str),
-                SpColKind::SrcProp(idx) => {
-                    let t = left_stored.ok_or_else(|| {
-                        SqlError::Plan(format!("Table '{left_table}' not found"))
-                    })?;
-                    csv.push_str(&get_cell_string(&t.table, *idx, src_id as usize)?);
-                }
-                SpColKind::DstProp(idx) => {
-                    let t = right_stored.ok_or_else(|| {
-                        SqlError::Plan(format!("Table '{right_table}' not found"))
-                    })?;
-                    csv.push_str(&get_cell_string(&t.table, *idx, dst_id as usize)?);
+    for path in &all_paths {
+        let last_idx = path.len().saturating_sub(1);
+        let total_path_length = if path.is_empty() { 0 } else { path.len() - 1 };
+
+        // Pre-compute path-level string columns
+        let vertices_str = if needs_vertices { build_path_str(path, &SpColKind::Vertices) } else { String::new() };
+        let edges_str = if needs_edges { build_path_str(path, &SpColKind::Edges) } else { String::new() };
+        let element_id_str = if needs_element_id { build_path_str(path, &SpColKind::ElementId) } else { String::new() };
+
+        for (depth, &node_id) in path.iter().enumerate() {
+            let vl = if depth == last_idx && right_vertex_label.is_some() {
+                right_vertex_label.unwrap()
+            } else {
+                left_vertex_label
+            };
+            let decode_table = if depth == last_idx && right_vertex_label.is_some() {
+                right_table
+            } else {
+                left_table
+            };
+            let user_key = vl.row_to_user.get(node_id as usize)
+                .ok_or_else(|| SqlError::Plan(format!(
+                    "Row index {node_id} out of bounds in vertex table '{decode_table}'"
+                )))?;
+            for (i, kind) in col_kinds.iter().enumerate() {
+                if i > 0 { csv.push(','); }
+                match kind {
+                    SpColKind::Node => csv.push_str(&user_key.to_csv()),
+                    SpColKind::Depth => csv.push_str(&depth.to_string()),
+                    SpColKind::PathLength => csv.push_str(&total_path_length.to_string()),
+                    SpColKind::Vertices => csv.push_str(&vertices_str),
+                    SpColKind::Edges => csv.push_str(&edges_str),
+                    SpColKind::ElementId => csv.push_str(&element_id_str),
+                    SpColKind::SrcProp(idx) => {
+                        let t = left_stored.ok_or_else(|| {
+                            SqlError::Plan(format!("Table '{left_table}' not found"))
+                        })?;
+                        csv.push_str(&get_cell_string(&t.table, *idx, src_id as usize)?);
+                    }
+                    SpColKind::DstProp(idx) => {
+                        let t = right_stored.ok_or_else(|| {
+                            SqlError::Plan(format!("Table '{right_table}' not found"))
+                        })?;
+                        csv.push_str(&get_cell_string(&t.table, *idx, dst_id as usize)?);
+                    }
                 }
             }
+            csv.push('\n');
         }
-        csv.push('\n');
     }
 
     let result = csv_to_table(session, &csv, &col_names)?;
@@ -4000,12 +4698,7 @@ fn plan_cheapest_path(
     let edge = &pattern.edges[0];
     let dst_node = &pattern.nodes[1];
 
-    let edge_label = edge.label.as_deref().ok_or_else(|| {
-        SqlError::Plan("Edge pattern must specify a label for COST queries".into())
-    })?;
-    let stored_rel = graph.edge_labels.get(edge_label).ok_or_else(|| {
-        SqlError::Plan(format!("Edge label '{edge_label}' not found"))
-    })?;
+    let (_edge_label, stored_rel) = resolve_edge_label(edge, graph, "COST pattern")?;
 
     // Dijkstra requires same src/dst vertex table (CSR constraint).
     if stored_rel.edge_label.src_ref_table != stored_rel.edge_label.dst_ref_table {
@@ -4273,6 +4966,93 @@ fn reconstruct_shortest_path(
     Ok(Vec::new()) // no path found → empty result
 }
 
+/// Reconstruct ALL shortest paths using BFS with multi-predecessor tracking.
+/// Returns a Vec of paths, each a Vec of row indices (in forward order, src to dst).
+fn reconstruct_all_shortest_paths(
+    src_id: i64,
+    dst_id: i64,
+    min_depth: i64,
+    max_depth: i64,
+    stored_rel: &StoredRel,
+    direction: u8,
+) -> Result<Vec<Vec<i64>>, SqlError> {
+    use std::collections::{HashMap as HM, VecDeque};
+
+    const MAX_BFS_STATES: usize = 1_000_000;
+    // BFS with multi-predecessor: pred_map stores ALL predecessors at each (node, depth)
+    let mut dist: HM<(i64, i64), ()> = HM::new();
+    let mut pred_map: HM<(i64, i64), Vec<i64>> = HM::new();
+    dist.insert((src_id, 0), ());
+    let mut frontier = VecDeque::new();
+    frontier.push_back((src_id, 0i64));
+    let mut found_depth: Option<i64> = None;
+
+    while let Some((node, depth)) = frontier.pop_front() {
+        if dist.len() > MAX_BFS_STATES {
+            return Err(SqlError::Plan(format!(
+                "ALL SHORTEST BFS exceeded {MAX_BFS_STATES} states"
+            )));
+        }
+        // If we already found dst at some depth, don't go deeper
+        if let Some(fd) = found_depth {
+            if depth > fd { break; }
+        }
+        if node == dst_id && depth >= min_depth {
+            found_depth = Some(depth);
+            // Don't expand further from dst, but continue processing the frontier at same depth
+            continue;
+        }
+        if depth >= max_depth { continue; }
+
+        let neighbors = if direction == 2 {
+            let fwd = stored_rel.rel.neighbors(node, 0);
+            let rev = stored_rel.rel.neighbors(node, 1);
+            let mut merged = Vec::with_capacity(fwd.len() + rev.len());
+            merged.extend_from_slice(fwd);
+            merged.extend_from_slice(rev);
+            merged
+        } else {
+            stored_rel.rel.neighbors(node, direction).to_vec()
+        };
+        for &next in &neighbors {
+            let next_depth = depth + 1;
+            let key = (next, next_depth);
+            pred_map.entry(key).or_default().push(node);
+            if !dist.contains_key(&key) {
+                dist.insert(key, ());
+                frontier.push_back((next, next_depth));
+            }
+        }
+    }
+
+    let Some(target_depth) = found_depth else {
+        return Ok(Vec::new());
+    };
+
+    // DFS backward through pred_map to enumerate all paths
+    let mut all_paths: Vec<Vec<i64>> = Vec::new();
+    let mut stack: Vec<(i64, i64, Vec<i64>)> = vec![(dst_id, target_depth, vec![dst_id])];
+    while let Some((node, depth, partial)) = stack.pop() {
+        if depth == 0 {
+            if node == src_id {
+                let mut path = partial;
+                path.reverse();
+                all_paths.push(path);
+            }
+            continue;
+        }
+        if let Some(preds) = pred_map.get(&(node, depth)) {
+            for &pred in preds {
+                let mut new_partial = partial.clone();
+                new_partial.push(pred);
+                stack.push((pred, depth - 1, new_partial));
+            }
+        }
+    }
+
+    Ok(all_paths)
+}
+
 /// Extract a node's row index from a WHERE filter.
 /// Uses the rich filter evaluator and requires exactly one matching row.
 fn extract_node_id(
@@ -4288,7 +5068,7 @@ fn extract_node_id(
     let stored = session.tables.get(table_name).ok_or_else(|| {
         SqlError::Plan(format!("Table '{table_name}' not found"))
     })?;
-    let matches = resolve_filtered_node_ids(filter, node, stored)?;
+    let matches = resolve_filtered_node_ids(filter, node, stored, Some(session))?;
     match matches.len() {
         0 => Err(SqlError::Plan(format!("No matching row for filter: {filter}"))),
         1 => Ok(matches[0]),
@@ -4664,6 +5444,87 @@ fn execute_graph_algorithm(
 
     let result = g.execute(result_col)?;
     Ok(result)
+}
+
+/// Execute a graph algorithm as a standalone table function.
+/// Returns a CSV-built table with `_node` and algorithm-specific columns.
+pub(crate) fn execute_standalone_algorithm(
+    ctx: &Context,
+    tables: &HashMap<String, StoredTable>,
+    graph: &PropertyGraph,
+    algo_name: &str,
+    edge_label_name: &str,
+) -> Result<Table, SqlError> {
+    let stored_rel = graph.edge_labels.get(edge_label_name).ok_or_else(|| {
+        SqlError::Plan(format!("Edge label '{edge_label_name}' not found in graph"))
+    })?;
+
+    let src_table_name = &stored_rel.edge_label.src_ref_table;
+    let src_table = &tables.get(src_table_name).ok_or_else(|| {
+        SqlError::Plan(format!("Table '{src_table_name}' not found"))
+    })?.table;
+
+    let g = ctx.graph(src_table)?;
+
+    let result_col = match algo_name {
+        "pagerank" => g.pagerank(&stored_rel.rel, 20, 0.85)?,
+        "connected_component" => g.connected_comp(&stored_rel.rel)?,
+        "louvain" => g.louvain(&stored_rel.rel, 100)?,
+        "clustering_coefficient" => g.clustering_coeff(&stored_rel.rel)?,
+        _ => return Err(SqlError::Plan(format!(
+            "Unknown standalone graph algorithm: {algo_name}"
+        ))),
+    };
+
+    let result = g.execute(result_col)?;
+
+    // The result table from the C engine has one column of computed values.
+    // Build a CSV with _node (0-based row index) + _value column.
+    let nrows = result.nrows() as usize;
+    let value_col_name = match algo_name {
+        "pagerank" => "_rank",
+        "connected_component" => "_component",
+        "louvain" => "_community",
+        "clustering_coefficient" => "_coefficient",
+        _ => "_value",
+    };
+
+    let mut csv = format!("_node,{value_col_name}\n");
+    let result_type = result.col_type(0);
+    for row in 0..nrows {
+        csv.push_str(&row.to_string());
+        csv.push(',');
+        match result_type {
+            7 => { // TD_F64
+                if let Some(v) = result.get_f64(0, row) {
+                    csv.push_str(&format!("{v}"));
+                } else {
+                    csv.push_str("NULL");
+                }
+            }
+            4..=6 => { // TD_I16..TD_I64
+                if let Some(v) = result.get_i64(0, row) {
+                    csv.push_str(&format!("{v}"));
+                } else {
+                    csv.push_str("NULL");
+                }
+            }
+            _ => csv.push_str("NULL"),
+        }
+        csv.push('\n');
+    }
+
+    // Write CSV to temp file, read back as Table
+    let tmp_path = std::env::temp_dir().join(format!(
+        "__pgq_algo_{:x}.csv",
+        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp_path, &csv)
+        .map_err(|e| SqlError::Plan(format!("{algo_name}(): failed to write temp CSV: {e}")))?;
+    let table = ctx.read_csv(tmp_path.to_str().unwrap_or(""))
+        .map_err(|e| SqlError::Plan(format!("{algo_name}(): failed to read result: {e}")))?;
+    let _ = std::fs::remove_file(&tmp_path);
+    Ok(table)
 }
 
 /// Execute Dijkstra's weighted shortest path algorithm.

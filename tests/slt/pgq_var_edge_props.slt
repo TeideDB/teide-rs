@@ -1,0 +1,62 @@
+# SQL/PGQ: Edge properties on variable-length paths
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE vep_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO vep_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE vep_knows (src INTEGER, dst INTEGER, weight INTEGER)
+
+statement ok
+INSERT INTO vep_knows VALUES (0, 1, 10), (1, 2, 20), (2, 3, 30)
+
+statement ok
+CREATE PROPERTY GRAPH vep_graph VERTEX TABLES (vep_persons LABEL Person) EDGE TABLES (vep_knows SOURCE KEY (src) REFERENCES vep_persons (id) DESTINATION KEY (dst) REFERENCES vep_persons (id) LABEL Knows)
+
+# ===================================================================
+# Variable-length edge property: single hop (1-hop path)
+# ===================================================================
+
+query TTT
+SELECT * FROM GRAPH_TABLE (vep_graph MATCH (a:Person)-[e:Knows]->{1,1}(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.weight AS weights)) ORDER BY src
+----
+Alice Bob [10]
+Bob Carol [20]
+Carol Dave [30]
+
+# ===================================================================
+# Variable-length edge property: 2-hop path
+# ===================================================================
+
+query TTT
+SELECT * FROM GRAPH_TABLE (vep_graph MATCH (a:Person)-[e:Knows]->{2,2}(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.weight AS weights)) ORDER BY src
+----
+Alice Carol [10, 20]
+Bob Dave [20, 30]
+
+# ===================================================================
+# Variable-length edge property: range {1,3}
+# ===================================================================
+
+query TTT
+SELECT * FROM GRAPH_TABLE (vep_graph MATCH (a:Person WHERE a.name = 'Alice')-[e:Knows]->{1,3}(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.weight AS weights)) ORDER BY dst
+----
+Alice Bob [10]
+Alice Carol [10, 20]
+Alice Dave [10, 20, 30]
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE vep_persons
+
+statement ok
+DROP TABLE vep_knows

@@ -2214,3 +2214,118 @@ fn test_list_in_table() {
         assert_eq!(teide::list_get_i64(raw1, 1), Some(20));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Persistent graph metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn persistent_graph_cross_session() {
+    let _guard = lock();
+
+    // Use a dedicated temp directory so this test doesn't pollute ~/.teidedb
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("TEIDEDB_HOME", tmp.path());
+
+    // Session 1: create tables, create property graph, verify metadata file
+    {
+        let mut session = Session::new().unwrap();
+        session
+            .execute("CREATE TABLE pg_persons (id INTEGER, name VARCHAR)")
+            .unwrap();
+        session
+            .execute("INSERT INTO pg_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')")
+            .unwrap();
+        session
+            .execute("CREATE TABLE pg_knows (src INTEGER, dst INTEGER)")
+            .unwrap();
+        session
+            .execute("INSERT INTO pg_knows VALUES (0, 1), (1, 2)")
+            .unwrap();
+        session
+            .execute(
+                "CREATE PROPERTY GRAPH pg_test \
+                 VERTEX TABLES (pg_persons KEY (id) LABEL Person) \
+                 EDGE TABLES (pg_knows SOURCE KEY (src) REFERENCES pg_persons (id) \
+                 DESTINATION KEY (dst) REFERENCES pg_persons (id) LABEL Knows)",
+            )
+            .unwrap();
+
+        // Verify the metadata file was created
+        let meta_path = tmp.path().join("graphs").join("pg_test.json");
+        assert!(
+            meta_path.exists(),
+            "Graph metadata file should exist at {}",
+            meta_path.display()
+        );
+
+        // Verify graph works in this session
+        let result = session
+            .execute(
+                "SELECT * FROM GRAPH_TABLE (pg_test \
+                 MATCH (a:Person WHERE a.id = 0)-[e:Knows]->(b:Person) \
+                 COLUMNS (a.name AS src_name, b.name AS dst_name))",
+            )
+            .unwrap();
+        match result {
+            teide::sql::ExecResult::Query(r) => {
+                assert_eq!(r.nrows, 1);
+            }
+            _ => panic!("Expected Query result"),
+        }
+    }
+    // Session 1 dropped here
+
+    // Session 2: create same tables, verify graph is auto-loaded from metadata
+    {
+        let mut session = Session::new().unwrap();
+
+        // Graph should be in pending_graphs (loaded from metadata at startup)
+        // but not yet built (tables don't exist yet)
+
+        // Re-create tables with same schema and data
+        session
+            .execute("CREATE TABLE pg_persons (id INTEGER, name VARCHAR)")
+            .unwrap();
+        session
+            .execute("INSERT INTO pg_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')")
+            .unwrap();
+        session
+            .execute("CREATE TABLE pg_knows (src INTEGER, dst INTEGER)")
+            .unwrap();
+        session
+            .execute("INSERT INTO pg_knows VALUES (0, 1), (1, 2)")
+            .unwrap();
+
+        // Now query the persisted graph — should lazy-load from metadata
+        let result = session
+            .execute(
+                "SELECT * FROM GRAPH_TABLE (pg_test \
+                 MATCH (a:Person WHERE a.id = 0)-[e:Knows]->(b:Person) \
+                 COLUMNS (a.name AS src_name, b.name AS dst_name))",
+            )
+            .unwrap();
+        match result {
+            teide::sql::ExecResult::Query(r) => {
+                assert_eq!(r.nrows, 1);
+                assert_eq!(r.columns, vec!["src_name", "dst_name"]);
+            }
+            _ => panic!("Expected Query result"),
+        }
+    }
+
+    // Session 3: drop the graph, verify metadata file is removed
+    {
+        let mut session = Session::new().unwrap();
+        session.execute("DROP PROPERTY GRAPH pg_test").unwrap();
+
+        let meta_path = tmp.path().join("graphs").join("pg_test.json");
+        assert!(
+            !meta_path.exists(),
+            "Graph metadata file should be deleted after DROP"
+        );
+    }
+
+    // Restore env
+    std::env::remove_var("TEIDEDB_HOME");
+}

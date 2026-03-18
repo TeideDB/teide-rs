@@ -321,3 +321,53 @@ fn slt_pgq_describe() {
 fn slt_pgq_label_expr() {
     run_slt("tests/slt/pgq_label_expr.slt");
 }
+
+#[test]
+fn slt_pgq_anonymous_edge() {
+    run_slt("tests/slt/pgq_anonymous_edge.slt");
+}
+
+#[test]
+fn slt_pgq_element_id() {
+    run_slt("tests/slt/pgq_element_id.slt");
+}
+
+#[test]
+fn slt_pgq_edge_where() {
+    run_slt("tests/slt/pgq_edge_where.slt");
+}
+
+#[test]
+fn slt_pgq_label_not() {
+    run_slt("tests/slt/pgq_label_not.slt");
+}
+
+#[test]
+fn slt_pgq_all_shortest() {
+    run_slt("tests/slt/pgq_all_shortest.slt");
+}
+
+#[test]
+fn slt_pgq_table_func() {
+    run_slt("tests/slt/pgq_table_func.slt");
+}
+
+#[test]
+fn slt_pgq_subquery_where() {
+    run_slt("tests/slt/pgq_subquery_where.slt");
+}
+
+#[test]
+fn slt_pgq_columns_expr() {
+    run_slt("tests/slt/pgq_columns_expr.slt");
+}
+
+#[test]
+fn slt_pgq_var_edge_props() {
+    run_slt("tests/slt/pgq_var_edge_props.slt");
+}
+
+#[test]
+fn slt_pgq_list_return() {
+    run_slt("tests/slt/pgq_list_return.slt");
+}

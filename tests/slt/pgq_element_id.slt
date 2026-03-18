@@ -1,0 +1,61 @@
+# SQL/PGQ: element_id(p) path accessor
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE eid_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO eid_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE eid_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO eid_knows VALUES (0, 1), (1, 2), (2, 3)
+
+statement ok
+CREATE PROPERTY GRAPH eid_graph VERTEX TABLES (eid_persons KEY (id) LABEL Person) EDGE TABLES (eid_knows SOURCE KEY (src) REFERENCES eid_persons (id) DESTINATION KEY (dst) REFERENCES eid_persons (id) LABEL Knows)
+
+# ===================================================================
+# 1-hop element_id
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (eid_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,1}(b:Person WHERE b.id = 1) COLUMNS (element_id(p) AS eid))
+----
+[0, (0, 1), 1]
+[0, (0, 1), 1]
+
+# ===================================================================
+# Multi-hop element_id
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (eid_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,5}(b:Person WHERE b.id = 3) COLUMNS (element_id(p) AS eid))
+----
+[0, (0, 1), 1, (1, 2), 2, (2, 3), 3]
+[0, (0, 1), 1, (1, 2), 2, (2, 3), 3]
+[0, (0, 1), 1, (1, 2), 2, (2, 3), 3]
+[0, (0, 1), 1, (1, 2), 2, (2, 3), 3]
+
+# ===================================================================
+# 0-hop element_id (source = destination)
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (eid_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{0,5}(b:Person WHERE b.id = 0) COLUMNS (element_id(p) AS eid))
+----
+[0]
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE eid_persons
+
+statement ok
+DROP TABLE eid_knows

@@ -35,7 +35,7 @@ fn temp_nonce() -> u64 {
 // PGQ statement types (parsed from raw SQL)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ParsedVertexTable {
     pub table_name: String,
     pub label: Option<String>,
@@ -43,7 +43,7 @@ pub(crate) struct ParsedVertexTable {
     pub visibility: ColumnVisibility,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ParsedEdgeTable {
     pub table_name: String,
     pub src_col: String,
@@ -56,7 +56,7 @@ pub(crate) struct ParsedEdgeTable {
     pub visibility: ColumnVisibility,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreatePropertyGraph {
     pub name: String,
     pub vertex_tables: Vec<ParsedVertexTable>,
@@ -813,6 +813,10 @@ fn parse_graph_table_inner(inner: &str) -> Result<GraphTableExpr, SqlError> {
                 t.next()?; // consume ANY
                 t.expect("SHORTEST")?;
                 mode = PathMode::AnyShortest;
+            } else if t.peek().map(|s| s.to_uppercase()) == Some("ALL".into()) {
+                t.next()?; // consume ALL
+                t.expect("SHORTEST")?;
+                mode = PathMode::AllShortest;
             }
         } else {
             // Not a var assignment, rewind
@@ -895,26 +899,51 @@ fn parse_node_pattern(t: &mut Tokens) -> Result<NodePattern, SqlError> {
     if t.peek() != Some(")") {
         let first = t.next()?;
         if first == ":" {
-            // :Label (no variable)
-            let first_label = t.next()?.to_lowercase();
-            let mut labels = vec![first_label];
+            // :Label or :!Label (no variable)
+            let mut labels = Vec::new();
+            let next_tok = t.next()?.to_lowercase();
+            if next_tok == "!" {
+                // NOT label: :!Label — prefix with "!" marker
+                let negated = t.next()?.to_lowercase();
+                labels.push(format!("!{negated}"));
+            } else {
+                labels.push(next_tok);
+            }
             while t.peek() == Some("|") {
                 t.next()?; // consume '|'
-                labels.push(t.next()?.to_lowercase());
+                if t.peek() == Some("!") {
+                    t.next()?; // consume '!'
+                    let negated = t.next()?.to_lowercase();
+                    labels.push(format!("!{negated}"));
+                } else {
+                    labels.push(t.next()?.to_lowercase());
+                }
             }
             label_list = Some(labels);
         } else if t.peek() == Some(":") {
-            // var:Label
+            // var:Label or var:!Label
             variable = Some(first.to_lowercase());
             t.next()?; // consume ':'
             if t.peek() != Some(")")
                 && t.peek().map(|s| s.to_uppercase()) != Some("WHERE".into())
             {
-                let first_label = t.next()?.to_lowercase();
-                let mut labels = vec![first_label];
+                let mut labels = Vec::new();
+                let next_tok = t.next()?.to_lowercase();
+                if next_tok == "!" {
+                    let negated = t.next()?.to_lowercase();
+                    labels.push(format!("!{negated}"));
+                } else {
+                    labels.push(next_tok);
+                }
                 while t.peek() == Some("|") {
                     t.next()?; // consume '|'
-                    labels.push(t.next()?.to_lowercase());
+                    if t.peek() == Some("!") {
+                        t.next()?; // consume '!'
+                        let negated = t.next()?.to_lowercase();
+                        labels.push(format!("!{negated}"));
+                    } else {
+                        labels.push(t.next()?.to_lowercase());
+                    }
                 }
                 label_list = Some(labels);
             }
@@ -976,6 +1005,7 @@ fn parse_edge_and_node(
     let mut label = None;
     let mut quantifier = PathQuantifier::One;
     let mut cost_expr: Option<String> = None;
+    let mut edge_filter: Option<String> = None;
 
     if t.peek() == Some("[") {
         t.next()?; // consume '['
@@ -993,6 +1023,26 @@ fn parse_edge_and_node(
             } else {
                 variable = Some(first_tok.to_lowercase());
             }
+        }
+
+        // Parse optional WHERE filter inside edge brackets: [e:Label WHERE e.since > 2020]
+        if t.peek().map(|s| s.eq_ignore_ascii_case("WHERE")) == Some(true) {
+            t.next()?; // consume WHERE
+            let mut filter_tokens = Vec::new();
+            let mut depth = 0i32;
+            // Collect tokens until ']' at top level, or COST keyword
+            while let Some(tok) = t.peek() {
+                if tok == "]" && depth == 0 { break; }
+                if tok.eq_ignore_ascii_case("COST") && depth == 0 { break; }
+                let tok = t.next()?;
+                if tok == "(" { depth += 1; }
+                if tok == ")" { depth -= 1; }
+                filter_tokens.push(tok);
+            }
+            if filter_tokens.is_empty() {
+                return Err(SqlError::Parse("WHERE keyword requires a filter expression".into()));
+            }
+            edge_filter = Some(filter_tokens.join(" "));
         }
 
         // Parse optional COST expression inside edge brackets: [r:Label COST r.weight]
@@ -1084,6 +1134,7 @@ fn parse_edge_and_node(
             direction,
             quantifier,
             cost_expr,
+            filter: edge_filter,
         },
         node,
     ))
@@ -1117,7 +1168,20 @@ fn parse_columns_clause(t: &mut Tokens) -> Result<Vec<ColumnEntry>, SqlError> {
             }
         }
 
-        let expr = expr_tokens.join(" ");
+        // Join tokens, collapsing spaces around dots so "a . name" → "a.name"
+        let mut expr = String::new();
+        for (i, tok) in expr_tokens.iter().enumerate() {
+            if tok == "." {
+                expr.push('.');
+            } else if i > 0 && expr_tokens[i - 1] == "." {
+                expr.push_str(tok);
+            } else {
+                if !expr.is_empty() {
+                    expr.push(' ');
+                }
+                expr.push_str(tok);
+            }
+        }
         let mut alias = None;
 
         if t.peek().map(|s| s.to_uppercase()) == Some("AS".into()) {

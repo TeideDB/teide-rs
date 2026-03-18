@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Post-Implementation Checklist
+
+After every feature or bugfix implementation, **all** of the following must be completed:
+
+1. **All tests must pass** — `cargo test --all-features`
+2. **All benchmarks must pass without regression** — run benchmarks in `../teide-bench` and verify no regressions
+3. **Update all docs** — update documentation for both `teide` and `teide-rs` to reflect changes
+4. **Verify all examples** — every code snippet and example in docs must be verified to compile and run correctly
+
 ## What is teide-rs?
 
 Rust bindings for the [Teide](https://github.com/TeideDB/teide) C17 columnar dataframe engine. Provides safe FFI wrappers, a SQL parser/planner, an interactive REPL, and a PostgreSQL wire protocol server.

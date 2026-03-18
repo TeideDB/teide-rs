@@ -1,0 +1,119 @@
+# SQL/PGQ: Real LIST return type for vertices(p)/edges(p)/element_id(p)
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE lr_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO lr_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE lr_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO lr_knows VALUES (0, 1), (1, 2), (2, 3)
+
+statement ok
+CREATE PROPERTY GRAPH lr_graph VERTEX TABLES (lr_persons KEY (id) LABEL Person) EDGE TABLES (lr_knows SOURCE KEY (src) REFERENCES lr_persons (id) DESTINATION KEY (dst) REFERENCES lr_persons (id) LABEL Knows)
+
+# ===================================================================
+# vertices(p) returns LIST column with integer elements
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (lr_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,5}(b:Person WHERE b.id = 2) COLUMNS (vertices(p) AS v))
+----
+[0, 1, 2]
+[0, 1, 2]
+[0, 1, 2]
+
+# ===================================================================
+# edges(p) returns LIST column with tuple elements
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (lr_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,5}(b:Person WHERE b.id = 2) COLUMNS (edges(p) AS e))
+----
+[(0, 1), (1, 2)]
+[(0, 1), (1, 2)]
+[(0, 1), (1, 2)]
+
+# ===================================================================
+# element_id(p) returns LIST with mixed int/tuple elements
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (lr_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,5}(b:Person WHERE b.id = 2) COLUMNS (element_id(p) AS eid))
+----
+[0, (0, 1), 1, (1, 2), 2]
+[0, (0, 1), 1, (1, 2), 2]
+[0, (0, 1), 1, (1, 2), 2]
+
+# ===================================================================
+# Mixed LIST and scalar columns with ORDER BY
+# ===================================================================
+
+query TIT
+SELECT * FROM GRAPH_TABLE (lr_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{1,5}(b:Person WHERE b.id = 3) COLUMNS (vertices(p) AS v, _depth, edges(p) AS e)) ORDER BY _depth
+----
+[0, 1, 2, 3] 0 [(0, 1), (1, 2), (2, 3)]
+[0, 1, 2, 3] 1 [(0, 1), (1, 2), (2, 3)]
+[0, 1, 2, 3] 2 [(0, 1), (1, 2), (2, 3)]
+[0, 1, 2, 3] 3 [(0, 1), (1, 2), (2, 3)]
+
+# ===================================================================
+# Empty path returns empty list for edges
+# ===================================================================
+
+query TT
+SELECT * FROM GRAPH_TABLE (lr_graph MATCH p = ANY SHORTEST (a:Person WHERE a.id = 0)-[e:Knows]->{0,5}(b:Person WHERE b.id = 0) COLUMNS (vertices(p) AS v, edges(p) AS e))
+----
+[0] []
+
+# ===================================================================
+# ALL SHORTEST with LIST columns
+# ===================================================================
+
+statement ok
+CREATE TABLE lr_diamond_nodes (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO lr_diamond_nodes VALUES (0, 'A'), (1, 'B'), (2, 'C'), (3, 'D')
+
+statement ok
+CREATE TABLE lr_diamond_edges (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO lr_diamond_edges VALUES (0, 1), (0, 2), (1, 3), (2, 3)
+
+statement ok
+CREATE PROPERTY GRAPH lr_diamond VERTEX TABLES (lr_diamond_nodes KEY (id) LABEL Node) EDGE TABLES (lr_diamond_edges SOURCE KEY (src) REFERENCES lr_diamond_nodes (id) DESTINATION KEY (dst) REFERENCES lr_diamond_nodes (id) LABEL Edge)
+
+query TT
+SELECT * FROM GRAPH_TABLE (lr_diamond MATCH p = ALL SHORTEST (a:Node WHERE a.name = 'A')-[e:Edge]->{1,3}(b:Node WHERE b.name = 'D') COLUMNS (vertices(p) AS v, edges(p) AS e)) ORDER BY v
+----
+[0, 1, 3] [(0, 1), (1, 3)]
+[0, 1, 3] [(0, 1), (1, 3)]
+[0, 1, 3] [(0, 1), (1, 3)]
+[0, 2, 3] [(0, 2), (2, 3)]
+[0, 2, 3] [(0, 2), (2, 3)]
+[0, 2, 3] [(0, 2), (2, 3)]
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE lr_persons
+
+statement ok
+DROP TABLE lr_knows
+
+statement ok
+DROP TABLE lr_diamond_nodes
+
+statement ok
+DROP TABLE lr_diamond_edges

@@ -167,6 +167,8 @@ pub struct Session {
     pub(crate) tables: HashMap<String, StoredTable>,
     pub(crate) graphs: HashMap<String, pgq::PropertyGraph>,
     pub(crate) vector_indexes: HashMap<String, VectorIndexInfo>,
+    /// Persisted graph definitions not yet rebuilt (tables may not exist yet).
+    pub(crate) pending_graphs: HashMap<String, pgq_parser::CreatePropertyGraph>,
     pub(crate) ctx: Context,
 }
 
@@ -174,11 +176,13 @@ impl Session {
     /// Create a new session, initializing the Teide engine.
     pub fn new() -> Result<Self, SqlError> {
         let ctx = Context::new()?;
+        let pending_graphs = load_persisted_graph_metadata();
         Ok(Session {
             ctx,
             tables: HashMap::new(),
             graphs: HashMap::new(),
             vector_indexes: HashMap::new(),
+            pending_graphs,
         })
     }
 
@@ -317,6 +321,26 @@ impl Session {
         Ok(())
     }
 
+    /// Try to build a pending (persisted) graph if its tables now exist.
+    /// Returns true if the graph was successfully loaded, false otherwise.
+    pub(crate) fn try_load_pending_graph(&mut self, name: &str) -> bool {
+        let parsed = match self.pending_graphs.remove(name) {
+            Some(p) => p,
+            None => return false,
+        };
+        match pgq::build_property_graph(self, &parsed) {
+            Ok(graph) => {
+                self.graphs.insert(name.to_string(), graph);
+                true
+            }
+            Err(_) => {
+                // Tables not ready yet — put it back
+                self.pending_graphs.insert(name.to_string(), parsed);
+                false
+            }
+        }
+    }
+
     /// Execute a SQL statement, which may be a SELECT, CREATE TABLE AS, DROP TABLE,
     /// INSERT INTO, UPDATE, or DELETE.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
@@ -330,6 +354,16 @@ impl Session {
             return self.execute_with_graph_table(sql);
         }
 
+        // Try to activate any pending (persisted) graphs whose tables now exist.
+        // This enables standalone table-function algorithms (e.g. pagerank('g'))
+        // to find persisted graphs without requiring a fresh CREATE PROPERTY GRAPH.
+        if !self.pending_graphs.is_empty() {
+            let pending_names: Vec<String> = self.pending_graphs.keys().cloned().collect();
+            for name in pending_names {
+                self.try_load_pending_graph(&name);
+            }
+        }
+
         planner::session_execute(self, sql)
     }
 
@@ -339,13 +373,49 @@ impl Session {
     fn execute_with_graph_table(&mut self, sql: &str) -> Result<ExecResult, SqlError> {
         let (rewritten_sql, graph_exprs) = pgq_parser::extract_graph_tables(sql)?;
 
+        // Collect list column names from GRAPH_TABLE COLUMNS clauses
+        // (vertices(p), edges(p), element_id(p) → their aliases).
+        let mut list_col_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, expr) in &graph_exprs {
+            for col in &expr.columns {
+                let compact = col.expr.to_lowercase().replace(' ', "");
+                if compact.starts_with("vertices(")
+                    || compact.starts_with("edges(")
+                    || compact.starts_with("element_id(")
+                {
+                    let name = col.alias.as_deref().unwrap_or_else(|| {
+                        if compact.starts_with("vertices(") {
+                            "vertices"
+                        } else if compact.starts_with("edges(") {
+                            "edges"
+                        } else {
+                            "element_id"
+                        }
+                    });
+                    list_col_names.insert(name.to_string());
+                }
+            }
+        }
+
+        // Try to lazy-load any persisted graphs referenced by GRAPH_TABLE exprs
+        for (_, expr) in &graph_exprs {
+            if !self.graphs.contains_key(&expr.graph_name) {
+                self.try_load_pending_graph(&expr.graph_name);
+            }
+        }
+
         // Save any user tables that would be shadowed by temp names, so we can restore them.
         let mut saved_tables: Vec<(String, Option<StoredTable>)> = Vec::new();
 
         // Execute each GRAPH_TABLE and store results as temp tables
-        let graph_result = (|| {
+        let mut graph_result = (|| {
             for (temp_name, expr) in &graph_exprs {
                 let (table, columns) = pgq::plan_graph_table(self, expr)?;
+                // Sync C-level column names so the outer planner's build_schema
+                // finds them by alias (e.g. after expression post-processing).
+                let table = table
+                    .with_column_names(&columns)
+                    .map_err(|e| SqlError::Plan(format!("Column rename failed: {e}")))?;
                 let previous = self.tables.insert(
                     temp_name.clone(),
                     StoredTable { table, columns, embedding_dims: HashMap::new() },
@@ -363,6 +433,28 @@ impl Session {
                 self.tables.insert(name, prev);
             } else {
                 self.tables.remove(&name);
+            }
+        }
+
+        // Convert text columns to real TD_LIST columns for vertices(p)/edges(p)/element_id(p).
+        // This runs after the wrapper SQL (sort, filter, project) has completed,
+        // since the C engine operators don't support LIST columns.
+        if !list_col_names.is_empty() {
+            if let Ok(ExecResult::Query(ref mut result)) = graph_result {
+                // Only convert columns that exist in the result
+                let result_cols: std::collections::HashSet<String> =
+                    result.columns.iter().cloned().collect();
+                let active: std::collections::HashSet<String> = list_col_names
+                    .intersection(&result_cols)
+                    .cloned()
+                    .collect();
+                if !active.is_empty() {
+                    result.table = pgq::convert_text_to_list_columns(
+                        &result.table,
+                        &result.columns,
+                        &active,
+                    )?;
+                }
             }
         }
 
@@ -817,4 +909,74 @@ fn contains_graph_table_keyword(sql: &str) -> bool {
 /// Stateless single-query mode (no session registry).
 pub fn execute_sql(ctx: &Context, sql: &str) -> Result<SqlResult, SqlError> {
     planner::plan_and_execute(ctx, sql, None)
+}
+
+// ---------------------------------------------------------------------------
+// Persistent graph metadata
+// ---------------------------------------------------------------------------
+
+/// Return the directory for persisted graph metadata files.
+/// Returns `None` if `TEIDEDB_HOME` is not set (persistence disabled)
+/// or if the directory cannot be created.
+fn graph_metadata_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("TEIDEDB_HOME").ok()?;
+    let dir = std::path::PathBuf::from(home).join("graphs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Save property graph metadata to disk.
+pub(crate) fn save_graph_metadata(
+    parsed: &pgq_parser::CreatePropertyGraph,
+) -> Result<(), SqlError> {
+    let dir = graph_metadata_dir().ok_or_else(|| {
+        SqlError::Plan("Cannot determine graph metadata directory".into())
+    })?;
+    let path = dir.join(format!("{}.json", parsed.name));
+    let json = serde_json::to_string_pretty(parsed).map_err(|e| {
+        SqlError::Plan(format!("Failed to serialize graph metadata: {e}"))
+    })?;
+    std::fs::write(&path, json).map_err(|e| {
+        SqlError::Plan(format!(
+            "Failed to write graph metadata to {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Delete property graph metadata from disk.
+pub(crate) fn delete_graph_metadata(name: &str) {
+    if let Some(dir) = graph_metadata_dir() {
+        let path = dir.join(format!("{name}.json"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Load all persisted graph metadata files at startup.
+fn load_persisted_graph_metadata() -> HashMap<String, pgq_parser::CreatePropertyGraph> {
+    let mut pending = HashMap::new();
+    let dir = match graph_metadata_dir() {
+        Some(d) => d,
+        None => return pending,
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return pending,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let parsed: pgq_parser::CreatePropertyGraph = match serde_json::from_str(&content) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        pending.insert(parsed.name.clone(), parsed);
+    }
+    pending
 }

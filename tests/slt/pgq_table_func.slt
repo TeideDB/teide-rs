@@ -1,0 +1,92 @@
+# SQL/PGQ: Standalone table-function graph algorithms
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE tf_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO tf_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')
+
+statement ok
+CREATE TABLE tf_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO tf_knows VALUES (0, 1), (1, 0), (1, 2), (2, 1)
+
+statement ok
+CREATE PROPERTY GRAPH tf_graph VERTEX TABLES (tf_persons LABEL Person) EDGE TABLES (tf_knows SOURCE KEY (src) REFERENCES tf_persons (id) DESTINATION KEY (dst) REFERENCES tf_persons (id) LABEL Knows)
+
+# ===================================================================
+# pagerank() table function
+# ===================================================================
+
+query IT
+SELECT _node, _rank >= 0 AS valid FROM pagerank('tf_graph') ORDER BY _node
+----
+0 true
+1 true
+2 true
+
+# ===================================================================
+# connected_component() table function
+# ===================================================================
+
+query IT
+SELECT _node, _component >= 0 AS valid FROM connected_component('tf_graph') ORDER BY _node
+----
+0 true
+1 true
+2 true
+
+# ===================================================================
+# louvain() table function
+# ===================================================================
+
+query II
+SELECT _node, _community >= 0 AS valid FROM louvain('tf_graph') ORDER BY _node
+----
+0 true
+1 true
+2 true
+
+# ===================================================================
+# clustering_coefficient() table function
+# ===================================================================
+
+query IT
+SELECT _node, _coefficient >= 0 AS valid FROM clustering_coefficient('tf_graph') ORDER BY _node
+----
+0 true
+1 true
+2 true
+
+# ===================================================================
+# Error: unknown graph
+# ===================================================================
+
+statement error
+SELECT * FROM pagerank('no_such_graph')
+
+# ===================================================================
+# Join with vertex table
+# ===================================================================
+
+query TT
+SELECT p.name, pr._rank >= 0 AS valid FROM pagerank('tf_graph') pr JOIN tf_persons p ON p.id = pr._node ORDER BY p.name
+----
+Alice true
+Bob true
+Carol true
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE tf_persons
+
+statement ok
+DROP TABLE tf_knows

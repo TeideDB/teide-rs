@@ -1,0 +1,85 @@
+# SQL/PGQ: Anonymous edges (no explicit label required)
+
+# ===================================================================
+# Setup: single-edge-label graph
+# ===================================================================
+
+statement ok
+CREATE TABLE ae_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ae_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol')
+
+statement ok
+CREATE TABLE ae_knows (src INTEGER, dst INTEGER, since INTEGER)
+
+statement ok
+INSERT INTO ae_knows VALUES (0, 1, 2020), (0, 2, 2021), (1, 2, 2022)
+
+statement ok
+CREATE PROPERTY GRAPH ae_graph VERTEX TABLES (ae_persons LABEL Person) EDGE TABLES (ae_knows SOURCE KEY (src) REFERENCES ae_persons (id) DESTINATION KEY (dst) REFERENCES ae_persons (id) LABEL Knows)
+
+# ===================================================================
+# Anonymous edge: single-hop (a)-[]->(b)
+# ===================================================================
+
+query TT
+SELECT * FROM GRAPH_TABLE (ae_graph MATCH (a:Person WHERE a.name = 'Alice')-[]->(b:Person) COLUMNS (a.name AS src, b.name AS dst)) ORDER BY dst
+----
+Alice Bob
+Alice Carol
+
+# Anonymous edge with edge variable but no label
+query TTI
+SELECT * FROM GRAPH_TABLE (ae_graph MATCH (a:Person)-[e]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.since)) ORDER BY src, dst
+----
+Alice Bob 2020
+Alice Carol 2021
+Bob Carol 2022
+
+# ===================================================================
+# Anonymous edge: variable-length (a)-[]->+(b)
+# ===================================================================
+
+query TT
+SELECT * FROM GRAPH_TABLE (ae_graph MATCH (a:Person WHERE a.name = 'Alice')-[]->+(b:Person WHERE b.name = 'Carol') COLUMNS (a.name AS src, b.name AS dst))
+----
+Alice Carol
+
+# ===================================================================
+# Multi-label graph: ambiguous anonymous edge must error
+# ===================================================================
+
+statement ok
+CREATE TABLE ae_works (src INTEGER, dst INTEGER, role VARCHAR)
+
+statement ok
+INSERT INTO ae_works VALUES (0, 1, 'Manager')
+
+statement ok
+CREATE TABLE ae_companies (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ae_companies VALUES (0, 'Acme'), (1, 'Beta')
+
+statement ok
+CREATE PROPERTY GRAPH ae_multi VERTEX TABLES (ae_persons LABEL Person, ae_companies LABEL Company) EDGE TABLES (ae_knows SOURCE KEY (src) REFERENCES ae_persons (id) DESTINATION KEY (dst) REFERENCES ae_persons (id) LABEL Knows, ae_works SOURCE KEY (src) REFERENCES ae_persons (id) DESTINATION KEY (dst) REFERENCES ae_companies (id) LABEL Works)
+
+statement error
+SELECT * FROM GRAPH_TABLE (ae_multi MATCH (a:Person)-[]->(b:Person) COLUMNS (a.name AS src, b.name AS dst))
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE ae_persons
+
+statement ok
+DROP TABLE ae_knows
+
+statement ok
+DROP TABLE ae_works
+
+statement ok
+DROP TABLE ae_companies

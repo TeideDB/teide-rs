@@ -1,0 +1,67 @@
+# SQL/PGQ: WHERE on edge properties inside edge brackets
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE ew_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ew_persons VALUES (0, 'Alice'), (1, 'Bob'), (2, 'Carol'), (3, 'Dave')
+
+statement ok
+CREATE TABLE ew_knows (src INTEGER, dst INTEGER, since INTEGER, weight DOUBLE)
+
+statement ok
+INSERT INTO ew_knows VALUES (0, 1, 2020, 0.9), (0, 2, 2021, 0.5), (1, 3, 2022, 0.7), (2, 3, 2019, 0.8)
+
+statement ok
+CREATE PROPERTY GRAPH ew_graph VERTEX TABLES (ew_persons LABEL Person) EDGE TABLES (ew_knows SOURCE KEY (src) REFERENCES ew_persons (id) DESTINATION KEY (dst) REFERENCES ew_persons (id) LABEL Knows)
+
+# ===================================================================
+# Simple edge property filter
+# ===================================================================
+
+query TTI
+SELECT * FROM GRAPH_TABLE (ew_graph MATCH (a:Person)-[e:Knows WHERE e.since >= 2021]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.since)) ORDER BY src, dst
+----
+Alice Carol 2021
+Bob Dave 2022
+
+# ===================================================================
+# BETWEEN filter on edge property
+# ===================================================================
+
+query TTI
+SELECT * FROM GRAPH_TABLE (ew_graph MATCH (a:Person)-[e:Knows WHERE e.since BETWEEN 2020 AND 2021]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.since)) ORDER BY src, dst
+----
+Alice Bob 2020
+Alice Carol 2021
+
+# ===================================================================
+# Combined node WHERE + edge WHERE
+# ===================================================================
+
+query TTR
+SELECT * FROM GRAPH_TABLE (ew_graph MATCH (a:Person WHERE a.name = 'Alice')-[e:Knows WHERE e.weight > 0.6]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.weight)) ORDER BY dst
+----
+Alice Bob 0.9
+
+# ===================================================================
+# Edge WHERE filters out all results
+# ===================================================================
+
+query TTI
+SELECT * FROM GRAPH_TABLE (ew_graph MATCH (a:Person WHERE a.name = 'Alice')-[e:Knows WHERE e.since > 2030]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, e.since))
+----
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE ew_persons
+
+statement ok
+DROP TABLE ew_knows

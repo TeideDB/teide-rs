@@ -1,0 +1,76 @@
+# SQL/PGQ: Label NOT (!) expression
+
+# ===================================================================
+# Setup: graph with Person and Company vertex labels
+# ===================================================================
+
+statement ok
+CREATE TABLE ln_persons (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ln_persons VALUES (0, 'Alice'), (1, 'Bob')
+
+statement ok
+CREATE TABLE ln_companies (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO ln_companies VALUES (0, 'Acme'), (1, 'Beta')
+
+statement ok
+CREATE TABLE ln_works (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO ln_works VALUES (0, 0), (1, 1)
+
+statement ok
+CREATE PROPERTY GRAPH ln_graph VERTEX TABLES (ln_persons LABEL Person, ln_companies LABEL Company) EDGE TABLES (ln_works SOURCE KEY (src) REFERENCES ln_persons (id) DESTINATION KEY (dst) REFERENCES ln_companies (id) LABEL WorksAt)
+
+# ===================================================================
+# !Company matches only Person
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (ln_graph MATCH (a:!Company)-[e:WorksAt]->(b:Company) COLUMNS (a.name AS person)) ORDER BY person
+----
+Alice
+Bob
+
+# ===================================================================
+# !Person matches only Company
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (ln_graph MATCH (a:Person)-[e:WorksAt]->(b:!Person) COLUMNS (b.name AS company)) ORDER BY company
+----
+Acme
+Beta
+
+# ===================================================================
+# !NonExistent label should error
+# ===================================================================
+
+statement error
+SELECT * FROM GRAPH_TABLE (ln_graph MATCH (a:!NonExistent)-[e:WorksAt]->(b:Company) COLUMNS (a.name AS person))
+
+# ===================================================================
+# OR expressions still work alongside NOT
+# ===================================================================
+
+query T
+SELECT * FROM GRAPH_TABLE (ln_graph MATCH (a:Person|Company)-[e:WorksAt]->(b:Company) COLUMNS (a.name AS name)) ORDER BY name
+----
+Alice
+Bob
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE ln_persons
+
+statement ok
+DROP TABLE ln_companies
+
+statement ok
+DROP TABLE ln_works

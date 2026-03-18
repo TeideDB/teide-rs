@@ -40,7 +40,7 @@ use super::expr::{
     has_window_functions, is_aggregate, is_count_distinct, is_pure_aggregate, parse_window_frame,
     plan_agg_input, plan_expr, plan_having_expr, plan_post_agg_expr, predict_c_agg_name,
 };
-use super::{ExecResult, Session, SqlError, SqlResult, StoredTable};
+use super::{pgq, ExecResult, Session, SqlError, SqlResult, StoredTable};
 
 // ---------------------------------------------------------------------------
 // Session-aware entry point
@@ -64,7 +64,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
             if let Some(result) = try_hnsw_knn(session, &q)? {
                 return Ok(ExecResult::Query(result));
             }
-            let result = plan_query(&session.ctx, &q, Some(&session.tables))?;
+            let result = plan_query(&session.ctx, &q, Some(&session.tables), Some(&session.graphs))?;
             Ok(ExecResult::Query(result))
         }
 
@@ -89,7 +89,7 @@ pub fn session_execute(session: &mut Session, sql: &str) -> Result<ExecResult, S
                 let result = if let Some(r) = try_hnsw_knn(session, query)? {
                     r
                 } else {
-                    plan_query(&session.ctx, query, Some(&session.tables))?
+                    plan_query(&session.ctx, query, Some(&session.tables), Some(&session.graphs))?
                 };
                 let nrows = result.nrows as i64;
                 let ncols = result.columns.len();
@@ -753,7 +753,7 @@ fn plan_insert(session: &mut Session, insert: &Insert) -> Result<ExecResult, Sql
                 let result = if let Some(r) = try_hnsw_knn(session, source_query)? {
                     r
                 } else {
-                    plan_query(&session.ctx, source_query, Some(&session.tables))?
+                    plan_query(&session.ctx, source_query, Some(&session.tables), Some(&session.graphs))?
                 };
                 let nrows = result.nrows;
                 (result.table, result.columns, result.embedding_dims, nrows)
@@ -1490,7 +1490,7 @@ pub(crate) fn plan_and_execute(
         _ => return Err(SqlError::Plan("Only SELECT queries are supported".into())),
     };
 
-    plan_query(ctx, &query, tables)
+    plan_query(ctx, &query, tables, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1501,6 +1501,7 @@ fn plan_query(
     ctx: &Context,
     query: &Query,
     tables: Option<&HashMap<String, StoredTable>>,
+    graphs: Option<&HashMap<String, pgq::PropertyGraph>>,
 ) -> Result<SqlResult, SqlError> {
     // Handle CTEs (WITH clause)
     let cte_tables: HashMap<String, StoredTable>;
@@ -1513,7 +1514,7 @@ fn plan_query(
         };
         for cte in &with.cte_tables {
             let cte_name = cte.alias.name.value.to_lowercase();
-            let result = plan_query(ctx, &cte.query, Some(&cte_map))?;
+            let result = plan_query(ctx, &cte.query, Some(&cte_map), graphs)?;
             // Rename table columns to match SQL aliases so downstream scans work
             let table = result.table.with_column_names(&result.columns)?;
             cte_map.insert(
@@ -1568,8 +1569,8 @@ fn plan_query(
                 settings: None,
                 format_clause: None,
             };
-            let left_result = plan_query(ctx, &left_query, effective_tables)?;
-            let right_result = plan_query(ctx, &right_query, effective_tables)?;
+            let left_result = plan_query(ctx, &left_query, effective_tables, graphs)?;
+            let right_result = plan_query(ctx, &right_query, effective_tables, graphs)?;
 
             if left_result.columns.len() != right_result.columns.len() {
                 return Err(SqlError::Plan(format!(
@@ -1660,8 +1661,8 @@ fn plan_query(
                 settings: None,
                 format_clause: None,
             };
-            let left_result = plan_query(ctx, &left_query, effective_tables)?;
-            let right_result = plan_query(ctx, &right_query, effective_tables)?;
+            let left_result = plan_query(ctx, &left_query, effective_tables, graphs)?;
+            let right_result = plan_query(ctx, &right_query, effective_tables, graphs)?;
 
             if left_result.columns.len() != right_result.columns.len() {
                 return Err(SqlError::Plan(format!(
@@ -1757,24 +1758,24 @@ fn plan_query(
                 }
                 if !push.is_empty() {
                     let modified = inject_predicates_into_query(subquery, &push);
-                    let result = plan_query(ctx, &modified, effective_tables)?;
+                    let result = plan_query(ctx, &modified, effective_tables, graphs)?;
                     let tbl = result.table.with_column_names(&result.columns)?;
                     let sch = build_result_schema(&tbl, &result.columns);
                     (tbl, sch, result.embedding_dims, join_conjunction(keep))
                 } else {
-                    let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+                    let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables, graphs)?;
                     (tbl, sch, emb, select.selection.clone())
                 }
             } else {
-                let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+                let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables, graphs)?;
                 (tbl, sch, emb, select.selection.clone())
             }
         } else {
-            let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+            let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables, graphs)?;
             (tbl, sch, emb, select.selection.clone())
         }
     } else {
-        let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables)?;
+        let (tbl, sch, emb) = resolve_from(ctx, &select.from, effective_tables, graphs)?;
         (tbl, sch, emb, select.selection.clone())
     };
 
@@ -2164,6 +2165,8 @@ fn resolve_table_function(
     ctx: &Context,
     name: &str,
     args: &[FunctionArg],
+    graphs: Option<&HashMap<String, pgq::PropertyGraph>>,
+    tables: Option<&HashMap<String, StoredTable>>,
 ) -> Result<Table, SqlError> {
     match name {
         "read_csv" => {
@@ -2216,8 +2219,40 @@ fn resolve_table_function(
                 SqlError::Plan(format!("read_parted('{db_root}', '{table_name}'): {e}"))
             })
         }
+        "pagerank" | "connected_component" | "louvain" | "clustering_coefficient" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(SqlError::Plan(format!(
+                    "{name}() requires 1-2 arguments: {name}('graph_name' [, 'edge_label'])"
+                )));
+            }
+            let graph_name = extract_string_arg(&args[0])?.to_lowercase();
+            let graphs = graphs.ok_or_else(|| {
+                SqlError::Plan(format!("{name}(): no property graphs available"))
+            })?;
+            let graph = graphs.get(&graph_name).ok_or_else(|| {
+                SqlError::Plan(format!("{name}(): property graph '{graph_name}' not found"))
+            })?;
+            // Determine edge label: explicit arg or sole label
+            let edge_label_name = if args.len() == 2 {
+                extract_string_arg(&args[1])?
+            } else if graph.edge_labels.len() == 1 {
+                graph.edge_labels.keys().next().unwrap().clone()
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "{name}(): graph '{graph_name}' has {} edge labels, specify one as second argument",
+                    graph.edge_labels.len()
+                )));
+            };
+            let tables = tables.ok_or_else(|| {
+                SqlError::Plan(format!("{name}(): no tables available"))
+            })?;
+            let result = pgq::execute_standalone_algorithm(
+                ctx, tables, graph, name, &edge_label_name,
+            )?;
+            Ok(result)
+        }
         _ => Err(SqlError::Plan(format!(
-            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted()"
+            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted(), pagerank(), connected_component(), louvain(), clustering_coefficient()"
         ))),
     }
 }
@@ -2321,6 +2356,7 @@ fn resolve_from(
     ctx: &Context,
     from: &[TableWithJoins],
     tables: Option<&HashMap<String, StoredTable>>,
+    graphs: Option<&HashMap<String, pgq::PropertyGraph>>,
 ) -> Result<(Table, HashMap<String, usize>, HashMap<String, i32>), SqlError> {
     if from.is_empty() {
         return Err(SqlError::Plan("Missing FROM clause".into()));
@@ -2329,7 +2365,7 @@ fn resolve_from(
     // Multiple FROM tables = implicit CROSS JOIN: SELECT * FROM t1, t2
     if from.len() > 1 {
         let (mut result_table, mut result_schema, mut result_emb_dims) =
-            resolve_table_factor(ctx, &from[0].relation, tables)?;
+            resolve_table_factor(ctx, &from[0].relation, tables, graphs)?;
         if let Some(ref alias) = table_factor_alias(&from[0].relation) {
             let snapshot = result_emb_dims.clone();
             add_qualified_embedding_dims(&mut result_emb_dims, alias, &snapshot);
@@ -2337,7 +2373,7 @@ fn resolve_from(
         let mut poisoned = HashSet::new();
         // Process joins on first table
         for join in &from[0].joins {
-            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables, graphs)?;
             // Reject cross join if right side has embedding columns too
             reject_if_has_embeddings(&right_emb, "CROSS JOIN")?;
             let left_ncols = result_table.ncols() as usize;
@@ -2358,7 +2394,7 @@ fn resolve_from(
         }
         // Cross join with subsequent FROM tables
         for twj in &from[1..] {
-            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &twj.relation, tables)?;
+            let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &twj.relation, tables, graphs)?;
             // Reject cross join if right side has embedding columns too
             reject_if_has_embeddings(&right_emb, "CROSS JOIN")?;
             let left_ncols = result_table.ncols() as usize;
@@ -2377,7 +2413,7 @@ fn resolve_from(
             } else { right_emb };
             merge_embedding_dims(&mut result_emb_dims, right_emb, &mut poisoned);
             for join in &twj.joins {
-                let (right_table2, right_schema2, right_emb2) = resolve_table_factor(ctx, &join.relation, tables)?;
+                let (right_table2, right_schema2, right_emb2) = resolve_table_factor(ctx, &join.relation, tables, graphs)?;
                 reject_if_has_embeddings(&right_emb2, "CROSS JOIN")?;
                 let left_ncols2 = result_table.ncols() as usize;
                 result_table = exec_cross_join(ctx, &result_table, &right_table2, &result_emb_dims)?;
@@ -2402,7 +2438,7 @@ fn resolve_from(
     let twj = &from[0];
 
     // Resolve the base (left) table
-    let (mut left_table, mut left_schema, mut from_emb_dims) = resolve_table_factor(ctx, &twj.relation, tables)?;
+    let (mut left_table, mut left_schema, mut from_emb_dims) = resolve_table_factor(ctx, &twj.relation, tables, graphs)?;
 
     // Add qualified entries for the left table so that `table.col` references
     // survive bare-name poisoning when joining tables with same-named columns.
@@ -2414,7 +2450,7 @@ fn resolve_from(
     // Process JOINs
     let mut join_poisoned = HashSet::new();
     for join in &twj.joins {
-        let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables)?;
+        let (right_table, right_schema, right_emb) = resolve_table_factor(ctx, &join.relation, tables, graphs)?;
         // Add qualified entries for the right table before merging.
         let right_emb = if let Some(alias) = table_factor_alias(&join.relation) {
             let mut extended = right_emb;
@@ -2733,6 +2769,7 @@ fn resolve_table_factor(
     ctx: &Context,
     factor: &TableFactor,
     tables: Option<&HashMap<String, StoredTable>>,
+    graphs: Option<&HashMap<String, pgq::PropertyGraph>>,
 ) -> Result<(Table, HashMap<String, usize>, HashMap<String, i32>), SqlError> {
     match factor {
         TableFactor::Table { name, args, .. } => {
@@ -2740,7 +2777,7 @@ fn resolve_table_factor(
             // Table functions: read_csv(...), read_splayed(...), read_parted(...)
             if let Some(func_args) = args {
                 let func_name = table_name.to_lowercase();
-                let table = resolve_table_function(ctx, &func_name, &func_args.args)?;
+                let table = resolve_table_function(ctx, &func_name, &func_args.args, graphs, tables)?;
                 // Normalize column names to lowercase for case-insensitive SQL resolution.
                 // Without this, g.scan("limitname") can't find "LimitName" from CSV headers.
                 let col_names: Vec<String> = (0..table.ncols() as usize)
@@ -2760,7 +2797,7 @@ fn resolve_table_factor(
             Ok((table, schema, emb_dims))
         }
         TableFactor::Derived { subquery, .. } => {
-            let result = plan_query(ctx, subquery, tables)?;
+            let result = plan_query(ctx, subquery, tables, graphs)?;
             // Rename columns to match SQL aliases so outer scans work
             let table = result.table.with_column_names(&result.columns)?;
             let schema = build_result_schema(&table, &result.columns);
@@ -4229,12 +4266,17 @@ fn validate_result_table(
             SqlError::Plan(format!("Result column at index {col_idx} is missing"))
         })?;
         let col_type = unsafe { crate::raw::td_type(col) };
-        if col_type <= 0 {
+        if col_type < 0 {
             return Err(SqlError::Plan(format!(
                 "Result column '{}' has scalar type {} and is not supported",
                 table.col_name_str(col_idx as usize),
                 col_type
             )));
+        }
+        // TD_LIST (type 0): list-of-lists column — skip length check since
+        // the outer list length equals nrows but inner lists vary.
+        if col_type == 0 {
+            continue;
         }
         // TD_PARTED and MAPCOMMON columns: len = partition count, not row count.
         // Skip the length check — td_table_nrows() already handles them correctly.
@@ -4386,7 +4428,7 @@ fn resolve_subqueries(
     match expr {
         // Scalar subquery: (SELECT single_value FROM ...)
         Expr::Subquery(query) => {
-            let result = plan_query(ctx, query, tables)?;
+            let result = plan_query(ctx, query, tables, None)?;
             if result.columns.len() != 1 {
                 return Err(SqlError::Plan(format!(
                     "Scalar subquery must return exactly 1 column, got {}",
@@ -4410,7 +4452,7 @@ fn resolve_subqueries(
             negated,
         } => {
             let resolved_inner = resolve_subqueries(ctx, inner, tables)?;
-            let result = plan_query(ctx, subquery, tables)?;
+            let result = plan_query(ctx, subquery, tables, None)?;
             if result.columns.len() != 1 {
                 return Err(SqlError::Plan(format!(
                     "IN subquery must return exactly 1 column, got {}",
@@ -4431,7 +4473,7 @@ fn resolve_subqueries(
 
         // EXISTS (subquery): evaluate and replace with boolean literal
         Expr::Exists { subquery, negated } => {
-            let result = plan_query(ctx, subquery, tables)?;
+            let result = plan_query(ctx, subquery, tables, None)?;
             let exists = result.nrows > 0;
             Ok(Expr::Value(Value::Boolean(exists ^ negated)))
         }

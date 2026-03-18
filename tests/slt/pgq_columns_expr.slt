@@ -1,0 +1,60 @@
+# SQL/PGQ: Arithmetic and function calls in COLUMNS
+
+# ===================================================================
+# Setup
+# ===================================================================
+
+statement ok
+CREATE TABLE ce_persons (id INTEGER, name VARCHAR, age INTEGER)
+
+statement ok
+INSERT INTO ce_persons VALUES (0, 'Alice', 30), (1, 'Bob', 25), (2, 'Carol', 35)
+
+statement ok
+CREATE TABLE ce_knows (src INTEGER, dst INTEGER)
+
+statement ok
+INSERT INTO ce_knows VALUES (0, 1), (1, 2)
+
+statement ok
+CREATE PROPERTY GRAPH ce_graph VERTEX TABLES (ce_persons LABEL Person) EDGE TABLES (ce_knows SOURCE KEY (src) REFERENCES ce_persons (id) DESTINATION KEY (dst) REFERENCES ce_persons (id) LABEL Knows)
+
+# ===================================================================
+# Simple arithmetic: a.age + 1
+# ===================================================================
+
+query TI
+SELECT * FROM GRAPH_TABLE (ce_graph MATCH (a:Person)-[e:Knows]->(b:Person) COLUMNS (a.name AS src, a.age + 1 AS adj_age)) ORDER BY src
+----
+Alice 31
+Bob 26
+
+# ===================================================================
+# Multiplication
+# ===================================================================
+
+query TI
+SELECT * FROM GRAPH_TABLE (ce_graph MATCH (a:Person)-[e:Knows]->(b:Person) COLUMNS (a.name AS src, a.age * 2 AS double_age)) ORDER BY src
+----
+Alice 60
+Bob 50
+
+# ===================================================================
+# Mixed simple and complex
+# ===================================================================
+
+query TTI
+SELECT * FROM GRAPH_TABLE (ce_graph MATCH (a:Person)-[e:Knows]->(b:Person) COLUMNS (a.name AS src, b.name AS dst, a.age + b.age AS total_age)) ORDER BY src
+----
+Alice Bob 55
+Bob Carol 60
+
+# ===================================================================
+# Cleanup
+# ===================================================================
+
+statement ok
+DROP TABLE ce_persons
+
+statement ok
+DROP TABLE ce_knows
