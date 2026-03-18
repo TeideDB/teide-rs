@@ -4043,7 +4043,7 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
                 let sym_id = crate::sym_intern(s)?;
                 let w = sym_width_for_id(sym_id);
                 let orig = unsafe { crate::ffi::td_sym_vec_new(w, 1) };
-                if orig.is_null() {
+                if orig.is_null() || crate::ffi_is_err(orig) {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
                 let appended = unsafe {
@@ -4062,7 +4062,7 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
                 let sym_id = unsafe { (*col).val.i64_ };
                 let w = sym_width_for_id(sym_id);
                 let orig = unsafe { crate::ffi::td_sym_vec_new(w, 1) };
-                if orig.is_null() {
+                if orig.is_null() || crate::ffi_is_err(orig) {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
                 let appended = unsafe {
@@ -4078,7 +4078,7 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
                 appended
             } else {
                 let orig = unsafe { crate::raw::td_vec_new(vec_type, 1) };
-                if orig.is_null() {
+                if orig.is_null() || crate::ffi_is_err(orig) {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
                 let val_ptr = unsafe {
