@@ -1282,17 +1282,40 @@ fn append_value_to_vec(
         }
 
         ffi::TD_DATE | ffi::TD_TIME => {
-            let val = eval_i64_literal(expr)
-                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
-            let v32 = val as i32;
+            // Try integer literal first, then date/time string literal
+            let v32 = if let Ok(val) = eval_i64_literal(expr) {
+                val as i32
+            } else if let Ok(s) = eval_str_literal(expr) {
+                if typ == ffi::TD_DATE {
+                    parse_date_str(&s)
+                        .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?
+                } else {
+                    parse_time_str(&s)
+                        .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?
+                }
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "column '{}': expected integer or date/time string literal, got {expr}",
+                    col_names[col_idx]
+                )));
+            };
             let next =
                 unsafe { ffi::td_vec_append(vec, &v32 as *const i32 as *const c_void) };
             check_vec_append(next)
         }
 
         ffi::TD_TIMESTAMP => {
-            let val = eval_i64_literal(expr)
-                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+            let val = if let Ok(v) = eval_i64_literal(expr) {
+                v
+            } else if let Ok(s) = eval_str_literal(expr) {
+                parse_timestamp_str(&s)
+                    .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?
+            } else {
+                return Err(SqlError::Plan(format!(
+                    "column '{}': expected integer or timestamp string literal, got {expr}",
+                    col_names[col_idx]
+                )));
+            };
             let next =
                 unsafe { ffi::td_vec_append(vec, &val as *const i64 as *const c_void) };
             check_vec_append(next)
@@ -1377,6 +1400,106 @@ fn eval_str_literal(expr: &Expr) -> Result<String, String> {
         Expr::Value(Value::Null) => Ok(String::new()), // null sentinel for string
         _ => Err(format!("expected string literal, got {expr}")),
     }
+}
+
+/// Parse a date string "YYYY-MM-DD" to days since 2000-01-01.
+/// Uses the Hinnant civil_from_days algorithm (inverse of Table::format_date).
+pub(crate) fn parse_date_str(s: &str) -> Result<i32, String> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid date literal '{s}', expected YYYY-MM-DD"));
+    }
+    let y: i64 = parts[0]
+        .parse()
+        .map_err(|_| format!("invalid year in date '{s}'"))?;
+    let m: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid month in date '{s}'"))?;
+    let d: u32 = parts[2]
+        .parse()
+        .map_err(|_| format!("invalid day in date '{s}'"))?;
+    if m < 1 || m > 12 || d < 1 || d > 31 {
+        return Err(format!("date out of range: '{s}'"));
+    }
+    // Hinnant days_from_civil: compute days since 1970-01-01, then adjust to 2000-01-01
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * (m as u64) + 2) / 5 + (d as u64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146097 + doe as i64 - 719468; // days since 1970-01-01
+    Ok((days_since_epoch - 10957) as i32) // adjust to 2000-01-01 epoch
+}
+
+/// Parse a time string "HH:MM:SS" or "HH:MM:SS.mmm" to milliseconds since midnight.
+pub(crate) fn parse_time_str(s: &str) -> Result<i32, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid time literal '{s}', expected HH:MM:SS"));
+    }
+    let h: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("invalid hour in time '{s}'"))?;
+    let m: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid minute in time '{s}'"))?;
+    // seconds may have fractional part
+    let sec_parts: Vec<&str> = parts[2].split('.').collect();
+    let s_val: u32 = sec_parts[0]
+        .parse()
+        .map_err(|e| format!("invalid second in time '{s}': {e}"))?;
+    let ms = if sec_parts.len() > 1 {
+        let frac = sec_parts[1];
+        // Pad or truncate to 3 digits for milliseconds
+        let padded = format!("{:0<3}", frac);
+        padded[..3]
+            .parse::<u32>()
+            .map_err(|e| format!("invalid fractional seconds in time '{s}': {e}"))?
+    } else {
+        0
+    };
+    if h > 23 || m > 59 || s_val > 59 {
+        return Err(format!("time out of range: '{s}'"));
+    }
+    Ok((h * 3_600_000 + m * 60_000 + s_val * 1_000 + ms) as i32)
+}
+
+/// Parse a timestamp string "YYYY-MM-DD HH:MM:SS[.ffffff]" to microseconds since 2000-01-01.
+pub(crate) fn parse_timestamp_str(s: &str) -> Result<i64, String> {
+    // Split on space or 'T' separator
+    let sep_pos = s.find(' ').or_else(|| s.find('T'));
+    let (date_part, time_part) = match sep_pos {
+        Some(pos) => (&s[..pos], &s[pos + 1..]),
+        None => return Err(format!("invalid timestamp '{s}', expected YYYY-MM-DD HH:MM:SS")),
+    };
+    let days = parse_date_str(date_part)?;
+    // Parse time with microsecond precision
+    let time_parts: Vec<&str> = time_part.split(':').collect();
+    if time_parts.len() != 3 {
+        return Err(format!("invalid time in timestamp '{s}'"));
+    }
+    let h: i64 = time_parts[0]
+        .parse()
+        .map_err(|_| format!("invalid hour in timestamp '{s}'"))?;
+    let m: i64 = time_parts[1]
+        .parse()
+        .map_err(|_| format!("invalid minute in timestamp '{s}'"))?;
+    let sec_parts: Vec<&str> = time_parts[2].split('.').collect();
+    let secs: i64 = sec_parts[0]
+        .parse()
+        .map_err(|_| format!("invalid second in timestamp '{s}'"))?;
+    let us = if sec_parts.len() > 1 {
+        let frac = sec_parts[1];
+        let padded = format!("{:0<6}", frac);
+        padded[..6]
+            .parse::<i64>()
+            .map_err(|e| format!("invalid fractional seconds in timestamp '{s}': {e}"))?
+    } else {
+        0
+    };
+    let day_us = days as i64 * 86_400_000_000;
+    let time_us = h * 3_600_000_000 + m * 60_000_000 + secs * 1_000_000 + us;
+    Ok(day_us + time_us)
 }
 
 /// Reorder source columns to match target schema when INSERT specifies an explicit column list.

@@ -194,3 +194,41 @@ query I
 SELECT EXTRACT(DOW FROM d) FROM dates WHERE d = 1
 ----
 7
+
+# === DATE/TIME/TIMESTAMP string literal INSERT ===
+
+statement ok
+CREATE TABLE date_lit (d DATE, t TIME, ts TIMESTAMP)
+
+statement ok
+INSERT INTO date_lit VALUES ('2000-01-01', '00:00:00', '2000-01-01 00:00:00')
+
+query T
+SELECT d FROM date_lit WHERE d = 0
+----
+2000-01-01
+
+statement ok
+INSERT INTO date_lit VALUES ('2025-01-01', '12:00:00', '2025-01-01 12:01:00')
+
+query T
+SELECT d FROM date_lit WHERE d = 9132
+----
+2025-01-01
+
+query T
+SELECT t FROM date_lit WHERE t = 43200000
+----
+12:00:00
+
+statement ok
+CREATE TABLE date_lit2 (id INTEGER, name VARCHAR, created_at DATE)
+
+statement ok
+INSERT INTO date_lit2 VALUES (1, 'Alice', '2024-01-15'), (2, 'Bob', '2024-03-22')
+
+query IT
+SELECT id, created_at FROM date_lit2 ORDER BY id
+----
+1 2024-01-15
+2 2024-03-22

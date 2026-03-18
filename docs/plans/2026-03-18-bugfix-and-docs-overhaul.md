@@ -19,6 +19,12 @@ These helpers convert SQL date/time string literals to Teide's internal integer 
 **Files:**
 - Modify: `src/sql/planner.rs:1327-1380` (after existing `eval_*_literal` functions)
 
+- [x] Step 1: Write the failing test
+- [x] Step 2: Run test to verify it fails
+- [x] Step 3: Write the implementation
+- [x] Step 4: Run tests to verify they pass
+- [x] Step 5: Commit
+
 **Step 1: Write the failing test**
 
 Create SLT tests for date literal INSERT:
