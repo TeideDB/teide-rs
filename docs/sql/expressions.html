@@ -94,13 +94,67 @@ END FROM t ORDER BY i;
   ELSE 'other'
 END FROM t ORDER BY i;</code></pre>
 
+    <h2>Comparison Operators</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE val > 100;
+SELECT * FROM t WHERE name = 'Alice';
+SELECT * FROM t WHERE id != 3;
+SELECT * FROM t WHERE val >= 10.0 AND val <= 50.0;</code></pre>
+    <p>Supported operators: <code>=</code>, <code>!=</code> / <code>&lt;&gt;</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>.</p>
+
+    <h2>BETWEEN</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE val BETWEEN 10.0 AND 50.0;
+SELECT * FROM t WHERE val NOT BETWEEN 10.0 AND 50.0;</code></pre>
+    <p><code>x BETWEEN a AND b</code> is equivalent to <code>x &gt;= a AND x &lt;= b</code>.</p>
+
+    <h2>IN</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE id IN (1, 2, 3);
+SELECT * FROM t WHERE name NOT IN ('Alice', 'Bob');</code></pre>
+
+    <h2>LIKE / ILIKE</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE name LIKE 'A%';       -- starts with 'A'
+SELECT * FROM t WHERE name LIKE '%son';      -- ends with 'son'
+SELECT * FROM t WHERE name LIKE '%li%';      -- contains 'li'
+SELECT * FROM t WHERE name ILIKE 'alice';    -- case-insensitive match
+SELECT * FROM t WHERE name NOT LIKE '%x%';</code></pre>
+    <p><code>ILIKE</code> performs case-insensitive pattern matching using a native kernel (no <code>LOWER()</code> overhead).</p>
+
+    <h2>IS NULL / IS NOT NULL</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE val IS NULL;
+SELECT * FROM t WHERE val IS NOT NULL;</code></pre>
+    <p>NULL is represented internally as NaN for float columns, 0 for integers, and empty string for VARCHAR.</p>
+
+    <h2>Boolean Logic</h2>
+    <pre><code class="language-sql">SELECT * FROM t WHERE a > 0 AND b > 0;
+SELECT * FROM t WHERE a > 0 OR b > 0;
+SELECT * FROM t WHERE NOT (a > 0);</code></pre>
+
     <h2>CAST</h2>
-    <pre><code class="language-sql">SELECT CAST(i AS REAL) FROM types WHERE i = 1;   -- 1.0
-SELECT i::REAL FROM types WHERE i = 1;            -- 1.0</code></pre>
+    <pre><code class="language-sql">-- Numeric CAST
+SELECT CAST(i AS REAL) FROM types WHERE i = 1;   -- 1.0
+SELECT i::REAL FROM types WHERE i = 1;            -- 1.0
+SELECT CAST(r AS INTEGER) FROM types;             -- truncates to int
+
+-- Temporal CAST (string literals parsed at plan time)
+SELECT CAST('2025-01-15' AS DATE);
+SELECT CAST('12:30:00' AS TIME);
+SELECT CAST('2025-01-15 09:30:00' AS TIMESTAMP);</code></pre>
+    <p>The <code>::</code> shorthand is equivalent to <code>CAST(... AS ...)</code>. <code>TRY_CAST</code> is not supported.</p>
 
     <h2>COALESCE and NULLIF</h2>
     <pre><code class="language-sql">SELECT COALESCE(val, 0) FROM t;
 SELECT NULLIF(val, 50.0) FROM t;</code></pre>
+
+    <h2>LEAST and GREATEST</h2>
+    <pre><code class="language-sql">SELECT LEAST(a, b, c) FROM t;
+SELECT GREATEST(val, 0.0) FROM t;</code></pre>
+    <p>Return the minimum or maximum value from a list of expressions (requires at least 2 arguments).</p>
+
+    <h2>Constant Expressions (SELECT without FROM)</h2>
+    <pre><code class="language-sql">SELECT 1 + 2;             -- 3
+SELECT 'foo' || 'bar';    -- foobar
+SELECT 3.14;              -- 3.14
+SELECT true;              -- true</code></pre>
+    <p>Constant expressions can be evaluated without a <code>FROM</code> clause. A single-row dummy table is synthesized internally.</p>
 
     <nav class="page-nav">
       <a href="filtering.html" class="prev">Filtering</a>

@@ -580,6 +580,9 @@ git commit -m "docs: add UPDATE, DELETE, temporal literals, column-list INSERT t
 **Files:**
 - Modify: `docs/sql/expressions.html`
 
+- [x] Step 1: Make the edits
+- [x] Step 2: Commit
+
 **Changes:**
 - Add BETWEEN, IN, LIKE, ILIKE examples (currently missing)
 - Add IS NULL / IS NOT NULL examples
