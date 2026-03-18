@@ -253,7 +253,41 @@ WHERE headcount > 2
 ORDER BY avg_salary DESC;</code></pre>
 
     <!-- ===== STEP 9 ===== -->
-    <h2>Step 9: Load a CSV File</h2>
+    <h2>Step 9: Working with Dates</h2>
+    <p>Teide supports DATE, TIME, and TIMESTAMP columns. You can insert temporal values as human-readable strings:</p>
+    <pre><code class="language-sql">CREATE TABLE events (id INTEGER, name VARCHAR, event_date DATE);
+
+INSERT INTO events VALUES
+  (1, 'Launch',   '2025-03-15'),
+  (2, 'Review',   '2025-04-01'),
+  (3, 'Ship',     '2025-06-30');</code></pre>
+
+    <p>Query dates and extract parts:</p>
+    <pre><code class="language-sql">SELECT name, event_date FROM events ORDER BY event_date;
+
+SELECT name, EXTRACT(YEAR FROM event_date) AS yr, EXTRACT(MONTH FROM event_date) AS mo
+FROM events ORDER BY event_date;</code></pre>
+
+    <p>Use <strong>CAST</strong> to convert string literals to temporal types in expressions:</p>
+    <pre><code class="language-sql">SELECT CAST('2025-01-15' AS DATE);
+SELECT CAST('12:30:00' AS TIME);
+SELECT CAST('2025-06-15 09:30:00' AS TIMESTAMP);</code></pre>
+
+    <div class="note">
+      <p><strong>Epoch:</strong> DATE values are stored as days since 2000-01-01. TIME is milliseconds since midnight. TIMESTAMP is microseconds since 2000-01-01.</p>
+    </div>
+
+    <!-- ===== STEP 10 ===== -->
+    <h2>Step 10: Constant Expressions</h2>
+    <p>You can evaluate expressions without a FROM clause &mdash; useful for quick calculations and type conversions:</p>
+    <pre><code class="language-sql">SELECT 1 + 2;
+
+SELECT 'foo' || 'bar';
+
+SELECT 3.14, 'hello', true;</code></pre>
+
+    <!-- ===== STEP 11 ===== -->
+    <h2>Step 11: Load a CSV File</h2>
     <p>Teide can load CSV files directly:</p>
     <pre><code class="language-sql">CREATE TABLE trades AS SELECT * FROM read_csv('trades.csv');</code></pre>
     <p>Or start the REPL with a CSV preloaded as table <code>t</code>:</p>
@@ -261,8 +295,8 @@ ORDER BY avg_salary DESC;</code></pre>
     <p>Then query immediately:</p>
     <pre><code class="language-sql">SELECT * FROM t ORDER BY price DESC LIMIT 10;</code></pre>
 
-    <!-- ===== STEP 10 ===== -->
-    <h2>Step 10: Useful REPL Commands</h2>
+    <!-- ===== STEP 12 ===== -->
+    <h2>Step 12: Useful REPL Commands</h2>
     <p>While in the REPL, these dot commands help you explore:</p>
     <table>
       <thead>

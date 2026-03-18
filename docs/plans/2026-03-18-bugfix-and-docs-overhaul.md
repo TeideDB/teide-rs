@@ -667,9 +667,8 @@ git commit -m "docs: comprehensive update to scalar functions reference"
 - Add a brief "Constant Expressions" example
 - Verify all existing examples compile and run correctly against the engine
 
-**Step 1: Make the edits**
-
-**Step 2: Commit**
+- [x] Step 1: Make the edits
+- [x] Step 2: Commit
 
 ```bash
 git add docs/tutorial/index.html
