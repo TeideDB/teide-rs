@@ -1329,7 +1329,7 @@ impl<'a> Graph<'a> {
 
     /// Create a constant typed i64 node (e.g. TIMESTAMP).
     /// Builds a 1-element vector of the given type and wraps it as a graph constant.
-    pub fn const_typed_i64(&self, val: i64, typ: i8) -> Result<Column> {
+    pub(crate) fn const_typed_i64(&self, val: i64, typ: i8) -> Result<Column> {
         unsafe {
             let vec = ffi::td_vec_new(typ, 1);
             if vec.is_null() {
@@ -1347,7 +1347,7 @@ impl<'a> Graph<'a> {
 
     /// Create a constant i32 node with a specific type (e.g. DATE, TIME, I32).
     /// Builds a 1-element vector of the given type and wraps it as a graph constant.
-    pub fn const_typed_i32(&self, val: i32, typ: i8) -> Result<Column> {
+    pub(crate) fn const_typed_i32(&self, val: i32, typ: i8) -> Result<Column> {
         unsafe {
             let vec = ffi::td_vec_new(typ, 1);
             if vec.is_null() {

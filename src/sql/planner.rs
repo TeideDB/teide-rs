@@ -2093,8 +2093,8 @@ fn plan_query(
         // SQL allows ORDER BY columns not present in SELECT output.
         // Keep those as hidden columns during sorting, then trim before returning.
         let hidden_order_cols = collect_hidden_order_columns(&order_by_exprs, &aliases, &schema);
-        // Reject SELECT * without a real FROM clause (only _dummy in schema).
-        let is_constant_select = schema.len() == 1 && schema.contains_key("_dummy");
+        // Reject SELECT * without a real FROM clause (only __teide_const_dummy__ in schema).
+        let is_constant_select = schema.len() == 1 && schema.contains_key("__teide_const_dummy__");
         if is_constant_select
             && select_items.len() == 1
             && matches!(select_items[0], SelectItem::Wildcard(_))
@@ -2512,9 +2512,9 @@ fn resolve_from(
     if from.is_empty() {
         // Constant SELECT (no FROM): synthesize a 1-row table with a dummy
         // column so that constant expressions broadcast to 1 row during graph
-        // execution.  The `_dummy` column is included in the schema so the
+        // execution.  The `__teide_const_dummy__` column is included in the schema so the
         // graph can reference it; scalar_table_to_vector_table strips it from output.
-        let name_id = crate::sym_intern("_dummy")?;
+        let name_id = crate::sym_intern("__teide_const_dummy__")?;
         let mut builder = RawTableBuilder::new(1)?;
         let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_I64, 1) };
         if vec.is_null() {
@@ -2532,7 +2532,7 @@ fn resolve_from(
         res?;
         let table = builder.finish()?;
         let mut schema = HashMap::new();
-        schema.insert("_dummy".to_string(), 0);
+        schema.insert("__teide_const_dummy__".to_string(), 0);
         let emb_dims = HashMap::new();
         return Ok((table, schema, emb_dims));
     }
@@ -3585,8 +3585,8 @@ fn plan_expr_select(
                 let mut cols: Vec<_> = schema.iter().collect();
                 cols.sort_by_key(|(_name, idx)| **idx);
                 for (name, _) in cols {
-                    // Skip internal _dummy column used for constant SELECT
-                    if name == "_dummy" {
+                    // Skip internal __teide_const_dummy__ column used for constant SELECT
+                    if name == "__teide_const_dummy__" {
                         continue;
                     }
                     proj_cols.push(g.scan(name)?);
@@ -3621,10 +3621,10 @@ fn plan_expr_select(
     let proj = g.select(table_node, &proj_cols)?;
     let result = g.execute(proj)?;
 
-    // For constant SELECT (no real columns, only _dummy), the graph produces
+    // For constant SELECT (no real columns, only __teide_const_dummy__), the graph produces
     // scalar atoms for constant expressions. Convert each scalar column to a
     // 1-element vector so the result validator accepts them.
-    let is_constant_select = schema.len() == 1 && schema.contains_key("_dummy");
+    let is_constant_select = schema.len() == 1 && schema.contains_key("__teide_const_dummy__");
     if is_constant_select {
         let result = scalar_table_to_vector_table(&result)?;
         return Ok((result, aliases));
@@ -3672,10 +3672,11 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
                     ""
                 } else {
                     unsafe {
-                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                        std::str::from_utf8(std::slice::from_raw_parts(
                             ptr as *const u8,
                             slen,
                         ))
+                        .unwrap_or("")
                     }
                 };
                 let sym_id = crate::sym_intern(s)? as u32;
