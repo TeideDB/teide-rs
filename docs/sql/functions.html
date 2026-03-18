@@ -134,7 +134,7 @@ SELECT first_name || ' ' || last_name FROM users;</code></pre>
     <pre><code class="language-sql">-- Extract individual date/time components
 SELECT EXTRACT(YEAR FROM created_at) FROM events;
 SELECT EXTRACT(MONTH FROM event_date) FROM calendar;
-SELECT EXTRACT(DOW FROM event_date) FROM calendar;   -- 0=Sun, 6=Sat
+SELECT EXTRACT(DOW FROM event_date) FROM calendar;   -- Monday=1, Sunday=7 (ISO 8601)
 SELECT EXTRACT(EPOCH FROM ts) FROM logs;              -- seconds since epoch</code></pre>
 
     <h3>DATE_TRUNC Units</h3>
@@ -157,9 +157,9 @@ SELECT DATEDIFF('month', hire_date, CURRENT_TIMESTAMP) FROM employees;</code></p
 
     <h3>Current Date/Time</h3>
     <pre><code class="language-sql">-- Get current date and timestamp
-SELECT CURRENT_DATE;
+SELECT CURRENT_DATE();
 SELECT NOW();
-SELECT CURRENT_TIMESTAMP;</code></pre>
+SELECT CURRENT_TIMESTAMP();</code></pre>
 
     <h2>Null-Handling Functions</h2>
     <table>

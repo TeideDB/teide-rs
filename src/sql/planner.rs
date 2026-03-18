@@ -2513,7 +2513,7 @@ fn resolve_from(
         // Constant SELECT (no FROM): synthesize a 1-row table with a dummy
         // column so that constant expressions broadcast to 1 row during graph
         // execution.  The `__teide_const_dummy__` column is included in the schema so the
-        // graph can reference it; scalar_table_to_vector_table strips it from output.
+        // graph can reference it; plan_expr_select's projection excludes it from output.
         let name_id = crate::sym_intern("__teide_const_dummy__")?;
         let mut builder = RawTableBuilder::new(1)?;
         let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_I64, 1) };

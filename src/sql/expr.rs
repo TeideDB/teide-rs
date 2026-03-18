@@ -587,16 +587,13 @@ fn plan_scalar_function(
 
         // Date/time functions
         "current_date" => {
-            // Microseconds since 2000-01-01 for start of today (UTC)
+            // Days since 2000-01-01 (Teide DATE epoch)
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            // Convert Unix seconds to Teide epoch (2000-01-01 = Unix 946684800)
-            let teide_secs = now - 946684800;
-            // Truncate to start of day, convert to microseconds
-            let day_us = (teide_secs / 86400) * 86400 * 1_000_000;
-            Ok(g.const_i64(day_us)?)
+            let teide_days = ((now - 946684800) / 86400) as i32;
+            Ok(g.const_typed_i32(teide_days, crate::types::DATE)?)
         }
         "current_timestamp" | "now" => {
             let now = std::time::SystemTime::now()
@@ -605,7 +602,7 @@ fn plan_scalar_function(
             let unix_us = now.as_micros() as i64;
             // Convert to Teide epoch (2000-01-01 = Unix 946684800 seconds)
             let teide_us = unix_us - 946_684_800_000_000i64;
-            Ok(g.const_i64(teide_us)?)
+            Ok(g.const_typed_i64(teide_us, crate::types::TIMESTAMP)?)
         }
         "extract" => {
             // EXTRACT can also be called as a function: extract('year', col)
