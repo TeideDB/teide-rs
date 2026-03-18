@@ -3654,7 +3654,48 @@ fn plan_expr_select(
     // to match the table's row count so consumers see uniform column lengths.
     // Pass source_nrows so that when ALL projected columns are constants, we
     // still know how many rows to broadcast to.
-    let source_nrows = working_table.nrows() as i64;
+    // Compute logical row count, correcting for embedding columns whose
+    // physical length is N*D.
+    let source_nrows = if embedding_dims.is_empty() {
+        working_table.nrows() as i64
+    } else {
+        // Find the first non-embedding column to get the true row count.
+        // Must skip TD_PARTED / TD_MAPCOMMON columns (same as logical_nrows
+        // and validate_result_table).
+        let raw = working_table.nrows() as i64;
+        let mut nrows = raw;
+        let mut found = false;
+        for ci in 0..working_table.ncols() {
+            let name = working_table.col_name_str(ci as usize).to_lowercase();
+            if !embedding_dims.contains_key(&name) {
+                if let Some(col) = working_table.get_col_idx(ci) {
+                    let ct = unsafe { crate::raw::td_type(col) };
+                    if ct > 0
+                        && !crate::ffi::td_is_parted(ct)
+                        && ct != crate::ffi::TD_MAPCOMMON
+                    {
+                        nrows = unsafe {
+                            crate::ffi::td_len(col as *const crate::ffi::td_t)
+                        };
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // All columns are embeddings — derive N from the first column.
+        if !found {
+            if working_table.ncols() > 0 {
+                let name = working_table.col_name_str(0).to_lowercase();
+                if let Some(&d) = embedding_dims.get(&name) {
+                    if d > 0 {
+                        nrows = raw / d as i64;
+                    }
+                }
+            }
+        }
+        nrows
+    };
     let result = broadcast_short_columns(&result, &aliases, embedding_dims, source_nrows)?;
 
     Ok((result, aliases))
@@ -3757,14 +3798,51 @@ fn broadcast_short_columns(
         found
     };
 
-    // If all vector columns have length <= 1 and there are no atoms, nothing to do.
-    if max_len <= 1 && !has_atoms {
-        return Ok(table.clone_ref());
+    // When all projected columns are constants (scalar atoms or 1-element typed
+    // vectors from CAST/CURRENT_DATE/CURRENT_TIMESTAMP), the graph-produced
+    // lengths don't reflect the source table's row count.  Override max_len
+    // with source_nrows so `SELECT CURRENT_DATE FROM t` produces N rows.
+    let mut needs_resize = false;
+    if max_len <= 1 && (has_atoms || max_len == 1) {
+        max_len = source_nrows;
+        needs_resize = true;
     }
-    // If no vector columns contributed a length (all atoms), use the source
-    // table's row count so `SELECT 'x' FROM t` produces N rows, not 1.
-    if max_len == 0 {
-        max_len = source_nrows.max(1);
+    // Source table is empty: all constants should produce 0 rows.
+    // Build an empty table with the right column names and vector types.
+    if max_len <= 0 && needs_resize {
+        let mut builder = RawTableBuilder::new(ncols as i64)?;
+        for c in 0..ncols {
+            let col = table
+                .get_col_idx(c as i64)
+                .ok_or_else(|| SqlError::Plan("missing column".into()))?;
+            let col_type = unsafe { crate::raw::td_type(col) };
+            let name = table.col_name_str(c as usize);
+            let name_id = crate::sym_intern(&name)?;
+            // Determine the vector type for the empty column.
+            let vec_type = if col_type < 0 {
+                if col_type == crate::ffi::TD_ATOM_STR {
+                    crate::ffi::TD_SYM
+                } else {
+                    -col_type
+                }
+            } else {
+                col_type
+            };
+            let empty_vec = unsafe { crate::ffi::td_vec_new(vec_type, 0) };
+            if empty_vec.is_null() || crate::ffi_is_err(empty_vec) {
+                return Err(SqlError::Plan("broadcast: empty vector allocation failed".into()));
+            }
+            let res = builder.add_col(name_id, empty_vec);
+            unsafe { crate::ffi_release(empty_vec) };
+            res?;
+        }
+        return builder.finish();
+    }
+    // If all vector columns already have the right length and no atoms need
+    // materializing, return as-is.  Skip this when needs_resize is set (e.g.
+    // source_nrows=0 but columns still have 1 element that must be truncated).
+    if max_len <= 1 && !has_atoms && !needs_resize {
+        return Ok(table.clone_ref());
     }
 
     let mut needs_broadcast = has_atoms;

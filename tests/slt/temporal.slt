@@ -281,3 +281,25 @@ INSERT INTO ts_err VALUES ('2025-01-01 12:60:00')
 
 statement error
 INSERT INTO ts_err VALUES ('2025-01-01 12:00:60')
+
+# === Broadcast typed constants across multiple rows ===
+
+statement ok
+CREATE TABLE multi3 (id INTEGER)
+
+statement ok
+INSERT INTO multi3 VALUES (1), (2), (3)
+
+# CAST constant should produce one row per source row
+query IT
+SELECT id, CAST('2025-01-01' AS DATE) FROM multi3 ORDER BY id
+----
+1 2025-01-01
+2 2025-01-01
+3 2025-01-01
+
+# CURRENT_DATE should also broadcast to all rows
+query I
+SELECT COUNT(*) FROM (SELECT CURRENT_DATE FROM multi3)
+----
+3

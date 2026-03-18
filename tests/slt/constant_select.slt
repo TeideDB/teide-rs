@@ -43,3 +43,11 @@ foobar
 # SELECT * without FROM should error
 statement error
 SELECT *
+
+# SELECT constant FROM empty table should return 0 rows
+statement ok
+CREATE TABLE empty_tbl (id INTEGER)
+
+query I
+SELECT 1 FROM empty_tbl
+----
