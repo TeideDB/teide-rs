@@ -120,8 +120,8 @@ SELECT first_name || ' ' || last_name FROM users;</code></pre>
         <tr><th>Function</th><th>Description</th><th>Return Type</th></tr>
       </thead>
       <tbody>
-        <tr><td>CURRENT_DATE</td><td>Current date (at query time)</td><td>DATE</td></tr>
-        <tr><td>CURRENT_TIMESTAMP / NOW()</td><td>Current timestamp (at query time)</td><td>TIMESTAMP</td></tr>
+        <tr><td>CURRENT_DATE()</td><td>Current date (at query time)</td><td>DATE</td></tr>
+        <tr><td>CURRENT_TIMESTAMP() / NOW()</td><td>Current timestamp (at query time)</td><td>TIMESTAMP</td></tr>
         <tr><td>EXTRACT(field FROM expr)</td><td>Extract a date/time component</td><td>INTEGER</td></tr>
         <tr><td>DATE_TRUNC(unit, expr)</td><td>Truncate timestamp to specified precision</td><td>TIMESTAMP</td></tr>
         <tr><td>DATE_DIFF(unit, start, end)</td><td>Difference between two timestamps in specified units</td><td>BIGINT</td></tr>

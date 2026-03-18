@@ -1493,17 +1493,17 @@ pub(crate) fn parse_timestamp_str(s: &str) -> Result<i64, String> {
     if time_parts.len() != 3 {
         return Err(format!("invalid time in timestamp '{s}'"));
     }
-    let h: i64 = time_parts[0]
+    let h: u32 = time_parts[0]
         .parse()
         .map_err(|_| format!("invalid hour in timestamp '{s}'"))?;
-    let m: i64 = time_parts[1]
+    let m: u32 = time_parts[1]
         .parse()
         .map_err(|_| format!("invalid minute in timestamp '{s}'"))?;
     let sec_parts: Vec<&str> = time_parts[2].split('.').collect();
-    let secs: i64 = sec_parts[0]
+    let secs: u32 = sec_parts[0]
         .parse()
         .map_err(|_| format!("invalid second in timestamp '{s}'"))?;
-    let us = if sec_parts.len() > 1 {
+    let us: i64 = if sec_parts.len() > 1 {
         let frac = sec_parts[1];
         let padded = format!("{:0<6}", frac);
         padded[..6]
@@ -1516,7 +1516,7 @@ pub(crate) fn parse_timestamp_str(s: &str) -> Result<i64, String> {
         return Err(format!("time out of range in timestamp: '{s}'"));
     }
     let day_us = days as i64 * 86_400_000_000;
-    let time_us = h * 3_600_000_000 + m * 60_000_000 + secs * 1_000_000 + us;
+    let time_us = h as i64 * 3_600_000_000 + m as i64 * 60_000_000 + secs as i64 * 1_000_000 + us;
     Ok(day_us + time_us)
 }
 
@@ -3647,6 +3647,11 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
         let col_type = unsafe { crate::raw::td_type(col) };
         let name = table.col_name_str(c as usize);
         let name_id = crate::sym_intern(&name)?;
+        if col_type == 0 {
+            return Err(SqlError::Plan(
+                "list-type columns not supported in constant SELECT".into(),
+            ));
+        }
         if col_type > 0 {
             // Already a vector — reuse it directly
             unsafe { crate::ffi_retain(col) };
