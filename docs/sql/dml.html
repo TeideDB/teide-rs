@@ -62,7 +62,7 @@
   <main class="content">
     <div class="section-label">SQL REFERENCE</div>
     <h1>Data Manipulation Language</h1>
-    <p class="lead">Insert data into tables with single-row, multi-row, or SELECT-based inserts.</p>
+    <p class="lead">Insert, update, and delete data in tables.</p>
 
     <h2>INSERT INTO ... VALUES</h2>
     <p>Syntax:</p>
@@ -71,18 +71,75 @@
     <pre><code class="language-sql">INSERT INTO t VALUES (1, 1.5, 'alice');</code></pre>
     <p>Multi-row:</p>
     <pre><code class="language-sql">INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z');</code></pre>
+    <p>Negative numbers are supported in VALUES:</p>
+    <pre><code class="language-sql">CREATE TABLE t (x INTEGER);
+INSERT INTO t VALUES (-5), (10), (-3);</code></pre>
+
+    <h3>Column-List INSERT</h3>
+    <p>You can specify an explicit column list to control insertion order or insert into a subset of columns:</p>
+    <pre><code class="language-sql">INSERT INTO t (name, id) VALUES ('alice', 1);
+INSERT INTO t (id, val) VALUES (1, 3.14), (2, 2.72);</code></pre>
+    <p>Columns not listed receive default values (0 for integers, NaN for floats, empty string for VARCHAR).</p>
+
+    <h3>Temporal Literals in INSERT</h3>
+    <p>DATE, TIME, and TIMESTAMP columns accept string literals in standard SQL format, as well as raw integer values:</p>
+    <pre><code class="language-sql">CREATE TABLE events (id INTEGER, name VARCHAR, event_date DATE, event_time TIME);
+INSERT INTO events VALUES (1, 'Launch', '2025-03-15', '09:00:00');
+INSERT INTO events VALUES (2, 'Meeting', '2025-03-16', '14:30:00');
+
+-- Timestamps also accept string literals
+CREATE TABLE logs (id INTEGER, created_at TIMESTAMP);
+INSERT INTO logs VALUES (1, '2025-06-15 09:30:00');</code></pre>
+    <p>Accepted formats:</p>
+    <ul>
+      <li>DATE: <code>'YYYY-MM-DD'</code> or integer (days since 2000-01-01)</li>
+      <li>TIME: <code>'HH:MM:SS'</code> or <code>'HH:MM:SS.mmm'</code> or integer (milliseconds since midnight)</li>
+      <li>TIMESTAMP: <code>'YYYY-MM-DD HH:MM:SS'</code> or <code>'YYYY-MM-DD HH:MM:SS.ffffff'</code> or integer (microseconds since 2000-01-01)</li>
+    </ul>
 
     <h2>INSERT INTO ... SELECT</h2>
-    <pre><code class="language-sql">INSERT INTO archive SELECT * FROM orders WHERE date < '2024-01-01';</code></pre>
-    <p>Example from tests:</p>
+    <pre><code class="language-sql">INSERT INTO archive SELECT * FROM orders WHERE date &lt; '2024-01-01';</code></pre>
+    <p>Example:</p>
     <pre><code class="language-sql">CREATE TABLE t1 (id INTEGER, val REAL, name VARCHAR);
 INSERT INTO t1 VALUES (1, 1.5, 'alice'), (2, 2.5, 'bob');
 
 CREATE TABLE t2 (id INTEGER, val REAL, name VARCHAR);
-INSERT INTO t2 SELECT * FROM t1 WHERE id <= 2;</code></pre>
-    <p>Note: Negative numbers are supported in VALUES:</p>
-    <pre><code class="language-sql">CREATE TABLE t (x INTEGER);
-INSERT INTO t VALUES (-5), (10), (-3);</code></pre>
+INSERT INTO t2 SELECT * FROM t1 WHERE id &lt;= 2;</code></pre>
+
+    <h2>UPDATE</h2>
+    <p>Syntax:</p>
+    <pre><code class="language-sql">UPDATE table_name SET col1 = expr1 [, col2 = expr2, ...] [WHERE condition];</code></pre>
+    <p>Examples:</p>
+    <pre><code class="language-sql">-- Update all rows
+UPDATE t SET val = 100.0;
+
+-- Update with a condition
+UPDATE t SET val = 100.0 WHERE id = 1;
+UPDATE t SET name = 'updated' WHERE val > 50.0;
+
+-- Update multiple columns
+UPDATE t SET val = val * 2, name = 'doubled' WHERE id > 5;</code></pre>
+    <p>The WHERE clause supports the same expressions as SELECT (comparisons, AND, OR, NOT, IS NULL, etc.).</p>
+
+    <h2>DELETE</h2>
+    <p>Syntax:</p>
+    <pre><code class="language-sql">DELETE FROM table_name [WHERE condition];</code></pre>
+    <p>Examples:</p>
+    <pre><code class="language-sql">-- Delete specific rows
+DELETE FROM t WHERE id = 3;
+DELETE FROM t WHERE val < 0 AND name = 'old';
+
+-- Delete all rows (truncate)
+DELETE FROM t;</code></pre>
+    <p><code>DELETE FROM t;</code> without a WHERE clause truncates the table, removing all rows but preserving the table schema and any embedding column metadata.</p>
+
+    <h2>Embedding Column Restrictions</h2>
+    <p>Tables with high-dimensional embedding columns (dimension &gt; 1) have DML restrictions because the C engine's filter and update kernels operate element-wise on flat F32 arrays and are not dimension-aware:</p>
+    <ul>
+      <li><strong>UPDATE</strong> is not supported on tables with embedding columns (dim &gt; 1).</li>
+      <li><strong>DELETE with WHERE</strong> is not supported on tables with embedding columns (dim &gt; 1). <code>DELETE FROM t;</code> (truncate without WHERE) is allowed.</li>
+      <li><strong>INSERT INTO ... VALUES</strong> is not supported for embedding columns with dim &gt; 1. Use <code>INSERT INTO ... SELECT</code> instead.</li>
+    </ul>
 
     <nav class="page-nav">
       <a href="ddl.html" class="prev">DDL</a>

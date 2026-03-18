@@ -537,6 +537,9 @@ git commit -m "docs: update data-types page with temporal literals, SMALLINT, CA
 **Files:**
 - Modify: `docs/sql/dml.html`
 
+- [x] Step 1: Make the edits to `docs/sql/dml.html`
+- [x] Step 2: Commit
+
 **Changes:**
 - Add temporal literal examples in INSERT:
   ```sql
