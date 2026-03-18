@@ -617,9 +617,8 @@ git commit -m "docs: add BETWEEN, IN, LIKE, IS NULL, constant SELECT to expressi
 - Add column aliasing with AS
 - Add ORDER BY with expressions example
 
-**Step 1: Make the edits**
-
-**Step 2: Commit**
+- [x] Step 1: Make the edits
+- [x] Step 2: Commit
 
 ```bash
 git add docs/sql/queries.html

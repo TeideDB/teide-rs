@@ -76,9 +76,44 @@ SELECT id + 10 AS shifted FROM t;</code></pre>
     <pre><code class="language-sql">SELECT DISTINCT grp FROM data;
 SELECT DISTINCT cat, region FROM sales;</code></pre>
 
+    <h2>Constant Expressions (SELECT without FROM)</h2>
+    <p>You can evaluate constant expressions without a FROM clause. The query returns a single row.</p>
+    <pre><code class="language-sql">SELECT 1;
+SELECT 'hello';
+SELECT 3.14;
+SELECT true;
+
+-- Multiple constants
+SELECT 1, 'hello', 3.14;
+
+-- Arithmetic
+SELECT 1 + 2;
+
+-- String concatenation
+SELECT 'foo' || 'bar';
+
+-- CAST with temporal literals
+SELECT CAST('2025-01-15' AS DATE);
+SELECT CAST('12:30:00' AS TIME);
+SELECT CAST('2025-01-15 09:30:00' AS TIMESTAMP);</code></pre>
+
     <h2>Counting Rows</h2>
     <pre><code class="language-sql">SELECT COUNT(*) FROM t;
 SELECT COUNT(*) FROM t WHERE val >= 30.0;</code></pre>
+
+    <h2>ORDER BY with Expressions</h2>
+    <p>You can sort by expressions, not just column names:</p>
+    <pre><code class="language-sql">-- Sort by a computed expression
+SELECT id, val * 2.0 AS doubled FROM t ORDER BY val * 2.0;
+
+-- Sort descending
+SELECT id, name FROM t ORDER BY id DESC;
+
+-- Sort by alias
+SELECT id, val * 2.0 AS doubled FROM t ORDER BY doubled;
+
+-- Sort with LIMIT
+SELECT id, val FROM t ORDER BY val DESC LIMIT 3;</code></pre>
 
     <p>Example from tests:</p>
     <pre><code class="language-sql">CREATE TABLE t (id INTEGER, val REAL, name VARCHAR);
