@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting Started: From CSV to Insights - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="../sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="../sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="../sql/vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">GUIDES</div>
+    <h1>Getting Started: From CSV to Insights in 5 Minutes</h1>
+    <p class="lead">You have data. You need answers. No setup required.</p>
+
+    <p>It is 4:30 PM on a Thursday. Your VP just pinged you: "Can you pull together headcount
+    and salary stats by department for the leadership sync at 5?" You have a CSV export from
+    the HR system sitting in your downloads folder. You need a tool that gets out of your way
+    and lets you think in SQL.</p>
+
+    <p>This guide walks you through a realistic workflow -- from raw data to polished
+    summaries -- using nothing but TeideDB's SQL engine. By the end, you will know how to:</p>
+    <ul>
+      <li>Create tables and insert data (including dates and booleans)</li>
+      <li>Filter rows with <code>WHERE</code>, <code>BETWEEN</code>, <code>IN</code>, and <code>LIKE</code></li>
+      <li>Aggregate with <code>GROUP BY</code>, <code>HAVING</code>, and common aggregate functions</li>
+      <li>Rank within groups using window functions</li>
+      <li>Derive new tables with <code>CREATE TABLE AS SELECT</code></li>
+      <li>Evaluate constant expressions without a <code>FROM</code> clause</li>
+    </ul>
+    <p>Estimated time: about 10 minutes.</p>
+
+    <h2>The Setup</h2>
+
+    <p>Let's start by getting some data into TeideDB. In a real workflow you might use
+    <code>read_csv()</code> to load a file directly, but here we will create the table by hand
+    so you can see the full DDL syntax. Our dataset is a 15-row employee roster -- small
+    enough to reason about, large enough to make aggregations interesting.</p>
+
+    <p>Fire up the TeideDB REPL (<code>cargo run --features cli</code>) or connect via
+    <code>psql</code> to a running PgWire server, and run the following:</p>
+
+    <pre><code class="language-sql">CREATE TABLE employees (
+  id INTEGER, name VARCHAR, dept VARCHAR, title VARCHAR,
+  salary REAL, hire_date DATE, active BOOLEAN
+);
+
+INSERT INTO employees VALUES
+  (1,  'Alice Chen',     'engineering', 'Senior Engineer',    125000.0, '2021-03-15', true),
+  (2,  'Bob Martinez',   'engineering', 'Staff Engineer',     145000.0, '2019-08-01', true),
+  (3,  'Carol White',    'engineering', 'Junior Engineer',     85000.0, '2023-11-20', true),
+  (4,  'Dave Kim',       'marketing',   'Marketing Manager',   95000.0, '2020-06-10', true),
+  (5,  'Eve Johnson',    'marketing',   'Content Lead',        82000.0, '2022-01-05', true),
+  (6,  'Frank Brown',    'marketing',   'SEO Specialist',      72000.0, '2024-02-14', true),
+  (7,  'Grace Liu',      'sales',       'Sales Director',     130000.0, '2018-11-30', true),
+  (8,  'Heidi Park',     'sales',       'Account Executive',   88000.0, '2022-07-22', true),
+  (9,  'Ivan Torres',    'sales',       'SDR',                 65000.0, '2024-08-01', true),
+  (10, 'Judy Adams',     'product',     'Product Manager',    115000.0, '2020-04-15', true),
+  (11, 'Karl Weber',     'product',     'UX Designer',         92000.0, '2021-09-01', true),
+  (12, 'Lisa Patel',     'product',     'Data Analyst',        88000.0, '2023-03-12', true),
+  (13, 'Mike Ross',      'engineering', 'DevOps Engineer',    110000.0, '2022-05-18', true),
+  (14, 'Nina Chang',     'engineering', 'ML Engineer',        135000.0, '2021-01-10', true),
+  (15, 'Oscar Diaz',     'marketing',   'VP Marketing',       155000.0, '2017-12-01', false);</code></pre>
+
+    <p>Quick sanity check -- make sure all 15 rows landed:</p>
+
+    <pre><code class="language-sql">SELECT COUNT(*) AS total FROM employees;</code></pre>
+    <div class="output">total
+15</div>
+
+    <p>Good. We are in business.</p>
+
+    <h2>Exploring the Data</h2>
+
+    <p>Before diving into analysis, it pays to get a feel for the shape of the data. What
+    departments exist? Who earns the most? A few quick queries will orient you.</p>
+
+    <p>First, let's see what departments we are working with:</p>
+
+    <pre><code class="language-sql">SELECT DISTINCT dept FROM employees ORDER BY dept;</code></pre>
+    <div class="output">dept
+engineering
+marketing
+product
+sales</div>
+
+    <p>Four departments. Now let's look at the highest-paid employees:</p>
+
+    <pre><code class="language-sql">SELECT name, dept, salary
+FROM employees
+ORDER BY salary DESC
+LIMIT 5;</code></pre>
+    <div class="output">name	dept	salary
+Oscar Diaz	marketing	155000.0
+Bob Martinez	engineering	145000.0
+Nina Chang	engineering	135000.0
+Grace Liu	sales	130000.0
+Alice Chen	engineering	125000.0</div>
+
+    <p>Engineering dominates the top of the salary list, but the single highest earner is
+    actually in marketing. Interesting -- though Oscar is flagged as inactive. Let's keep
+    that in mind.</p>
+
+    <h2>Filtering with WHERE</h2>
+
+    <p>Raw data is rarely what you need. The real value comes from slicing it. TeideDB
+    supports the full set of SQL filter predicates, so you can be as precise as you want.</p>
+
+    <p>Engineers earning over $100k:</p>
+
+    <pre><code class="language-sql">SELECT name, title, salary
+FROM employees
+WHERE dept = 'engineering' AND salary > 100000
+ORDER BY salary DESC;</code></pre>
+    <div class="output">name	title	salary
+Bob Martinez	Staff Engineer	145000.0
+Nina Chang	ML Engineer	135000.0
+Alice Chen	Senior Engineer	125000.0
+Mike Ross	DevOps Engineer	110000.0</div>
+
+    <p>Four of the five engineers clear six figures. Not bad. What about everyone on the
+    marketing team?</p>
+
+    <pre><code class="language-sql">SELECT name, title, salary
+FROM employees
+WHERE dept IN ('marketing')
+ORDER BY salary DESC;</code></pre>
+    <div class="output">name	title	salary
+Oscar Diaz	VP Marketing	155000.0
+Dave Kim	Marketing Manager	95000.0
+Eve Johnson	Content Lead	82000.0
+Frank Brown	SEO Specialist	72000.0</div>
+
+    <p>Now let's find active employees hired after 2023 -- your recent hires:</p>
+
+    <pre><code class="language-sql">SELECT name, dept, hire_date
+FROM employees
+WHERE active = true AND hire_date > '2023-01-01'
+ORDER BY hire_date;</code></pre>
+    <div class="output">name	dept	hire_date
+Lisa Patel	product	2023-03-12
+Carol White	engineering	2023-11-20
+Frank Brown	marketing	2024-02-14
+Ivan Torres	sales	2024-08-01</div>
+
+    <p>Four people hired in the last year and change, spread across all four departments.</p>
+
+    <p>You can also use <code>BETWEEN</code> for range queries. Employees in the $80k--$100k band:</p>
+
+    <pre><code class="language-sql">SELECT name, salary
+FROM employees
+WHERE salary BETWEEN 80000 AND 100000
+ORDER BY salary DESC;</code></pre>
+    <div class="output">name	salary
+Dave Kim	95000.0
+Karl Weber	92000.0
+Heidi Park	88000.0
+Lisa Patel	88000.0
+Carol White	85000.0
+Eve Johnson	82000.0</div>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Write a query that finds all employees whose name
+      contains "an" (case-sensitive). Hint: use <code>LIKE '%an%'</code>. You should find
+      Nina Chang, Ivan Torres, and Frank Brown.</p>
+    </div>
+
+    <h2>Answering Business Questions</h2>
+
+    <p>This is where things get useful. Your VP does not want raw rows -- she wants summaries.
+    How big is each team? What does compensation look like? <code>GROUP BY</code> with
+    aggregate functions is the tool for the job.</p>
+
+    <p>Headcount and salary statistics by department:</p>
+
+    <pre><code class="language-sql">SELECT
+  dept,
+  COUNT(*) AS headcount,
+  ROUND(AVG(salary), 0) AS avg_salary,
+  MIN(salary) AS min_salary,
+  MAX(salary) AS max_salary
+FROM employees
+WHERE active = true
+GROUP BY dept
+ORDER BY avg_salary DESC;</code></pre>
+    <div class="output">dept	headcount	avg_salary	min_salary	max_salary
+engineering	5	120000	85000.0	145000.0
+product	3	98333	88000.0	115000.0
+sales	3	94333	65000.0	130000.0
+marketing	3	83000	72000.0	95000.0</div>
+
+    <p>Engineering is both the largest team and the highest-paid on average. Marketing is the
+    smallest active team (Oscar is inactive) and has the lowest average salary. That is the
+    kind of insight that drives a conversation.</p>
+
+    <p>What if you only want departments where the average salary exceeds $90k? Use
+    <code>HAVING</code> to filter after aggregation:</p>
+
+    <pre><code class="language-sql">SELECT dept, ROUND(AVG(salary), 0) AS avg_salary
+FROM employees
+WHERE active = true
+GROUP BY dept
+HAVING AVG(salary) > 90000
+ORDER BY avg_salary DESC;</code></pre>
+    <div class="output">dept	avg_salary
+engineering	120000
+product	98333
+sales	94333</div>
+
+    <p>Marketing drops off. Three departments clear the $90k bar.</p>
+
+    <h2>Ranking and Comparing</h2>
+
+    <p>Aggregates tell you about groups. Window functions tell you about individuals
+    <em>within</em> groups. They are one of the most powerful features in SQL, and TeideDB
+    supports them fully.</p>
+
+    <p>Let's rank each employee within their department by salary:</p>
+
+    <pre><code class="language-sql">SELECT
+  name, dept, salary,
+  ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rank
+FROM employees
+WHERE active = true
+ORDER BY dept, rank;</code></pre>
+    <div class="output">name	dept	salary	rank
+Bob Martinez	engineering	145000.0	1
+Nina Chang	engineering	135000.0	2
+Alice Chen	engineering	125000.0	3
+Mike Ross	engineering	110000.0	4
+Carol White	engineering	85000.0	5
+Dave Kim	marketing	95000.0	1
+Eve Johnson	marketing	82000.0	2
+Frank Brown	marketing	72000.0	3
+Judy Adams	product	115000.0	1
+Karl Weber	product	92000.0	2
+Lisa Patel	product	88000.0	3
+Grace Liu	sales	130000.0	1
+Heidi Park	sales	88000.0	2
+Ivan Torres	sales	65000.0	3</div>
+
+    <p>Now you can instantly see who the top earner is in every department. But sometimes
+    you want to know <em>how much more</em> the top earner makes compared to the next person.
+    <code>LAG</code> lets you reference the previous row:</p>
+
+    <pre><code class="language-sql">SELECT
+  name, dept, salary,
+  LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS prev_salary,
+  salary - LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS gap
+FROM employees
+WHERE active = true
+ORDER BY dept, salary DESC;</code></pre>
+    <div class="output">name	dept	salary	prev_salary	gap
+Bob Martinez	engineering	145000.0
+Nina Chang	engineering	135000.0	145000.0	-10000.0
+Alice Chen	engineering	125000.0	135000.0	-10000.0
+Mike Ross	engineering	110000.0	125000.0	-15000.0
+Carol White	engineering	85000.0	110000.0	-25000.0
+Dave Kim	marketing	95000.0
+Eve Johnson	marketing	82000.0	95000.0	-13000.0
+Frank Brown	marketing	72000.0	82000.0	-10000.0
+Judy Adams	product	115000.0
+Karl Weber	product	92000.0	115000.0	-23000.0
+Lisa Patel	product	88000.0	92000.0	-4000.0
+Grace Liu	sales	130000.0
+Heidi Park	sales	88000.0	130000.0	-42000.0
+Ivan Torres	sales	65000.0	88000.0	-23000.0</div>
+
+    <p>The biggest salary gap within a department? Sales: $42k separates Grace Liu from
+    Heidi Park. That might be worth flagging for the compensation review.</p>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Use <code>SUM(salary) OVER (PARTITION BY dept ORDER BY
+      salary DESC)</code> to compute a running total of salaries within each department. The
+      last row in each partition should equal the department's total salary spend.</p>
+    </div>
+
+    <h2>Deriving New Tables</h2>
+
+    <p>When you find a query you keep running, materialize it. <code>CREATE TABLE AS
+    SELECT</code> captures a result set as a new table you can query independently. This
+    is great for dashboards, exports, or just keeping your workspace tidy.</p>
+
+    <pre><code class="language-sql">CREATE TABLE dept_summary AS
+SELECT
+  dept,
+  COUNT(*) AS headcount,
+  ROUND(AVG(salary), 0) AS avg_salary,
+  MIN(salary) AS min_salary,
+  MAX(salary) AS max_salary
+FROM employees
+WHERE active = true
+GROUP BY dept;</code></pre>
+
+    <p>Now you can query the summary directly:</p>
+
+    <pre><code class="language-sql">SELECT * FROM dept_summary ORDER BY avg_salary DESC;</code></pre>
+    <div class="output">dept	headcount	avg_salary	min_salary	max_salary
+engineering	5	120000	85000.0	145000.0
+product	3	98333	88000.0	115000.0
+sales	3	94333	65000.0	130000.0
+marketing	3	83000	72000.0	95000.0</div>
+
+    <p>This table is a first-class citizen. You can join it back to the original
+    <code>employees</code> table, filter it, or export it. It persists for the lifetime of
+    your session.</p>
+
+    <h2>Quick Calculations</h2>
+
+    <p>Sometimes you just need a calculator. TeideDB evaluates constant expressions without
+    requiring a <code>FROM</code> clause -- handy for quick math, string operations, or
+    type casting.</p>
+
+    <pre><code class="language-sql">SELECT 1 + 1;</code></pre>
+    <div class="output">(1 + 1)
+2</div>
+
+    <pre><code class="language-sql">SELECT 'foo' || 'bar';</code></pre>
+    <div class="output">('foo' || 'bar')
+foobar</div>
+
+    <pre><code class="language-sql">SELECT CAST('2025-01-15' AS DATE);</code></pre>
+    <div class="output">CAST('2025-01-15' AS DATE)
+2025-01-15</div>
+
+    <p>No table, no ceremony. Just results.</p>
+
+    <h2>What's Next</h2>
+
+    <p>You now know the core SQL workflow: create, insert, filter, aggregate, window, derive.
+    That covers a surprising amount of day-to-day analytical work. But TeideDB has much more
+    to offer.</p>
+
+    <ul>
+      <li><a href="sql-deep-dive.html"><strong>Joins, Windows &amp; CTEs</strong></a> -- multi-table joins,
+      advanced window frames, and common table expressions for complex queries.</li>
+      <li><a href="temporal-queries.html"><strong>Working with Time</strong></a> -- date arithmetic,
+      timestamp handling, and temporal filtering patterns.</li>
+      <li><a href="graph-queries.html"><strong>Graph Queries</strong></a> -- model relationships with
+      SQL/PGQ, run MATCH patterns, and find shortest paths.</li>
+      <li><a href="vector-search.html"><strong>Vector Search</strong></a> -- store embeddings, compute
+      similarity, and build HNSW indexes for fast nearest-neighbor search.</li>
+      <li><a href="../sql/">SQL Reference</a> -- complete syntax documentation for every
+      statement and function TeideDB supports.</li>
+    </ul>
+
+    <nav class="page-nav">
+      <a href="sql-deep-dive.html" class="next">
+        <span class="nav-label">Next</span>
+        <span class="nav-title">Joins, Windows &amp; CTEs</span>
+      </a>
+    </nav>
+
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

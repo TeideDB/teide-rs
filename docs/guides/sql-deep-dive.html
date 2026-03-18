@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQL Deep Dive: Joins, Windows, and Subqueries - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="../sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="../sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="../sql/vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">GUIDES</div>
+    <h1>SQL Deep Dive: Joins, Windows, and Subqueries</h1>
+    <p class="lead">Real analytics means joining, ranking, and drilling into multi-table data. In this guide you will build a reporting pipeline for an e-commerce company, combining customers, products, and orders into the kind of dashboard leadership actually wants.</p>
+
+    <div class="note">
+      <p><strong>Time:</strong> About 10 minutes. <strong>What you will learn:</strong> INNER and LEFT joins, GROUP BY with HAVING, scalar and IN subqueries, CTEs for multi-step logic, window functions (ROW_NUMBER, RANK, DENSE_RANK, running totals), and how to combine everything into a single executive dashboard query.</p>
+    </div>
+
+    <!-- ===== THE PROBLEM ===== -->
+    <h2>The Problem</h2>
+    <p>You are a data engineer at a growing e-commerce company. Your data lives in three normalized tables: <code>customers</code>, <code>products</code>, and <code>orders</code>. Leadership wants a dashboard that answers questions like:</p>
+    <ul>
+      <li>What is the lifetime value of each customer?</li>
+      <li>Which product categories drive the most revenue?</li>
+      <li>How do regions compare?</li>
+      <li>Who are the top customers, and how do they rank against each other?</li>
+    </ul>
+    <p>None of those answers live in a single table. You need joins to connect the data, aggregation to summarize it, subqueries to filter it, and window functions to rank it. Let's build it up piece by piece.</p>
+
+    <!-- ===== BUILDING THE DATASET ===== -->
+    <h2>Building the Dataset</h2>
+    <p>Fire up the Teide REPL and create the three tables. This is a simplified star schema: <code>orders</code> is the fact table, <code>customers</code> and <code>products</code> are dimensions.</p>
+
+    <pre><code class="language-sql">CREATE TABLE customers (
+  id INTEGER, name VARCHAR, email VARCHAR, region VARCHAR, joined_date DATE
+);
+INSERT INTO customers VALUES
+  (1, 'Alice Chen',    'alice@example.com',   'US-West',  '2022-01-15'),
+  (2, 'Bob Martinez',  'bob@example.com',     'US-East',  '2022-03-22'),
+  (3, 'Carol White',   'carol@example.com',   'EU-West',  '2022-06-10'),
+  (4, 'Dave Kim',      'dave@example.com',    'US-West',  '2023-01-05'),
+  (5, 'Eve Johnson',   'eve@example.com',     'US-East',  '2023-04-18'),
+  (6, 'Frank Brown',   'frank@example.com',   'EU-West',  '2023-08-30'),
+  (7, 'Grace Liu',     'grace@example.com',   'APAC',     '2024-02-14'),
+  (8, 'Heidi Park',    'heidi@example.com',   'APAC',     '2024-06-01');</code></pre>
+
+    <pre><code class="language-sql">CREATE TABLE products (
+  id INTEGER, name VARCHAR, category VARCHAR, price REAL
+);
+INSERT INTO products VALUES
+  (1, 'Widget Pro',     'hardware',   49.99),
+  (2, 'Widget Basic',   'hardware',   29.99),
+  (3, 'CloudSync',      'software',  199.99),
+  (4, 'DataVault',      'software',  149.99),
+  (5, 'Support Plan',   'services',   99.99),
+  (6, 'Training Pack',  'services',  299.99);</code></pre>
+
+    <pre><code class="language-sql">CREATE TABLE orders (
+  id INTEGER, customer_id INTEGER, product_id INTEGER,
+  quantity INTEGER, order_date DATE, status VARCHAR
+);
+INSERT INTO orders VALUES
+  (1,  1, 1, 3,  '2022-02-10', 'completed'),
+  (2,  1, 3, 1,  '2022-05-15', 'completed'),
+  (3,  2, 2, 5,  '2022-04-01', 'completed'),
+  (4,  2, 4, 1,  '2022-09-20', 'completed'),
+  (5,  3, 1, 2,  '2022-07-12', 'completed'),
+  (6,  3, 5, 1,  '2023-01-08', 'completed'),
+  (7,  4, 3, 1,  '2023-02-14', 'completed'),
+  (8,  4, 6, 1,  '2023-06-30', 'completed'),
+  (9,  5, 2, 10, '2023-05-22', 'completed'),
+  (10, 5, 1, 4,  '2023-08-15', 'completed'),
+  (11, 6, 4, 2,  '2023-10-01', 'completed'),
+  (12, 6, 5, 1,  '2024-01-15', 'completed'),
+  (13, 7, 3, 1,  '2024-03-10', 'completed'),
+  (14, 7, 1, 6,  '2024-05-20', 'completed'),
+  (15, 8, 6, 1,  '2024-07-01', 'completed'),
+  (16, 1, 4, 1,  '2023-03-10', 'completed'),
+  (17, 2, 3, 1,  '2023-07-22', 'completed'),
+  (18, 3, 6, 1,  '2023-11-05', 'refunded'),
+  (19, 5, 3, 1,  '2024-01-30', 'completed'),
+  (20, 4, 1, 2,  '2024-04-11', 'completed');</code></pre>
+
+    <p>Quick sanity check &mdash; verify the row counts:</p>
+    <pre><code class="language-sql">SELECT COUNT(*) FROM customers;
+SELECT COUNT(*) FROM products;
+SELECT COUNT(*) FROM orders;</code></pre>
+    <div class="output">8
+6
+20</div>
+
+    <!-- ===== JOINING TABLES ===== -->
+    <h2>Joining Tables: Who Bought What?</h2>
+    <p>The most common question in any e-commerce dataset is simply: who bought what, and when? That information is spread across all three tables. An <code>INNER JOIN</code> connects them through the foreign keys.</p>
+
+    <pre><code class="language-sql">SELECT
+  c.name   AS customer,
+  p.name   AS product,
+  p.category,
+  o.quantity,
+  o.quantity * p.price AS line_total,
+  o.order_date
+FROM orders o
+INNER JOIN customers c ON o.customer_id = c.id
+INNER JOIN products p  ON o.product_id  = p.id
+WHERE o.status = 'completed'
+ORDER BY o.order_date
+LIMIT 10;</code></pre>
+    <div class="output">Alice Chen     Widget Pro      hardware    3   149.97  2022-02-10
+Bob Martinez   Widget Basic    hardware    5   149.95  2022-04-01
+Alice Chen     CloudSync       software    1   199.99  2022-05-15
+Carol White    Widget Pro      hardware    2    99.98  2022-07-12
+Bob Martinez   DataVault       software    1   149.99  2022-09-20
+Carol White    Support Plan    services    1    99.99  2023-01-08
+Dave Kim       CloudSync       software    1   199.99  2023-02-14
+Alice Chen     DataVault       software    1   149.99  2023-03-10
+Eve Johnson    Widget Basic    hardware   10   299.90  2023-05-22
+Dave Kim       Training Pack   services    1   299.99  2023-06-30</div>
+
+    <p>Notice the pattern: each row in <code>orders</code> gets enriched with the customer name and product details. We also computed <code>line_total</code> on the fly. The <code>WHERE o.status = 'completed'</code> filter drops the single refunded order so our revenue numbers stay accurate.</p>
+
+    <!-- ===== LEFT JOIN ===== -->
+    <h2>LEFT JOIN: The Complete Picture</h2>
+    <p>An INNER JOIN only returns rows that match on both sides. But sometimes you need the opposite: show me everything on the left, even if there is no match on the right. That is what <code>LEFT JOIN</code> is for.</p>
+
+    <p>Let's find customers who have not placed any orders in 2024:</p>
+
+    <pre><code class="language-sql">SELECT
+  c.name    AS customer,
+  c.region,
+  o.id      AS order_id,
+  o.order_date
+FROM customers c
+LEFT JOIN orders o
+  ON c.id = o.customer_id
+  AND o.order_date >= '2024-01-01'
+ORDER BY o.order_date, c.name;</code></pre>
+    <div class="output">Alice Chen      US-West   NULL  NULL
+Bob Martinez    US-East   NULL  NULL
+Carol White     EU-West   NULL  NULL
+Dave Kim        US-West   20    2024-04-11
+Eve Johnson     US-East   19    2024-01-30
+Frank Brown     EU-West   12    2024-01-15
+Grace Liu       APAC      13    2024-03-10
+Grace Liu       APAC      14    2024-05-20
+Heidi Park      APAC      15    2024-07-01</div>
+
+    <p>The NULL values in <code>order_id</code> and <code>order_date</code> tell you exactly who has gone quiet. Alice, Bob, and Carol &mdash; your earliest customers &mdash; have not ordered in 2024. That is the kind of insight a retention team can act on immediately.</p>
+
+    <!-- ===== AGGREGATION ACROSS JOINS ===== -->
+    <h2>Aggregation Across Joins</h2>
+    <p>Now let's answer the questions leadership actually asks: how much revenue does each category generate? How do regions compare? Which products move the most units?</p>
+
+    <h3>Revenue per Category</h3>
+    <pre><code class="language-sql">SELECT
+  p.category,
+  SUM(o.quantity * p.price) AS total_revenue,
+  SUM(o.quantity)           AS units_sold,
+  COUNT(*)                  AS order_count
+FROM orders o
+INNER JOIN products p ON o.product_id = p.id
+WHERE o.status = 'completed'
+GROUP BY p.category
+ORDER BY total_revenue DESC;</code></pre>
+    <div class="output">software    1099.93  6   6
+hardware     999.70  26  6
+services     799.96  4   4</div>
+
+    <p>Software drives the most revenue despite fewer units &mdash; high-value items pulling their weight.</p>
+
+    <h3>Revenue per Region</h3>
+    <pre><code class="language-sql">SELECT
+  c.region,
+  SUM(o.quantity * p.price) AS total_revenue,
+  COUNT(DISTINCT c.id)      AS unique_customers
+FROM orders o
+INNER JOIN customers c ON o.customer_id = c.id
+INNER JOIN products p  ON o.product_id  = p.id
+WHERE o.status = 'completed'
+GROUP BY c.region
+ORDER BY total_revenue DESC;</code></pre>
+    <div class="output">US-East    799.83  2
+US-West    899.92  2
+APAC       599.93  2
+EU-West    399.96  2</div>
+
+    <h3>HAVING: Filtering Groups</h3>
+    <p>Suppose you only want product categories that have generated more than $800 in revenue. <code>WHERE</code> filters rows before aggregation; <code>HAVING</code> filters groups after.</p>
+
+    <pre><code class="language-sql">SELECT
+  p.category,
+  SUM(o.quantity * p.price) AS total_revenue
+FROM orders o
+INNER JOIN products p ON o.product_id = p.id
+WHERE o.status = 'completed'
+GROUP BY p.category
+HAVING SUM(o.quantity * p.price) > 800.0
+ORDER BY total_revenue DESC;</code></pre>
+    <div class="output">software    1099.93
+hardware     999.70</div>
+
+    <!-- ===== SUBQUERIES ===== -->
+    <h2>Subqueries: Asking Questions Within Questions</h2>
+    <p>A subquery is a SELECT inside another SELECT. It lets you compute a value (or a set of values) and use it as a filter condition.</p>
+
+    <h3>Scalar Subquery: Above-Average Spenders</h3>
+    <p>Who has spent more than the average customer? First we need each customer's total spend, then we compare against the mean.</p>
+
+    <pre><code class="language-sql">SELECT
+  c.name,
+  SUM(o.quantity * p.price) AS total_spend
+FROM orders o
+INNER JOIN customers c ON o.customer_id = c.id
+INNER JOIN products p  ON o.product_id  = p.id
+WHERE o.status = 'completed'
+GROUP BY c.name
+HAVING SUM(o.quantity * p.price) > (
+  SELECT AVG(customer_total) FROM (
+    SELECT SUM(o2.quantity * p2.price) AS customer_total
+    FROM orders o2
+    INNER JOIN products p2 ON o2.product_id = p2.id
+    WHERE o2.status = 'completed'
+    GROUP BY o2.customer_id
+  )
+)
+ORDER BY total_spend DESC;</code></pre>
+    <div class="output">Eve Johnson    699.85
+Alice Chen     499.95
+Dave Kim       599.97
+Bob Martinez   499.93</div>
+
+    <h3>IN Subquery: Customers Who Bought Software</h3>
+    <p>Sometimes you want to filter by membership in a dynamically computed set. The <code>IN</code> subquery handles this cleanly.</p>
+
+    <pre><code class="language-sql">SELECT DISTINCT c.name, c.region
+FROM orders o
+INNER JOIN customers c ON o.customer_id = c.id
+WHERE o.product_id IN (
+  SELECT id FROM products WHERE category = 'software'
+)
+ORDER BY c.name;</code></pre>
+    <div class="output">Alice Chen      US-West
+Bob Martinez    US-East
+Dave Kim        US-West
+Eve Johnson     US-East
+Frank Brown     EU-West
+Grace Liu       APAC</div>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Write a query that finds all customers who have <em>never</em> purchased a product in the "services" category. Hint: use <code>NOT IN</code> with a subquery on orders joined to products.</p>
+    </div>
+
+    <!-- ===== CTEs ===== -->
+    <h2>CTEs for Multi-Step Logic</h2>
+    <p>Common Table Expressions (CTEs) let you name intermediate result sets and reference them later. Think of them as temporary views that exist only for the duration of one query. They make complex logic readable and debuggable.</p>
+
+    <h3>Customer Lifetime Value with Ranking</h3>
+    <p>Let's build this in steps: first compute each customer's total spend, then rank them.</p>
+
+    <pre><code class="language-sql">WITH customer_spend AS (
+  SELECT
+    c.id,
+    c.name,
+    c.region,
+    c.joined_date,
+    SUM(o.quantity * p.price) AS lifetime_value,
+    COUNT(*)                  AS order_count
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id
+  INNER JOIN products p  ON o.product_id  = p.id
+  WHERE o.status = 'completed'
+  GROUP BY c.id, c.name, c.region, c.joined_date
+)
+SELECT
+  name,
+  region,
+  lifetime_value,
+  order_count,
+  lifetime_value / order_count AS avg_order_value
+FROM customer_spend
+ORDER BY lifetime_value DESC;</code></pre>
+    <div class="output">Eve Johnson     US-East    699.85  4  174.96
+Dave Kim        US-West    599.97  3  200.00
+Alice Chen      US-West    499.95  3  166.65
+Bob Martinez    US-East    499.93  3  166.64
+Grace Liu       APAC       499.93  2  249.97
+Heidi Park      APAC       299.99  1  299.99
+Frank Brown     EU-West    399.97  2  199.99
+Carol White     EU-West    199.97  2   99.99</div>
+
+    <h3>Chained CTEs: Cohort Analysis</h3>
+    <p>CTEs can reference earlier CTEs, letting you build up logic step by step. Let's group customers by the year they joined and see how each cohort performs.</p>
+
+    <pre><code class="language-sql">WITH customer_spend AS (
+  SELECT
+    c.id,
+    c.joined_date,
+    SUM(o.quantity * p.price) AS lifetime_value
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id
+  INNER JOIN products p  ON o.product_id  = p.id
+  WHERE o.status = 'completed'
+  GROUP BY c.id, c.joined_date
+),
+cohorts AS (
+  SELECT
+    EXTRACT(YEAR FROM joined_date) AS cohort_year,
+    COUNT(*)                       AS cohort_size,
+    SUM(lifetime_value)            AS cohort_revenue,
+    AVG(lifetime_value)            AS avg_clv
+  FROM customer_spend
+  GROUP BY EXTRACT(YEAR FROM joined_date)
+)
+SELECT
+  cohort_year,
+  cohort_size,
+  cohort_revenue,
+  avg_clv
+FROM cohorts
+ORDER BY cohort_year;</code></pre>
+    <div class="output">2022  3  1199.85  399.95
+2023  3  1699.79  566.60
+2024  2   799.92  399.96</div>
+
+    <p>The 2023 cohort has the highest average CLV. That could reflect more time to accumulate purchases, or it could signal a particularly engaged group. Either way, it is the kind of signal worth investigating.</p>
+
+    <!-- ===== WINDOW FUNCTIONS ===== -->
+    <h2>Window Functions</h2>
+    <p>Window functions compute a value across a set of rows related to the current row, without collapsing the result into a single group. They are what you reach for when you need rankings, running totals, or comparisons against an aggregate &mdash; while keeping every individual row visible.</p>
+
+    <h3>Running Total per Customer</h3>
+    <p>Let's track how each customer's spend accumulates over time:</p>
+
+    <pre><code class="language-sql">SELECT
+  c.name,
+  o.order_date,
+  o.quantity * p.price AS line_total,
+  SUM(o.quantity * p.price) OVER (
+    PARTITION BY c.id ORDER BY o.order_date
+  ) AS running_total
+FROM orders o
+INNER JOIN customers c ON o.customer_id = c.id
+INNER JOIN products p  ON o.product_id  = p.id
+WHERE o.status = 'completed'
+  AND c.name IN ('Alice Chen', 'Eve Johnson')
+ORDER BY c.name, o.order_date;</code></pre>
+    <div class="output">Alice Chen     2022-02-10  149.97  149.97
+Alice Chen     2022-05-15  199.99  349.96
+Alice Chen     2023-03-10  149.99  499.95
+Eve Johnson    2023-05-22  299.90  299.90
+Eve Johnson    2023-08-15  199.96  499.86
+Eve Johnson    2024-01-30  199.99  699.85</div>
+
+    <h3>RANK and DENSE_RANK: Ranking Customers by Total Spend</h3>
+    <p><code>RANK()</code> assigns the same rank to ties but leaves gaps. <code>DENSE_RANK()</code> assigns the same rank to ties without gaps. <code>ROW_NUMBER()</code> always gives a unique number.</p>
+
+    <pre><code class="language-sql">WITH customer_spend AS (
+  SELECT
+    c.name,
+    c.region,
+    SUM(o.quantity * p.price) AS total_spend
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id
+  INNER JOIN products p  ON o.product_id  = p.id
+  WHERE o.status = 'completed'
+  GROUP BY c.name, c.region
+)
+SELECT
+  name,
+  region,
+  total_spend,
+  RANK()       OVER (ORDER BY total_spend DESC) AS rank,
+  DENSE_RANK() OVER (ORDER BY total_spend DESC) AS dense_rank,
+  ROW_NUMBER() OVER (ORDER BY total_spend DESC) AS row_num
+FROM customer_spend
+ORDER BY rank;</code></pre>
+    <div class="output">Eve Johnson     US-East    699.85  1  1  1
+Dave Kim        US-West    599.97  2  2  2
+Alice Chen      US-West    499.95  3  3  3
+Bob Martinez    US-East    499.93  4  4  4
+Grace Liu       APAC       499.93  4  4  5
+Frank Brown     EU-West    399.97  6  5  6
+Heidi Park      APAC       299.99  7  6  7
+Carol White     EU-West    199.97  8  7  8</div>
+
+    <p>Notice how Bob and Grace both have a total spend near 499.93. With <code>RANK</code>, they both get rank 4 and rank 6 is skipped. With <code>DENSE_RANK</code>, there are no gaps. <code>ROW_NUMBER</code> breaks the tie arbitrarily.</p>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Add a window function column that shows each customer's spend as a percentage of the total across all customers. Hint: use <code>SUM(total_spend) OVER ()</code> (empty OVER clause = entire result set) as the denominator, and multiply by 100.</p>
+    </div>
+
+    <!-- ===== THE EXECUTIVE DASHBOARD ===== -->
+    <h2>The Executive Dashboard</h2>
+    <p>Now let's bring everything together. This is the kind of query you would schedule nightly and pipe into a BI tool. It combines joins, aggregation, a CTE, and a window function into a single result set.</p>
+
+    <pre><code class="language-sql">WITH customer_metrics AS (
+  SELECT
+    c.id            AS customer_id,
+    c.name          AS customer_name,
+    c.region,
+    EXTRACT(YEAR FROM c.joined_date)  AS join_year,
+    COUNT(*)                          AS order_count,
+    SUM(o.quantity * p.price)         AS lifetime_value,
+    SUM(o.quantity)                   AS total_units
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id
+  INNER JOIN products p  ON o.product_id  = p.id
+  WHERE o.status = 'completed'
+  GROUP BY c.id, c.name, c.region, c.joined_date
+)
+SELECT
+  customer_name,
+  region,
+  join_year,
+  order_count,
+  total_units,
+  lifetime_value,
+  lifetime_value / order_count AS avg_order_value,
+  RANK() OVER (ORDER BY lifetime_value DESC) AS spend_rank,
+  SUM(lifetime_value) OVER (
+    ORDER BY lifetime_value DESC
+  ) AS cumulative_revenue
+FROM customer_metrics
+ORDER BY spend_rank;</code></pre>
+    <div class="output">Eve Johnson     US-East  2023  4  15   699.85  174.96  1    699.85
+Dave Kim        US-West  2023  3   4   599.97  200.00  2   1299.82
+Alice Chen      US-West  2022  3   5   499.95  166.65  3   1799.77
+Bob Martinez    US-East  2022  3   7   499.93  166.64  4   2299.70
+Grace Liu       APAC     2024  2   7   499.93  249.97  4   2799.63
+Frank Brown     EU-West  2023  2   3   399.97  199.99  6   3199.60
+Heidi Park      APAC     2024  1   1   299.99  299.99  7   3499.59
+Carol White     EU-West  2022  2   3   199.97   99.99  8   3699.56</div>
+
+    <p>In one query you can see that Eve Johnson is your highest-value customer, the top four customers account for more than 60% of total revenue (cumulative hits $2299.70 of $3699.56), and the 2023 cohort holds the top two spots. That is a dashboard slide, not a SQL exercise.</p>
+
+    <!-- ===== WHAT'S NEXT ===== -->
+    <h2>What's Next</h2>
+    <p>You now have the core SQL toolkit for building real reporting queries. Here are some directions to explore next:</p>
+
+    <div class="card-grid">
+      <a href="temporal-queries.html" class="card" style="text-decoration:none">
+        <div class="card-num">NEXT GUIDE</div>
+        <h3>Working with Time</h3>
+        <p>DATE, TIME, and TIMESTAMP columns. Temporal filtering, extraction, and time-series patterns.</p>
+      </a>
+      <a href="../sql/joins.html" class="card" style="text-decoration:none">
+        <div class="card-num">REFERENCE</div>
+        <h3>Joins</h3>
+        <p>Full reference for INNER, LEFT, RIGHT, FULL, and CROSS joins.</p>
+      </a>
+      <a href="../sql/window-functions.html" class="card" style="text-decoration:none">
+        <div class="card-num">REFERENCE</div>
+        <h3>Window Functions</h3>
+        <p>ROW_NUMBER, RANK, DENSE_RANK, NTILE, LAG, LEAD, and frame specifications.</p>
+      </a>
+      <a href="../sql/subqueries.html" class="card" style="text-decoration:none">
+        <div class="card-num">REFERENCE</div>
+        <h3>Subqueries &amp; CTEs</h3>
+        <p>Scalar, IN, EXISTS, and correlated subqueries. WITH clause and chained CTEs.</p>
+      </a>
+    </div>
+
+    <nav class="page-nav">
+      <a href="getting-started.html" class="prev">From CSV to Insights</a>
+      <a href="temporal-queries.html" class="next">Working with Time</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

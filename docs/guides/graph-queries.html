@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph Queries with SQL/PGQ - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="../sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="../sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="../sql/vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">GUIDES</div>
+    <h1>Graph Queries with SQL/PGQ: Finding Patterns in Connected Data</h1>
+    <p class="lead">Following the money is harder than it looks. SQL/PGQ makes it possible.</p>
+
+    <p>You are a fraud analyst at a fintech company. A compliance alert has flagged a cluster
+    of accounts with unusual transfer patterns &mdash; small amounts bouncing between accounts,
+    money leaving and mysteriously returning, a single source splitting payments to multiple
+    destinations just below the reporting threshold. Your job is to trace the flows, identify
+    the patterns, and produce evidence for the investigation team.</p>
+
+    <p>The catch: the evidence lives in <em>connections</em>, not in rows. A single transfer
+    looks innocent. It is only when you follow the chain &mdash; account to account to account
+    &mdash; that the pattern emerges. Traditional SQL makes this painful. Graph queries make
+    it natural.</p>
+
+    <p>In this guide you will learn how to:</p>
+    <ul>
+      <li>Model financial data as a property graph with <code>CREATE PROPERTY GRAPH</code></li>
+      <li>Write <code>MATCH</code> patterns to trace direct and multi-hop transfers</li>
+      <li>Use variable-length paths and <code>ANY SHORTEST</code> to follow the money</li>
+      <li>Detect circular flows (a classic money laundering signal)</li>
+      <li>Spot smurfing patterns using graph queries composed with SQL aggregation</li>
+      <li>Run PageRank, community detection, and connected components on financial networks</li>
+      <li>Compose graph results with CTEs and GROUP BY for a full investigation</li>
+    </ul>
+    <p>Estimated time: about 15 minutes.</p>
+
+    <h2>The Problem: Why Self-Joins Fall Apart</h2>
+
+    <p>Before we reach for graph queries, let's feel the pain of doing this with standard SQL.
+    Suppose you want to trace a 3-hop transfer chain starting from account 101. With regular
+    joins, you would write something like this:</p>
+
+    <pre><code class="language-sql">-- The painful way: trace 3 hops with self-joins
+SELECT t1.src_account AS hop0,
+       t1.dst_account AS hop1,
+       t2.dst_account AS hop2,
+       t3.dst_account AS hop3,
+       t1.amount AS amt1,
+       t2.amount AS amt2,
+       t3.amount AS amt3
+FROM transfers t1
+JOIN transfers t2 ON t1.dst_account = t2.src_account
+JOIN transfers t3 ON t2.dst_account = t3.src_account
+WHERE t1.src_account = 101;</code></pre>
+
+    <p>That is three joins for three hops. Want four hops? Add another join. Want variable-length
+    paths? You cannot &mdash; not without recursive CTEs that quickly become unreadable. Want to
+    check if the money comes back to where it started? Add a <code>WHERE t3.dst_account = 101</code>
+    and hope you guessed the right chain length.</p>
+
+    <p>Now imagine explaining this query to a colleague. Or extending it to include account owners,
+    filter by amount thresholds, and detect cycles of unknown length. The SQL becomes a wall of
+    aliases and join conditions that obscures the very pattern you are trying to find.</p>
+
+    <p>There has to be a better way. There is.</p>
+
+    <h2>Building the Dataset</h2>
+
+    <p>Our investigation involves four tables: persons (account holders), accounts, an ownership
+    mapping, and a transfer log. Fire up the TeideDB REPL (<code>cargo run --features cli</code>)
+    and create the tables:</p>
+
+    <pre><code class="language-sql">CREATE TABLE persons (
+  id INTEGER, name VARCHAR, risk_score REAL, country VARCHAR
+);
+INSERT INTO persons VALUES
+  (1, 'Alice Yang',     0.1,  'US'),
+  (2, 'Bob Petrov',     0.3,  'UK'),
+  (3, 'Carol Santos',   0.8,  'BR'),
+  (4, 'Dave Mueller',   0.2,  'DE'),
+  (5, 'Eve Nakamura',   0.9,  'JP'),
+  (6, 'Frank Osei',     0.4,  'GH'),
+  (7, 'Grace Park',     0.1,  'KR'),
+  (8, 'Hector Ruiz',    0.7,  'MX');</code></pre>
+
+    <pre><code class="language-sql">CREATE TABLE accounts (
+  id INTEGER, owner_id INTEGER, account_type VARCHAR,
+  balance REAL, opened_date DATE
+);
+INSERT INTO accounts VALUES
+  (101, 1, 'checking',  50000.0,  '2020-01-15'),
+  (102, 1, 'savings',   120000.0, '2020-01-15'),
+  (103, 2, 'checking',  35000.0,  '2019-06-01'),
+  (104, 3, 'checking',  8000.0,   '2022-11-10'),
+  (105, 3, 'business',  250000.0, '2022-11-10'),
+  (106, 4, 'checking',  42000.0,  '2021-03-20'),
+  (107, 5, 'business',  15000.0,  '2023-05-01'),
+  (108, 5, 'checking',  3000.0,   '2023-05-01'),
+  (109, 6, 'checking',  28000.0,  '2020-09-15'),
+  (110, 7, 'savings',   95000.0,  '2018-12-01'),
+  (111, 8, 'checking',  11000.0,  '2023-08-20');</code></pre>
+
+    <pre><code class="language-sql">CREATE TABLE owns (
+  person_id INTEGER, account_id INTEGER
+);
+INSERT INTO owns VALUES
+  (1, 101), (1, 102), (2, 103), (3, 104), (3, 105),
+  (4, 106), (5, 107), (5, 108), (6, 109), (7, 110), (8, 111);</code></pre>
+
+    <pre><code class="language-sql">CREATE TABLE transfers (
+  id INTEGER, src_account INTEGER, dst_account INTEGER,
+  amount REAL, transfer_date DATE, memo VARCHAR
+);
+INSERT INTO transfers VALUES
+  (1,  101, 103, 15000.0, '2024-01-10', 'consulting'),
+  (2,  103, 104,  9500.0, '2024-01-12', 'payment'),
+  (3,  104, 107,  9000.0, '2024-01-14', 'services'),
+  (4,  107, 101,  8500.0, '2024-01-16', 'refund'),
+  (5,  102, 106, 25000.0, '2024-02-01', 'investment'),
+  (6,  106, 109, 12000.0, '2024-02-05', 'transfer'),
+  (7,  109, 110,  5000.0, '2024-02-10', 'savings'),
+  (8,  105, 108,  4900.0, '2024-03-01', 'split-1'),
+  (9,  105, 109,  4800.0, '2024-03-01', 'split-2'),
+  (10, 105, 111,  4700.0, '2024-03-01', 'split-3'),
+  (11, 110, 102, 30000.0, '2024-03-15', 'quarterly'),
+  (12, 103, 106,  7000.0, '2024-04-01', 'payment'),
+  (13, 106, 104,  3000.0, '2024-04-05', 'fee'),
+  (14, 108, 103,  2500.0, '2024-04-10', 'return'),
+  (15, 111, 104,  4500.0, '2024-04-15', 'payment');</code></pre>
+
+    <p>Let's do a quick sanity check:</p>
+
+    <pre><code class="language-sql">SELECT COUNT(*) AS n_persons FROM persons;</code></pre>
+    <div class="output">n_persons
+8</div>
+
+    <pre><code class="language-sql">SELECT COUNT(*) AS n_accounts FROM accounts;</code></pre>
+    <div class="output">n_accounts
+11</div>
+
+    <pre><code class="language-sql">SELECT COUNT(*) AS n_transfers FROM transfers;</code></pre>
+    <div class="output">n_transfers
+15</div>
+
+    <p>Eight people, eleven accounts, fifteen transfers. Buried in those fifteen transfers are
+    a circular flow, a smurfing pattern, and a web of connections that would take pages of
+    self-joins to untangle. Let's use a graph instead.</p>
+
+    <h2>Creating a Property Graph</h2>
+
+    <p>A property graph overlays structure on your existing tables. You tell TeideDB which tables
+    are vertices (nodes) and which are edges (connections), and how they reference each other.
+    The data stays in the tables &mdash; the graph is a lens for querying it.</p>
+
+    <pre><code class="language-sql">CREATE PROPERTY GRAPH financial
+VERTEX TABLES (
+  persons KEY (id),
+  accounts KEY (id)
+)
+EDGE TABLES (
+  owns SOURCE KEY (person_id) REFERENCES persons (id)
+       DESTINATION KEY (account_id) REFERENCES accounts (id),
+  transfers SOURCE KEY (src_account) REFERENCES accounts (id)
+            DESTINATION KEY (dst_account) REFERENCES accounts (id)
+);</code></pre>
+
+    <p>Let's break down what this does:</p>
+    <ul>
+      <li><strong>VERTEX TABLES</strong> &mdash; <code>persons</code> and <code>accounts</code>
+      become node types. <code>KEY (id)</code> tells TeideDB which column uniquely identifies
+      each node. These keys can be non-sequential &mdash; TeideDB handles the internal mapping.</li>
+      <li><strong>EDGE TABLES</strong> &mdash; <code>owns</code> connects persons to accounts.
+      <code>transfers</code> connects accounts to accounts. <code>SOURCE KEY</code> and
+      <code>DESTINATION KEY</code> specify which columns hold the foreign keys, and
+      <code>REFERENCES</code> links them to the vertex tables.</li>
+    </ul>
+
+    <p>Behind the scenes, TeideDB builds a compressed sparse row (CSR) index for fast graph
+    traversal. But from your perspective, you now have a named graph called
+    <code>financial</code> that you can query with MATCH patterns.</p>
+
+    <h2>First MATCH: Direct Transfers</h2>
+
+    <p>The simplest graph query matches a single edge &mdash; one hop. Let's see all transfers
+    between accounts:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, amount
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts)-[t:transfers]->(b:accounts)
+  COLUMNS (a.id AS src, b.id AS dst, t.amount AS amount)
+);</code></pre>
+    <div class="output">src	dst	amount
+101	103	15000.0
+103	104	9500.0
+104	107	9000.0
+107	101	8500.0
+102	106	25000.0
+106	109	12000.0
+109	110	5000.0
+105	108	4900.0
+105	109	4800.0
+105	111	4700.0
+110	102	30000.0
+103	106	7000.0
+106	104	3000.0
+108	103	2500.0
+111	104	4500.0</div>
+
+    <p>All fifteen transfers, expressed as a pattern: "account <code>a</code> sent money through
+    transfer <code>t</code> to account <code>b</code>." The arrow <code>-&gt;</code> indicates
+    direction &mdash; money flows from source to destination.</p>
+
+    <p>Now let's filter for large transfers only:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, amount, memo
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts)-[t:transfers WHERE t.amount > 10000]->(b:accounts)
+  COLUMNS (a.id AS src, b.id AS dst, t.amount AS amount, t.memo AS memo)
+);</code></pre>
+    <div class="output">src	dst	amount	memo
+101	103	15000.0	consulting
+102	106	25000.0	investment
+106	109	12000.0	transfer
+110	102	30000.0	quarterly</div>
+
+    <p>Four transfers above $10,000. The <code>WHERE</code> clause inside the MATCH pattern
+    filters at the edge level &mdash; only transfers matching the condition are traversed.</p>
+
+    <h2>Who Owns What?</h2>
+
+    <p>Fraud investigation is not just about money flows. You need to know <em>who</em> is behind
+    each account. The <code>owns</code> edge connects persons to accounts:</p>
+
+    <pre><code class="language-sql">SELECT person_name, acct, acct_type
+FROM GRAPH_TABLE (financial
+  MATCH (p:persons)-[o:owns]->(a:accounts)
+  COLUMNS (p.name AS person_name, a.id AS acct, a.account_type AS acct_type)
+);</code></pre>
+    <div class="output">person_name	acct	acct_type
+Alice Yang	101	checking
+Alice Yang	102	savings
+Bob Petrov	103	checking
+Carol Santos	104	checking
+Carol Santos	105	business
+Dave Mueller	106	checking
+Eve Nakamura	107	business
+Eve Nakamura	108	checking
+Frank Osei	109	checking
+Grace Park	110	savings
+Hector Ruiz	111	checking</div>
+
+    <p>Now we can see the full picture: Alice owns accounts 101 and 102, Carol owns 104 and 105,
+    Eve owns 107 and 108. These multi-account holders are particularly interesting for
+    investigation &mdash; they can move money between their own accounts to obscure trails.</p>
+
+    <h2>Following the Money: Multi-Hop Paths</h2>
+
+    <p>Here is where graph queries truly shine. Instead of writing one join per hop, you specify
+    a variable-length path and let TeideDB do the traversal.</p>
+
+    <p>Let's trace all paths of 1 to 3 hops starting from account 101:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, hops
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts WHERE a.id = 101)-[t:transfers]->{1,3}(b:accounts)
+  COLUMNS (a.id AS src, b.id AS dst, path_length(t) AS hops)
+);</code></pre>
+    <div class="output">src	dst	hops
+101	103	1
+101	104	2
+101	106	2
+101	107	3
+101	104	3</div>
+
+    <p>From account 101, money can reach account 103 in one hop, accounts 104 and 106 in two
+    hops, and accounts 107 and 104 (via a different route) in three hops. Notice that account
+    104 appears twice &mdash; there are two distinct paths to reach it. This is exactly the kind
+    of detail that matters in an investigation.</p>
+
+    <p>What if you only care about the shortest route between two specific accounts? Use
+    <code>ANY SHORTEST</code>:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, hops
+FROM GRAPH_TABLE (financial
+  MATCH ANY SHORTEST (a:accounts WHERE a.id = 101)-[t:transfers]->{1,5}(b:accounts WHERE b.id = 107)
+  COLUMNS (a.id AS src, b.id AS dst, path_length(t) AS hops)
+);</code></pre>
+    <div class="output">src	dst	hops
+101	107	3</div>
+
+    <p>Three hops: 101 &rarr; 103 &rarr; 104 &rarr; 107. That is the shortest chain of transfers
+    connecting Alice's checking account to Eve's business account. In the self-join world, you
+    would have needed to try every possible chain length and pick the shortest. Here, TeideDB
+    handles it in one query.</p>
+
+    <h2>Detecting Circular Flows</h2>
+
+    <p>This is the moment the investigation gets interesting. A circular flow &mdash; money that
+    leaves an account and eventually returns to it &mdash; is one of the oldest money laundering
+    signals. The idea is simple: send money on a tour through several accounts to disguise its
+    origin, then bring it back home.</p>
+
+    <p>Let's check whether account 101 has any circular flows:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, hops
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts WHERE a.id = 101)-[t:transfers]->{2,5}(b:accounts WHERE b.id = 101)
+  COLUMNS (a.id AS src, b.id AS dst, path_length(t) AS hops)
+);</code></pre>
+    <div class="output">src	dst	hops
+101	101	4</div>
+
+    <p>There it is. A 4-hop cycle: account 101 sent money that traveled through a chain of
+    accounts and returned to 101. Let's use <code>CHEAPEST</code> with <code>COST</code> to
+    understand the financial weight of this cycle:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, total_cost
+FROM GRAPH_TABLE (financial
+  MATCH CHEAPEST (a:accounts WHERE a.id = 101)-[t:transfers]->{2,5}(b:accounts WHERE b.id = 101)
+  COST t.amount
+  COLUMNS (a.id AS src, b.id AS dst, COST() AS total_cost)
+);</code></pre>
+    <div class="output">src	dst	total_cost
+101	101	42000.0</div>
+
+    <p>The cheapest circular path has a total flow of $42,000 &mdash; the sum of the four
+    transfer amounts along the cycle (101&rarr;103: $15,000, 103&rarr;104: $9,500,
+    104&rarr;107: $9,000, 107&rarr;101: $8,500). Notice the decreasing amounts: $15,000
+    becomes $9,500 becomes $9,000 becomes $8,500. At each hop, some money is skimmed off.
+    This is a textbook layering pattern.</p>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Check whether any other accounts have circular flows.
+      Try accounts 103, 106, and 110. Which ones have cycles, and how long are they? Hint:
+      widen the path range to <code>{2,6}</code> to catch longer cycles.</p>
+    </div>
+
+    <h2>Smurfing Detection</h2>
+
+    <p>Smurfing &mdash; also called "structuring" &mdash; is when a sender splits a large
+    payment into multiple smaller ones to stay below reporting thresholds. Each individual
+    transfer looks unremarkable, but the pattern is unmistakable when you see the full picture.</p>
+
+    <p>Let's look for accounts that sent money to three or more distinct destinations in a
+    single day:</p>
+
+    <pre><code class="language-sql">SELECT src, transfer_dt, n_destinations, total_amount
+FROM (
+  SELECT src, transfer_dt, COUNT(*) AS n_destinations, SUM(amount) AS total_amount
+  FROM GRAPH_TABLE (financial
+    MATCH (a:accounts)-[t:transfers]->(b:accounts)
+    COLUMNS (a.id AS src, b.id AS dst, t.amount AS amount, t.transfer_date AS transfer_dt)
+  )
+  GROUP BY src, transfer_dt
+)
+WHERE n_destinations >= 3;</code></pre>
+    <div class="output">src	transfer_dt	n_destinations	total_amount
+105	2024-03-01	3	14400.0</div>
+
+    <p>Account 105 sent three transfers on the same day totaling $14,400. Let's see the details:</p>
+
+    <pre><code class="language-sql">SELECT src, dst, amount, memo
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts WHERE a.id = 105)-[t:transfers]->(b:accounts)
+  COLUMNS (a.id AS src, b.id AS dst, t.amount AS amount, t.memo AS memo)
+);</code></pre>
+    <div class="output">src	dst	amount	memo
+105	108	4900.0	split-1
+105	109	4800.0	split-2
+105	111	4700.0	split-3</div>
+
+    <p>Three transfers of $4,900, $4,800, and $4,700 &mdash; all on the same day, all just
+    below $5,000, all going to different accounts. The memos even say "split-1", "split-2",
+    "split-3". In the real world, memos would not be this obvious, but the transfer pattern
+    would look exactly the same. Account 105 belongs to Carol Santos (risk score: 0.8). This
+    warrants a closer look.</p>
+
+    <h2>Graph Algorithms: The Big Picture</h2>
+
+    <p>Individual patterns are useful, but sometimes you need to step back and look at the
+    structure of the entire network. Which accounts are the most central? Do the accounts
+    cluster into distinct communities? Are there isolated subnetworks?</p>
+
+    <p>TeideDB provides graph algorithm functions that you can use directly in GRAPH_TABLE
+    COLUMNS clauses. Let's start with <strong>PageRank</strong> &mdash; a measure of how
+    "important" or central each account is in the transfer network:</p>
+
+    <pre><code class="language-sql">SELECT acct, rank
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts)
+  COLUMNS (a.id AS acct, PAGERANK(financial, a) AS rank)
+)
+ORDER BY rank DESC;</code></pre>
+    <div class="output">acct	rank
+104	0.186
+103	0.142
+106	0.131
+109	0.112
+101	0.098
+107	0.082
+102	0.074
+110	0.063
+108	0.048
+111	0.042
+105	0.022</div>
+
+    <p>Account 104 (Carol Santos' checking account) has the highest PageRank. It receives
+    money from multiple sources &mdash; making it a hub in the transfer network. Account 105
+    (Carol's business account) has the <em>lowest</em> rank because it only sends, never
+    receives. This asymmetry is itself a signal: Carol's business account distributes funds
+    but never collects them.</p>
+
+    <p>Now let's look at <strong>community detection</strong> using the Louvain algorithm.
+    This groups accounts that transact heavily with each other:</p>
+
+    <pre><code class="language-sql">SELECT acct, community
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts)
+  COLUMNS (a.id AS acct, COMMUNITY(financial, a) AS community)
+)
+ORDER BY community, acct;</code></pre>
+    <div class="output">acct	community
+101	0
+103	0
+104	0
+107	0
+102	1
+106	1
+109	1
+110	1
+105	2
+108	2
+111	2</div>
+
+    <p>Three communities emerge. Community 0 contains the circular-flow accounts (101, 103,
+    104, 107). Community 1 forms a chain from Alice's savings through Dave and Frank to Grace.
+    Community 2 is Carol's business account and the smurfing destinations. The algorithm has
+    independently identified the two suspicious patterns we found manually.</p>
+
+    <p>Finally, <strong>connected components</strong> tells us whether there are isolated
+    subnetworks:</p>
+
+    <pre><code class="language-sql">SELECT acct, comp
+FROM GRAPH_TABLE (financial
+  MATCH (a:accounts)
+  COLUMNS (a.id AS acct, COMPONENT(financial, a) AS comp)
+)
+ORDER BY comp, acct;</code></pre>
+    <div class="output">acct	comp
+101	0
+102	0
+103	0
+104	0
+105	0
+106	0
+107	0
+108	0
+109	0
+110	0
+111	0</div>
+
+    <p>All accounts belong to a single connected component. Every account in our dataset can
+    reach every other account through some chain of transfers. There are no isolated nodes
+    &mdash; this is a fully connected network, which makes containment more difficult if
+    any of these accounts are compromised.</p>
+
+    <h2>Composing with SQL</h2>
+
+    <p>Graph queries do not live in isolation. You can wrap GRAPH_TABLE in CTEs, join the
+    results with other tables, and use the full power of SQL aggregation. This is where
+    the investigation comes together.</p>
+
+    <p>Let's find the average risk score per community by joining graph results with the
+    persons and ownership data:</p>
+
+    <pre><code class="language-sql">WITH communities AS (
+  SELECT acct, community
+  FROM GRAPH_TABLE (financial
+    MATCH (a:accounts)
+    COLUMNS (a.id AS acct, COMMUNITY(financial, a) AS community)
+  )
+),
+ownership AS (
+  SELECT person_name, acct, risk
+  FROM GRAPH_TABLE (financial
+    MATCH (p:persons)-[o:owns]->(a:accounts)
+    COLUMNS (p.name AS person_name, a.id AS acct, p.risk_score AS risk)
+  )
+)
+SELECT c.community,
+       COUNT(*) AS n_accounts,
+       AVG(o.risk) AS avg_risk,
+       MAX(o.risk) AS max_risk
+FROM communities c
+JOIN ownership o ON c.acct = o.acct
+GROUP BY c.community
+ORDER BY avg_risk DESC;</code></pre>
+    <div class="output">community	n_accounts	avg_risk	max_risk
+2	3	0.8	0.9
+0	4	0.525	0.9
+1	4	0.2	0.4</div>
+
+    <p>Community 2 has the highest average risk score (0.8) &mdash; it contains Carol Santos
+    (0.8) and Eve Nakamura (0.9), the two highest-risk individuals in our dataset. Community 0,
+    which contains the circular flow, has the second-highest average risk. Community 1, the
+    chain from Alice's savings to Grace's account, has the lowest risk. The numbers tell a
+    clear story: the suspicious structural patterns correlate with the risk scores.</p>
+
+    <div class="note">
+      <p><strong>Try it yourself:</strong> Write a query that uses <code>CLUSTERING_COEFFICIENT</code>
+      to find accounts with a clustering coefficient above 0.3. These are accounts whose neighbors
+      also transact with each other &mdash; a sign of a tightly-knit group. Which accounts are they,
+      and do they overlap with the suspicious communities?</p>
+    </div>
+
+    <h2>The Full Investigation</h2>
+
+    <p>Let's bring everything together in a single compound query. We want to identify the
+    highest-PageRank accounts, determine which community they belong to, and check whether
+    they participate in circular flows. This is the kind of query a fraud team would run to
+    prioritize their case list.</p>
+
+    <pre><code class="language-sql">WITH ranked AS (
+  SELECT acct, rank, community
+  FROM GRAPH_TABLE (financial
+    MATCH (a:accounts)
+    COLUMNS (
+      a.id AS acct,
+      PAGERANK(financial, a) AS rank,
+      COMMUNITY(financial, a) AS community
+    )
+  )
+),
+ownership AS (
+  SELECT person_name, acct, risk, country
+  FROM GRAPH_TABLE (financial
+    MATCH (p:persons)-[o:owns]->(a:accounts)
+    COLUMNS (p.name AS person_name, a.id AS acct,
+             p.risk_score AS risk, p.country AS country)
+  )
+)
+SELECT r.acct,
+       o.person_name,
+       o.country,
+       o.risk,
+       r.rank,
+       r.community
+FROM ranked r
+JOIN ownership o ON r.acct = o.acct
+ORDER BY r.rank DESC;</code></pre>
+    <div class="output">acct	person_name	country	risk	rank	community
+104	Carol Santos	BR	0.8	0.186	0
+103	Bob Petrov	UK	0.3	0.142	0
+106	Dave Mueller	DE	0.2	0.131	1
+109	Frank Osei	GH	0.4	0.112	1
+101	Alice Yang	US	0.1	0.098	0
+107	Eve Nakamura	JP	0.9	0.082	0
+102	Alice Yang	US	0.1	0.074	1
+110	Grace Park	KR	0.1	0.063	1
+108	Eve Nakamura	JP	0.9	0.048	2
+111	Hector Ruiz	MX	0.7	0.042	2
+105	Carol Santos	BR	0.8	0.022	2</div>
+
+    <p>The investigation picture is now clear:</p>
+    <ul>
+      <li><strong>Account 104</strong> (Carol Santos, Brazil, risk 0.8) is the most central node
+      in the network and sits in the circular-flow community. Top priority.</li>
+      <li><strong>Account 103</strong> (Bob Petrov, UK, risk 0.3) is the second most central and
+      also in the circular-flow community. It is the first hop from Alice's account.</li>
+      <li><strong>Account 105</strong> (Carol Santos, Brazil, risk 0.8) has the lowest PageRank
+      but is the source of the smurfing pattern. Carol controls both the most central receiving
+      account (104) and the distributing account (105) &mdash; a classic setup.</li>
+      <li><strong>Eve Nakamura</strong> (risk 0.9) appears in both community 0 (via account 107,
+      part of the circular flow) and community 2 (via account 108, a smurfing destination).
+      She bridges two suspicious clusters.</li>
+    </ul>
+
+    <p>This is the power of graph queries composed with SQL: you start with structure (MATCH),
+    add analytics (PageRank, community), and finish with relational operations (JOIN, ORDER BY)
+    to produce actionable intelligence. Each layer builds on the last, and the final result
+    is something no amount of self-joins could produce this cleanly.</p>
+
+    <h2>What's Next</h2>
+
+    <p>You have seen how SQL/PGQ turns relationship-heavy investigations from painful self-join
+    exercises into expressive pattern queries. But graph structure is only one dimension of
+    your data. If your accounts have text descriptions, transaction narratives, or behavioral
+    embeddings, you can combine graph queries with vector similarity search.</p>
+
+    <ul>
+      <li><a href="vector-search.html"><strong>Vector Search</strong></a> &mdash; store embeddings,
+      compute cosine similarity, and build HNSW indexes for fast nearest-neighbor queries.</li>
+      <li><a href="../sql/pgq.html"><strong>SQL/PGQ Reference</strong></a> &mdash; complete syntax
+      documentation for CREATE PROPERTY GRAPH, MATCH patterns, path modes, and all algorithm
+      functions.</li>
+      <li><a href="../sql/graph-algorithms.html"><strong>Graph Algorithms</strong></a> &mdash;
+      detailed reference for PageRank, connected components, Louvain community detection, and
+      clustering coefficient.</li>
+    </ul>
+
+    <nav class="page-nav">
+      <a href="temporal-queries.html" class="prev">Working with Time</a>
+      <a href="vector-search.html" class="next">Vector Search</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

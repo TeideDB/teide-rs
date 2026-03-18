@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Embedding TeideDB in Rust Applications - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="../sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="../sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="../sql/vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">GUIDES</div>
+    <h1>Embedding TeideDB in Rust Applications</h1>
+    <p class="lead">TeideDB is a library, not just a CLI. Embed a columnar analytics engine
+    in your Rust application with zero external dependencies and zero setup.</p>
+
+    <p>You are building an IoT monitoring service in Rust. Sensors push temperature, humidity,
+    and pressure readings every few seconds. Your API needs to answer queries like "average
+    temperature over the last hour, grouped by sensor" -- fast, without a network round-trip
+    to a separate database process. You need the database inside your binary.</p>
+
+    <p>This guide covers the full integration path. By the end, you will know how to:</p>
+
+    <ul>
+      <li>Add TeideDB as a Rust dependency and configure feature flags</li>
+      <li>Build computation graphs with the low-level <code>Graph</code> API</li>
+      <li>Execute SQL via the <code>Session</code> API and read typed results</li>
+      <li>Store and search vector embeddings with HNSW indexes</li>
+      <li>Expose your embedded database over the PostgreSQL wire protocol</li>
+      <li>Handle the <code>!Send + !Sync</code> constraint in async code</li>
+    </ul>
+
+    <p>Estimated time: about 12 minutes.</p>
+
+    <!-- ================================================================ -->
+    <h2>The Problem: Analytics Inside Your Process</h2>
+
+    <p>SQLite solves the embedded case for row-oriented workloads, but columnar aggregations
+    over millions of rows are not its strength. DuckDB is columnar but exposes a C++ API --
+    the FFI boundary is wide and the build system is heavy. TeideDB takes a different approach:
+    the core engine is C17 (~15,000 lines), vendored directly into the Rust crate, and compiled
+    from source by <code>build.rs</code>. No system library, no dynamic linking, no separate
+    process. <code>cargo build</code> gives you a statically linked columnar engine with a
+    morsel-driven executor, a cost-based optimizer, and SQL/PGQ graph queries -- all callable
+    from safe Rust.</p>
+
+    <!-- ================================================================ -->
+    <h2>Adding the Dependency</h2>
+
+    <p>TeideDB is not yet on crates.io. Add it as a path or git dependency:</p>
+
+    <pre><code class="language-toml">[dependencies]
+# From a local checkout:
+teide = { path = "../teide-rs" }
+
+# Or from git:
+teide = { git = "https://github.com/TeideDB/teide-rs.git" }</code></pre>
+
+    <p>The crate exposes three feature flags:</p>
+
+    <table>
+      <thead>
+        <tr><th>Feature</th><th>What it adds</th><th>Default</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>(default)</code></td><td>Core engine + SQL session API</td><td>Yes</td></tr>
+        <tr><td><code>cli</code></td><td>Interactive REPL binary</td><td>No</td></tr>
+        <tr><td><code>server</code></td><td>PgWire server binary</td><td>No</td></tr>
+      </tbody>
+    </table>
+
+    <p>For embedding in your own application, the default features are all you need. Leave
+    <code>cli</code> and <code>server</code> off to avoid pulling in their dependencies
+    (rustyline, pgwire, tokio).</p>
+
+    <div class="note">
+      <strong>Build requirement:</strong> Your system needs a C17-capable compiler
+      (<code>gcc &gt;= 7</code>, <code>clang &gt;= 5</code>, or MSVC 2019+). The
+      <code>build.rs</code> script compiles the vendored C source tree at
+      <code>vendor/teide/</code> using the <code>cc</code> crate. On most systems this
+      just works. If it does not, check that <code>cc</code> can find your C compiler.
+    </div>
+
+    <!-- ================================================================ -->
+    <h2>The Graph API: Low-Level Power</h2>
+
+    <p>At the lowest level, TeideDB exposes a lazy DAG of operations. You build a computation
+    graph, then call <code>execute()</code>. Nothing touches data until that final call --
+    the optimizer (constant folding, predicate pushdown, CSE, fusion, DCE) runs first, then
+    the morsel-driven executor processes the optimized plan.</p>
+
+    <pre><code class="language-rust">use teide::{Context, Table};
+
+fn main() -> Result&lt;(), teide::Error&gt; {
+    let ctx = Context::new()?;
+
+    let table = Table::from_vecs(
+        &amp;ctx,
+        &amp;["sensor_id", "temperature"],
+        &amp;[vec![1i64, 2, 3, 1, 2, 3]],                  // i64 columns
+        &amp;[vec![22.1, 23.5, 19.8, 22.4, 24.1, 20.0]],   // f64 columns
+    )?;
+
+    let mut g = ctx.graph(&amp;table)?;
+    let sensor = g.scan("sensor_id")?;
+    let temp   = g.scan("temperature")?;
+
+    // Celsius to Fahrenheit: temp * 1.8 + 32
+    let fahrenheit = g.add(g.mul(temp, g.const_f64(1.8)?)?, g.const_f64(32.0)?)?;
+
+    // Filter: only sensor_id == 1
+    let mask = g.eq(sensor, g.const_i64(1)?)?;
+    let filtered = g.filter(fahrenheit, mask)?;
+
+    let result = g.execute(filtered)?;  // optimizer + executor run here
+    for row in 0..result.nrows() {
+        println!("row {}: {:.1} F", row, result.read_f64(0, row));
+    }
+    Ok(())
+}</code></pre>
+
+    <div class="output">row 0: 71.8 F
+row 1: 72.3 F</div>
+
+    <p>Key points about the Graph API:</p>
+
+    <ul>
+      <li><strong><code>Column</code> is <code>Copy</code></strong> -- a non-owning handle
+      (<code>*mut td_op_t</code>) into the DAG. Pass it to multiple operations freely.</li>
+      <li><strong>Operations return new nodes.</strong> <code>g.mul()</code> does not mutate
+      its inputs -- it creates a new DAG node. This enables CSE in the optimizer.</li>
+      <li><strong><code>execute()</code> takes the root node</strong> and traces dependencies
+      backward, pruning unreachable nodes before execution.</li>
+    </ul>
+
+    <!-- ================================================================ -->
+    <h2>The Session API: SQL Strings</h2>
+
+    <p>For most applications, you do not need the Graph API at all. The <code>Session</code>
+    type wraps a <code>Context</code>, maintains a table registry, and accepts SQL strings.
+    It parses, plans, optimizes, and executes in a single call.</p>
+
+    <pre><code class="language-rust">use teide::sql::{Session, ExecResult};
+
+fn main() -> Result&lt;(), teide::SqlError&gt; {
+    let mut session = Session::new()?;
+
+    session.execute("CREATE TABLE sensors (id INTEGER, location VARCHAR, installed DATE)")?;
+    session.execute(
+        "INSERT INTO sensors VALUES
+            (1, 'roof', '2024-01-15'), (2, 'basement', '2024-03-22'),
+            (3, 'roof', '2024-06-01'), (4, 'garage',   '2024-07-10')")?;
+
+    match session.execute(
+        "SELECT location, COUNT(*) AS cnt FROM sensors GROUP BY location ORDER BY cnt DESC")?
+    {
+        ExecResult::Query(result) =&gt; {
+            for row in 0..result.nrows {
+                let location = result.table.read_str(0, row);
+                let count    = result.table.read_i64(1, row);
+                println!("{} => {}", location, count);
+            }
+        }
+        ExecResult::Ddl(msg) =&gt; println!("{}", msg),
+    }
+    Ok(())
+}</code></pre>
+
+    <div class="output">roof => 2
+basement => 1
+garage => 1</div>
+
+    <p><code>ExecResult::Query(SqlResult)</code> gives you the result <code>Table</code>,
+    column names, row count, and embedding metadata. <code>ExecResult::Ddl(String)</code>
+    returns a status message for DDL/DML. Tables persist in the session's registry until
+    dropped or the session itself is dropped.</p>
+
+    <!-- ================================================================ -->
+    <h2>Reading Results</h2>
+
+    <p>The <code>Table</code> type provides typed accessors for each column type and format
+    helpers for temporal values. Use <code>col_type()</code> to dispatch on the type code:</p>
+
+    <pre><code class="language-rust">fn print_result(result: &amp;teide::sql::SqlResult) {
+    for row in 0..result.nrows {
+        for col in 0..result.columns.len() {
+            let cell = match result.table.col_type(col) {
+                6  =&gt; format!("{}", result.table.read_i64(col, row)),    // TD_I64
+                7  =&gt; format!("{:.2}", result.table.read_f64(col, row)), // TD_F64
+                9  =&gt; {                                                   // TD_DATE
+                    let days = result.table.read_i64(col, row);
+                    teide::Table::format_date(days as i32)
+                }
+                10 =&gt; {                                                   // TD_TIME
+                    let ms = result.table.read_i64(col, row);
+                    teide::Table::format_time(ms)
+                }
+                11 =&gt; {                                                   // TD_TIMESTAMP
+                    let us = result.table.read_i64(col, row);
+                    teide::Table::format_timestamp(us)
+                }
+                20 =&gt; result.table.read_str(col, row).to_string(),       // TD_SYM
+                _  =&gt; "?".to_string(),
+            };
+            print!("{:&gt;15}", cell);
+        }
+        println!();
+    }
+}</code></pre>
+
+    <p>Key type codes: <code>TD_I64 = 6</code>, <code>TD_F64 = 7</code>,
+    <code>TD_F32 = 8</code>, <code>TD_DATE = 9</code>, <code>TD_TIME = 10</code>,
+    <code>TD_TIMESTAMP = 11</code>, <code>TD_SYM = 20</code> (string/symbol).
+    Use <code>table.nrows()</code> and <code>table.ncols()</code> to get dimensions.</p>
+
+    <!-- ================================================================ -->
+    <h2>Working with Embeddings</h2>
+
+    <p>TeideDB stores vector embeddings as flat <code>TD_F32</code> columns -- N rows of
+    D-dimensional vectors packed contiguously. This gives you columnar compression benefits
+    and zero-copy access from the C engine. On top of that, you can build HNSW indexes for
+    approximate nearest-neighbor search.</p>
+
+    <pre><code class="language-rust">use teide::sql::{Session, ExecResult};
+
+fn main() -> Result&lt;(), teide::SqlError&gt; {
+    let mut session = Session::new()?;
+
+    session.execute("CREATE TABLE docs (id INTEGER, title VARCHAR)")?;
+    session.execute(
+        "INSERT INTO docs VALUES (1, 'Rust ownership'), (2, 'Graph databases'),
+            (3, 'Vector search'), (4, 'Columnar storage')")?;
+
+    // Add a 4-dimensional embedding column (flat f32 array: 4 rows * 4 dims)
+    let embeddings: Vec&lt;f32&gt; = vec![
+        0.9, 0.1, 0.0, 0.2,   // doc 1
+        0.1, 0.8, 0.3, 0.1,   // doc 2
+        0.2, 0.3, 0.9, 0.1,   // doc 3
+        0.7, 0.1, 0.1, 0.8,   // doc 4
+    ];
+    session.add_embedding_column("docs", "embedding", 4, &amp;embeddings)?;
+
+    // Query with cosine similarity
+    match session.execute(
+        "SELECT title, COSINE_SIMILARITY(embedding, ARRAY[0.85, 0.15, 0.05, 0.25]) AS sim
+         FROM docs")?
+    {
+        ExecResult::Query(r) =&gt; {
+            for row in 0..r.nrows {
+                println!("{:&lt;20} {:.4}", r.table.read_str(0, row), r.table.read_f64(1, row));
+            }
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+    <div class="output">Rust ownership       0.9912
+Graph databases      0.4521
+Vector search        0.3187
+Columnar storage     0.8436</div>
+
+    <p>For large collections, linear scan is too slow. Build an HNSW index for approximate
+    nearest-neighbor search in logarithmic time:</p>
+
+    <pre><code class="language-rust">use teide::HnswIndex;
+
+// Build an HNSW index on the embedding column
+// Parameters: table, column_index, dimension, M (neighbors), ef_construction
+let stored = session.get_table("docs").unwrap();
+let index = HnswIndex::build(&amp;stored.table, 2, 4, 16, 200)?;
+
+// Search: find 2 nearest neighbors
+let query = vec![0.85f32, 0.15, 0.05, 0.25];
+let results = index.search(&amp;query, 2, 50)?;  // k=2, ef_search=50
+
+for (row_id, distance) in &amp;results {
+    println!("row {} distance {:.4}", row_id, distance);
+}
+
+// Persist the index to disk
+index.save("docs_embedding.hnsw")?;
+
+// Later, reload it
+let loaded = HnswIndex::load("docs_embedding.hnsw")?;</code></pre>
+
+    <div class="output">row 0 distance 0.0088
+row 3 distance 0.1564</div>
+
+    <p>The HNSW index is also available via SQL DDL:</p>
+
+    <pre><code class="language-sql">CREATE VECTOR INDEX docs_emb_idx ON docs(embedding) USING HNSW(M=16, ef_construction=200);
+
+-- Later:
+DROP VECTOR INDEX docs_emb_idx;</code></pre>
+
+    <div class="note">
+      <strong>DML restrictions on embedding tables:</strong> Once a table has embedding
+      columns, UPDATE is not supported and DELETE with a WHERE clause is not supported.
+      DELETE without WHERE truncates the table but preserves embedding metadata. These
+      restrictions exist because the C engine's filter and sort kernels operate element-wise
+      on flat F32 arrays and are not dimension-aware. DML operations (INSERT, DELETE) on a
+      table with vector indexes automatically drop those indexes since the underlying column
+      data is reallocated.
+    </div>
+
+    <!-- ================================================================ -->
+    <h2>The PgWire Server</h2>
+
+    <p>Sometimes you need external tools -- psql, DBeaver, Python -- to query data your Rust
+    service manages. TeideDB includes a PostgreSQL wire protocol server.</p>
+
+    <pre><code class="language-bash"># Start the server on port 5433
+cargo run --features server -- --port 5433
+
+# Connect from another terminal
+psql -h 127.0.0.1 -p 5433</code></pre>
+
+    <p>The <code>!Send</code> constraint dictates the thread model: each connection gets its own
+    OS thread with a dedicated <code>Session</code>, bridged to the async pgwire handler via
+    channels:</p>
+
+    <pre><code class="language-rust">// Simplified view of the server thread model:
+//
+//   tokio runtime (async)          OS thread (sync)
+//  +---------------------+       +-------------------+
+//  | pgwire connection   | ----> | Session           |
+//  | handler             | <---- | (owns Context,    |
+//  |                     | chan  |  table registry)  |
+//  +---------------------+       +-------------------+
+//
+//  Each connection = one OS thread = one Session.
+//  The Context never crosses thread boundaries.</code></pre>
+
+    <p>Each connection has its own isolated table namespace. Tables created in one connection
+    are not visible to others.</p>
+
+    <!-- ================================================================ -->
+    <h2>Critical Constraints</h2>
+
+    <h3>Context is !Send + !Sync</h3>
+
+    <p><code>Context</code> and <code>Session</code> cannot cross thread boundaries. The type
+    system enforces this via <code>PhantomData&lt;*mut ()&gt;</code> -- trying to move a
+    <code>Context</code> into <code>tokio::spawn</code> is a compile error.</p>
+
+    <p>The correct pattern for async applications: spawn a dedicated OS thread that owns the
+    <code>Session</code>, and communicate via channels.</p>
+
+    <pre><code class="language-rust">use std::sync::mpsc;
+use std::thread;
+use teide::sql::{Session, ExecResult};
+
+fn spawn_db_thread() -&gt; mpsc::Sender&lt;(String, mpsc::Sender&lt;String&gt;)&gt; {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut session = Session::new().expect("engine init");
+        for (sql, reply): (String, mpsc::Sender&lt;String&gt;) in rx {
+            let msg = match session.execute(&amp;sql) {
+                Ok(ExecResult::Query(r)) =&gt; format!("{} rows", r.nrows),
+                Ok(ExecResult::Ddl(msg)) =&gt; msg,
+                Err(e) =&gt; format!("error: {e}"),
+            };
+            let _ = reply.send(msg);
+        }
+    });
+    tx
+}</code></pre>
+
+    <h3>ENGINE_LOCK in Tests</h3>
+
+    <p>Rust's test harness runs tests in parallel. Since the C engine's global state cannot be
+    initialized/destroyed concurrently, you must serialize access with a mutex:</p>
+
+    <pre><code class="language-rust">use std::sync::Mutex;
+use teide::Context;
+
+static ENGINE_LOCK: Mutex&lt;()&gt; = Mutex::new(());
+
+#[test]
+fn test_sensor_query() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let ctx = Context::new().unwrap();
+    // ... your test code ...
+    // Context drops here, but the engine singleton persists
+    // until all Arc references are gone.
+}
+
+#[test]
+fn test_another_query() {
+    let _guard = ENGINE_LOCK.lock().unwrap();
+    let ctx = Context::new().unwrap();
+    // Safe: ENGINE_LOCK ensures this doesn't race with the test above.
+}</code></pre>
+
+    <p>Under the hood, the engine is managed via <code>OnceLock&lt;Mutex&lt;Weak&lt;EngineGuard&gt;&gt;&gt;</code>.
+    Multiple <code>Context</code> handles share one <code>Arc&lt;EngineGuard&gt;</code>; the engine
+    tears down only when the last <code>Arc</code> drops. These constraints are not bugs --
+    they are the price of zero-copy access to the C engine's thread-local memory arenas.
+    In production, you typically have one <code>Session</code> per thread and no contention.</p>
+
+    <!-- ================================================================ -->
+    <h2>Putting It All Together</h2>
+
+    <p>Here is a complete example: an IoT monitoring module that wraps a <code>Session</code>
+    in a domain-specific struct, ingests sensor readings, and exposes typed query methods.</p>
+
+    <pre><code class="language-rust">use teide::sql::{Session, ExecResult};
+
+struct SensorMonitor { session: Session }
+
+impl SensorMonitor {
+    fn new() -&gt; Result&lt;Self, teide::SqlError&gt; {
+        let mut session = Session::new()?;
+        session.execute(
+            "CREATE TABLE readings (
+                sensor_id INTEGER, temperature DOUBLE,
+                humidity DOUBLE, ts TIMESTAMP)"
+        )?;
+        Ok(SensorMonitor { session })
+    }
+
+    fn ingest(&amp;mut self, id: i64, temp: f64, hum: f64, ts: &amp;str)
+        -&gt; Result&lt;(), teide::SqlError&gt;
+    {
+        self.session.execute(&amp;format!(
+            "INSERT INTO readings VALUES ({id}, {temp}, {hum}, '{ts}')"))?;
+        Ok(())
+    }
+
+    fn avg_by_sensor(&amp;mut self) -&gt; Result&lt;Vec&lt;(i64, f64, f64)&gt;, teide::SqlError&gt; {
+        match self.session.execute(
+            "SELECT sensor_id, AVG(temperature), AVG(humidity)
+             FROM readings GROUP BY sensor_id ORDER BY sensor_id")?
+        {
+            ExecResult::Query(r) =&gt; Ok((0..r.nrows).map(|i| (
+                r.table.read_i64(0, i), r.table.read_f64(1, i), r.table.read_f64(2, i)
+            )).collect()),
+            _ =&gt; Ok(vec![]),
+        }
+    }
+}
+
+fn main() -&gt; Result&lt;(), teide::SqlError&gt; {
+    let mut m = SensorMonitor::new()?;
+    m.ingest(1, 22.5, 45.0, "2024-08-01 10:00:00")?;
+    m.ingest(1, 23.1, 44.2, "2024-08-01 10:05:00")?;
+    m.ingest(2, 19.8, 62.1, "2024-08-01 10:00:00")?;
+    m.ingest(2, 20.1, 61.5, "2024-08-01 10:05:00")?;
+
+    for (sensor, temp, hum) in m.avg_by_sensor()? {
+        println!("Sensor {sensor}: avg temp {temp:.1}, avg humidity {hum:.1}");
+    }
+    Ok(())
+}</code></pre>
+
+    <div class="output">Sensor 1: avg temp 22.8, avg humidity 44.6
+Sensor 2: avg temp 20.0, avg humidity 61.8</div>
+
+    <!-- ================================================================ -->
+    <h2>Challenges</h2>
+
+    <div class="note">
+      <strong>Challenge 1: Multi-threaded ingestion pipeline.</strong> Build a system where
+      multiple producer threads send sensor readings through an <code>mpsc</code> channel to
+      a single consumer thread that owns a <code>Session</code>. The consumer should batch
+      inserts (collect N readings, then execute a single multi-row INSERT). Add a query
+      thread that periodically requests aggregated results via a separate channel. Measure
+      throughput: how many readings per second can you sustain with batch sizes of 1, 10,
+      100, and 1000?
+    </div>
+
+    <div class="note">
+      <strong>Challenge 2: Embedding search microservice.</strong> Build an HTTP endpoint
+      (using <code>axum</code> or <code>actix-web</code>) that accepts a JSON body with a
+      query vector and returns the top-K nearest neighbors from a TeideDB table with an HNSW
+      index. The handler must not own the <code>Session</code> directly (it runs on tokio).
+      Use the channel pattern from the "Critical Constraints" section to bridge async and
+      sync worlds. Add an endpoint that inserts new documents with embeddings, and handle
+      the index rebuild that insertion triggers.
+    </div>
+
+    <!-- ================================================================ -->
+    <h2>What's Next</h2>
+
+    <ul>
+      <li><a href="../sql/">SQL Reference</a> -- complete syntax documentation for every
+      statement and function TeideDB supports.</li>
+      <li><a href="../sql/pgq.html">SQL/PGQ Reference</a> -- property graph DDL, MATCH
+      patterns, and graph algorithm functions.</li>
+      <li><a href="../sql/vector-search.html">Vector Search Reference</a> -- HNSW index
+      parameters, similarity functions, and DML restrictions.</li>
+      <li><a href="graph-queries.html">Graph Queries Guide</a> -- if your embedded use case
+      involves relationship data, this guide covers SQL/PGQ from the ground up.</li>
+      <li><a href="vector-search.html">Vector Search Guide</a> -- deeper coverage of
+      embedding workflows, including RAG patterns and hybrid search.</li>
+    </ul>
+
+    <nav class="page-nav">
+      <a href="vector-search.html" class="prev">
+        <span class="nav-label">Previous</span>
+        <span class="nav-title">Vector Search</span>
+      </a>
+    </nav>
+
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

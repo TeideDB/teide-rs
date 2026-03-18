@@ -22,6 +22,15 @@
     <a href="../tutorial/" class="sidebar-link">Tutorial</a>
     </div>
     <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="../guides/getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="../guides/sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="../guides/temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="../guides/graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="../guides/vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="../guides/rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
       <div class="sidebar-section-label">SQL Reference</div>
       <a href="./" class="sidebar-link">Overview</a>
       <a href="data-types.html" class="sidebar-link">Data Types</a>
@@ -75,6 +84,11 @@ FROM left_t INNER JOIN right_t ON left_t.id = right_t.id;
 FROM left_t LEFT JOIN right_t ON left_t.id = right_t.id;
 -- Returns all left rows, NULLs for non-matching right
 -- 4 rows total</code></pre>
+
+    <h2>FULL OUTER JOIN</h2>
+    <pre><code class="language-sql">SELECT left_t.id, lval, rval
+FROM left_t FULL OUTER JOIN right_t ON left_t.id = right_t.id;
+-- Returns all rows from both tables, NULLs where no match</code></pre>
 
     <h2>CROSS JOIN</h2>
     <pre><code class="language-sql">SELECT COUNT(*) FROM left_t CROSS JOIN right_t;

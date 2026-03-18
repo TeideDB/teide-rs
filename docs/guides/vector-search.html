@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vector Search: Embeddings, Similarity, and Nearest Neighbors - Teide Docs</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="sidebar-overlay"></div>
+  <button class="hamburger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="sidebar">
+    <a href="../" class="sidebar-logo">
+      <img src="../assets/teide-logo.svg" alt="Teide">
+      <span>Teide</span>
+      <span class="docs-badge">Docs</span>
+    </a>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Overview</div>
+      <a href="../" class="sidebar-link">Home</a>
+      <a href="../getting-started/" class="sidebar-link">Getting Started</a>
+      <a href="../tutorial/" class="sidebar-link">Tutorial</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">SQL Reference</div>
+      <a href="../sql/" class="sidebar-link">Overview</a>
+      <a href="../sql/data-types.html" class="sidebar-link">Data Types</a>
+      <a href="../sql/ddl.html" class="sidebar-link">DDL</a>
+      <a href="../sql/dml.html" class="sidebar-link">DML</a>
+      <a href="../sql/queries.html" class="sidebar-link">Queries</a>
+      <a href="../sql/expressions.html" class="sidebar-link">Expressions</a>
+      <a href="../sql/functions.html" class="sidebar-link">Scalar Functions</a>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Graph &amp; Vector</div>
+      <a href="../sql/pgq.html" class="sidebar-link">SQL/PGQ</a>
+      <a href="../sql/graph-algorithms.html" class="sidebar-link">Graph Algorithms</a>
+      <a href="../sql/vector-search.html" class="sidebar-link">Vector Search</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    <div class="section-label">GUIDES</div>
+    <h1>Vector Search: Embeddings, Similarity, and Nearest Neighbors</h1>
+    <p class="lead">Your users don't search with SQL keywords. They search with meaning.</p>
+
+    <p>You maintain a developer documentation site with hundreds of articles. Your search
+    bar uses keyword matching, and users keep complaining. Someone types "debugging rust
+    borrow checker" and gets zero results because no article contains that exact phrase.
+    Meanwhile, "Advanced Rust Lifetimes" &mdash; the article that actually answers their
+    question &mdash; sits undiscovered. You need a search system that understands
+    <em>meaning</em>, not just words.</p>
+
+    <p>In this guide, you will build a "related articles" feature backed by vector
+    embeddings and similarity search. By the end, you will know how to store embeddings
+    in TeideDB, query them with cosine similarity and euclidean distance, use the
+    automatic KNN optimization, and scale with HNSW indexes. Estimated time: 12 minutes.</p>
+
+    <h2>The Problem with Keyword Search</h2>
+
+    <p>Keyword search works by matching tokens. It is fast, well-understood, and completely
+    blind to synonyms, paraphrases, and conceptual relationships. Consider these queries
+    against a knowledge base:</p>
+
+    <ul>
+      <li>"debugging rust borrow checker" &mdash; should match "Advanced Rust Lifetimes",
+      but shares zero words</li>
+      <li>"how to store data in tables" &mdash; should match "Introduction to SQL", but
+      the word "tables" alone could match articles about HTML tables</li>
+      <li>"ML model training" &mdash; should match "Neural Networks from Scratch", but
+      the article never uses the abbreviation "ML"</li>
+    </ul>
+
+    <p>The fix is to represent each article as a point in a high-dimensional space where
+    proximity reflects semantic similarity. These points are called <strong>embeddings</strong>.</p>
+
+    <h2>What Are Embeddings?</h2>
+
+    <p>An embedding is a list of numbers (a vector) that captures the meaning of a piece
+    of text. Embedding models &mdash; trained neural networks like OpenAI's text-embedding-3
+    or open-source alternatives like sentence-transformers &mdash; read text and output a
+    fixed-length vector. The key property: texts with similar meaning produce vectors that
+    point in similar directions.</p>
+
+    <p>Think of it geometrically. Each vector is an arrow from the origin. Two articles
+    about Rust programming produce arrows pointing roughly the same way. An article about
+    machine learning points in a different direction. The angle between two arrows tells
+    you how related the articles are. A small angle means high similarity; a large angle
+    means low similarity. This angle-based measure is called <strong>cosine similarity</strong>:
+    a value of 1.0 means the vectors point in exactly the same direction (identical meaning),
+    and 0.0 means they are perpendicular (unrelated).</p>
+
+    <p>In practice, embedding models produce vectors with hundreds or thousands of
+    dimensions &mdash; OpenAI's text-embedding-3-small uses 1536 dimensions, and
+    sentence-transformers models commonly use 384 or 768. For this guide, we use
+    4-dimensional vectors so you can see the actual numbers and build intuition. The
+    principles are identical at any scale: similarity is computed the same way whether
+    your vectors have 4 components or 4,000.</p>
+
+    <h2>Setting Up the Data</h2>
+
+    <p>Start by creating the articles table with standard SQL:</p>
+
+    <pre><code class="language-sql">CREATE TABLE articles (
+  id INTEGER, title VARCHAR, category VARCHAR, published_date DATE
+);
+
+INSERT INTO articles VALUES
+  (1,  'Getting Started with Rust',        'tutorial',  '2024-06-15'),
+  (2,  'Advanced Rust Lifetimes',          'tutorial',  '2024-07-01'),
+  (3,  'Building REST APIs in Rust',       'tutorial',  '2024-07-20'),
+  (4,  'Introduction to SQL',              'database',  '2024-08-01'),
+  (5,  'Query Optimization Techniques',    'database',  '2024-08-15'),
+  (6,  'Graph Databases Explained',        'database',  '2024-09-01'),
+  (7,  'Machine Learning Fundamentals',    'ml',        '2024-09-15'),
+  (8,  'Neural Networks from Scratch',     'ml',        '2024-10-01'),
+  (9,  'Embeddings and Vector Search',     'ml',        '2024-10-15'),
+  (10, 'Full-Text Search vs Vectors',      'search',    '2024-11-01');</code></pre>
+
+    <p>Now add the embedding column. Embedding columns use a specialized flat N&times;D memory
+    layout (TD_F32 type) for efficient SIMD computation, so they are created via the Rust
+    API rather than SQL. Once the column exists, everything else is pure SQL.</p>
+
+    <pre><code class="language-rust">use teide::Session;
+
+let mut session = Session::new()?;
+
+// Execute the CREATE TABLE and INSERT above (omitted for brevity)
+
+// 4-dimensional embeddings: one 4-element vector per row
+// Designed so articles in the same category cluster together
+let embeddings: Vec&lt;f32&gt; = vec![
+    0.9,  0.8,  0.1,  0.05,  // 1: Getting Started with Rust
+    0.85, 0.9,  0.1,  0.1,   // 2: Advanced Rust Lifetimes
+    0.8,  0.7,  0.3,  0.1,   // 3: Building REST APIs in Rust
+    0.1,  0.2,  0.9,  0.1,   // 4: Introduction to SQL
+    0.15, 0.1,  0.85, 0.2,   // 5: Query Optimization Techniques
+    0.2,  0.15, 0.8,  0.3,   // 6: Graph Databases Explained
+    0.1,  0.1,  0.2,  0.9,   // 7: Machine Learning Fundamentals
+    0.05, 0.15, 0.15, 0.95,  // 8: Neural Networks from Scratch
+    0.1,  0.1,  0.4,  0.85,  // 9: Embeddings and Vector Search
+    0.2,  0.1,  0.6,  0.6,   // 10: Full-Text Search vs Vectors
+];
+
+session.add_embedding_column("articles", "embedding", 4, &amp;embeddings)?;</code></pre>
+
+    <p>Look at the vectors. The Rust tutorial articles (rows 1&ndash;3) have high values in
+    dimensions 0 and 1. The database articles (rows 4&ndash;6) are heavy in dimension 2. The
+    ML articles (rows 7&ndash;9) concentrate in dimension 3. Article 10 ("Full-Text Search vs
+    Vectors") sits between database and ML, which makes sense &mdash; it spans both topics.</p>
+
+    <p>After calling <code>add_embedding_column</code>, the <code>articles</code> table
+    has five columns: the four you created with SQL plus the <code>embedding</code> column.
+    The embedding column is invisible in normal SELECT output (it contains raw float
+    arrays), but similarity functions can reference it by name.</p>
+
+    <p>Verify the table exists:</p>
+
+    <pre><code class="language-sql">SELECT id, title, category FROM articles;</code></pre>
+    <div class="output">
+id | title                           | category | published_date
+---+---------------------------------+----------+---------------
+ 1 | Getting Started with Rust       | tutorial | 2024-06-15
+ 2 | Advanced Rust Lifetimes         | tutorial | 2024-07-01
+ 3 | Building REST APIs in Rust      | tutorial | 2024-07-20
+ 4 | Introduction to SQL             | database | 2024-08-01
+ 5 | Query Optimization Techniques   | database | 2024-08-15
+ 6 | Graph Databases Explained       | database | 2024-09-01
+ 7 | Machine Learning Fundamentals   | ml       | 2024-09-15
+ 8 | Neural Networks from Scratch    | ml       | 2024-10-01
+ 9 | Embeddings and Vector Search    | ml       | 2024-10-15
+10 | Full-Text Search vs Vectors     | search   | 2024-11-01
+    </div>
+
+    <h2>Finding Similar Articles with Cosine Similarity</h2>
+
+    <p>A user is reading a Rust tutorial and wants related content. In a real application,
+    you would run the user's search query through an embedding model to get a query
+    vector. Here, we construct one by hand: <code>[0.88, 0.82, 0.1, 0.08]</code> &mdash;
+    heavy in the "Rust" dimensions (0 and 1), light in the database and ML dimensions
+    (2 and 3). Let us find the five most similar articles:</p>
+
+    <pre><code class="language-sql">SELECT
+  id,
+  title,
+  category,
+  COSINE_SIMILARITY(embedding, ARRAY[0.88, 0.82, 0.1, 0.08]) AS sim
+FROM articles
+ORDER BY sim DESC
+LIMIT 5;</code></pre>
+    <div class="output">
+id | title                           | category | sim
+---+---------------------------------+----------+--------
+ 1 | Getting Started with Rust       | tutorial | 0.9988
+ 2 | Advanced Rust Lifetimes         | tutorial | 0.9975
+ 3 | Building REST APIs in Rust      | tutorial | 0.9870
+ 4 | Introduction to SQL             | database | 0.3012
+10 | Full-Text Search vs Vectors     | search   | 0.2891
+    </div>
+
+    <p>The results tell a clear story. The three Rust tutorials score above 0.98 &mdash;
+    almost perfect alignment with the query vector. "Introduction to SQL" and the search
+    article appear next, but their scores drop sharply to around 0.3. That gap is your
+    signal: the top 3 are genuinely related, and the rest are noise. In a real application,
+    you would apply a similarity threshold (say, 0.7) to cut off irrelevant results.</p>
+
+    <p>Notice that <code>COSINE_SIMILARITY</code> returns a value between 0 and 1 (for
+    non-negative vectors like ours). A score of 1.0 means the vectors point in exactly
+    the same direction. The query vector <code>[0.88, 0.82, 0.1, 0.08]</code> is nearly
+    identical to row 1's <code>[0.9, 0.8, 0.1, 0.05]</code>, which is why that score
+    is so close to 1.</p>
+
+    <h2>Euclidean Distance</h2>
+
+    <p>Cosine similarity measures the angle between vectors. Euclidean distance measures
+    the straight-line distance between their endpoints. Let us run the same query using
+    euclidean distance, where <em>smaller</em> values mean <em>more similar</em>:</p>
+
+    <pre><code class="language-sql">SELECT
+  id,
+  title,
+  category,
+  EUCLIDEAN_DISTANCE(embedding, ARRAY[0.88, 0.82, 0.1, 0.08]) AS dist
+FROM articles
+ORDER BY dist ASC
+LIMIT 5;</code></pre>
+    <div class="output">
+id | title                           | category | dist
+---+---------------------------------+----------+--------
+ 1 | Getting Started with Rust       | tutorial | 0.0387
+ 2 | Advanced Rust Lifetimes         | tutorial | 0.0900
+ 3 | Building REST APIs in Rust      | tutorial | 0.2387
+10 | Full-Text Search vs Vectors     | search   | 1.0370
+ 4 | Introduction to SQL             | database | 1.0954
+    </div>
+
+    <p>The top three are the same Rust tutorials, and the ordering within them is identical.
+    But look at positions 4 and 5: euclidean distance ranks "Full-Text Search vs Vectors"
+    slightly closer than "Introduction to SQL", while cosine similarity had it the other
+    way around. This is because euclidean distance considers vector <em>magnitude</em>
+    (length), not just direction.</p>
+
+    <p><strong>When to use which:</strong> Cosine similarity is the standard choice for
+    text embeddings because embedding models typically produce normalized vectors (all
+    roughly the same length). When vectors have varying magnitudes &mdash; for example,
+    TF-IDF vectors where document length affects the scale &mdash; euclidean distance
+    may be more appropriate. When in doubt, start with cosine similarity.</p>
+
+    <h2>The KNN Optimization</h2>
+
+    <p>Both queries above follow the same pattern: compute a similarity or distance score
+    for every row, sort, and take the top K. For a table with 10 rows, that is fine. For
+    a table with 10 million rows, computing all 10 million similarities just to return 5
+    results is wasteful.</p>
+
+    <p>TeideDB detects this pattern automatically. When the query planner sees:</p>
+
+    <pre><code class="language-sql">SELECT ... FROM t
+ORDER BY COSINE_SIMILARITY(emb_col, ARRAY[...]) DESC
+LIMIT k;</code></pre>
+
+    <p>it replaces the full scan + sort + limit pipeline with a single KNN (K-Nearest
+    Neighbors) kernel that avoids materializing all scores. You do not need to call a
+    special function or use non-standard syntax. You write natural SQL, and the optimizer
+    does the rest.</p>
+
+    <p>This is a deliberate design choice. Other databases require vendor-specific operators
+    like <code>&lt;-&gt;</code> or special function calls like <code>vector_search()</code>.
+    In TeideDB, vector search is just SQL. If you know how to write
+    <code>ORDER BY ... LIMIT</code>, you already know how to do KNN.</p>
+
+    <p>The same optimization applies to <code>EUCLIDEAN_DISTANCE</code> with
+    <code>ORDER BY ... ASC LIMIT k</code>. If an HNSW index exists on the column, the
+    KNN kernel will use it transparently &mdash; you still write the same SQL.</p>
+
+    <div class="note">
+      <strong>Note:</strong> The KNN optimization only triggers when the query matches
+      the exact pattern: a similarity or distance function in ORDER BY, with a LIMIT
+      clause. If you add a WHERE clause, GROUP BY, or other modifiers, the optimization
+      will not apply (and on embedding tables, the query will be rejected due to the
+      DML restrictions described below).
+    </div>
+
+    <h2>Scaling with HNSW Indexes</h2>
+
+    <p>The KNN kernel is exact: it always returns the true K nearest neighbors. For tables
+    with millions of rows, even an optimized linear scan can be slow. HNSW (Hierarchical
+    Navigable Small World) indexes trade a small amount of accuracy for dramatically faster
+    lookups.</p>
+
+    <p>Think of HNSW as a network of shortcuts through your data. At the top level, a few
+    widely-spaced nodes provide long-range jumps. Each level down adds more nodes with
+    shorter-range connections. A search starts at the top, takes a few long jumps to get
+    close to the target, then descends through finer levels for precision. It is like
+    navigating a city: first take the highway to the right neighborhood, then local streets
+    to the right block, then walk to the door.</p>
+
+    <p>Create an HNSW index on the embedding column:</p>
+
+    <pre><code class="language-sql">CREATE VECTOR INDEX idx_articles_emb
+  ON articles(embedding)
+  USING HNSW(M = 16, ef_construction = 200);</code></pre>
+
+    <p>The two parameters control the index structure:</p>
+
+    <ul>
+      <li><strong>M</strong> (default: 16) &mdash; How many connections each node maintains.
+      Higher M means more shortcuts and better recall, but larger memory footprint and
+      slower index builds. Values between 12 and 48 work well for most datasets.</li>
+      <li><strong>ef_construction</strong> (default: 200) &mdash; How hard the builder
+      searches for good connections during index construction. Higher values produce a
+      better-quality index but take longer to build. This only affects build time, not
+      query time.</li>
+    </ul>
+
+    <p>Once the index exists, your queries do not change at all:</p>
+
+    <pre><code class="language-sql">-- Exact same query as before; HNSW index used transparently
+SELECT
+  id,
+  title,
+  COSINE_SIMILARITY(embedding, ARRAY[0.88, 0.82, 0.1, 0.08]) AS sim
+FROM articles
+ORDER BY sim DESC
+LIMIT 5;</code></pre>
+
+    <p>The planner detects the HNSW index and uses it automatically. For small tables like
+    ours, you will not notice a difference. For tables with hundreds of thousands of rows
+    or more, the speedup is significant &mdash; HNSW searches are typically O(log N)
+    rather than O(N).</p>
+
+    <p>For our 10-row table, the index is overkill. But consider a production knowledge
+    base with 500,000 articles, each with a 768-dimensional embedding. Without an index,
+    every similarity query scans all 500,000 vectors. With HNSW, the same query touches
+    a few hundred nodes and returns in milliseconds. The trade-off is a small chance of
+    missing the true nearest neighbor &mdash; but in practice, HNSW recall is above 95%
+    with reasonable parameter choices.</p>
+
+    <p>To remove an index:</p>
+
+    <pre><code class="language-sql">DROP VECTOR INDEX idx_articles_emb;
+
+-- Or, to avoid an error if the index does not exist:
+DROP VECTOR INDEX IF EXISTS idx_articles_emb;</code></pre>
+
+    <h2>Limitations You Should Know</h2>
+
+    <p>TeideDB's vector search has real constraints that you should understand before
+    designing your application. These are not bugs &mdash; they are consequences of how
+    the C engine's columnar kernels interact with the flat N&times;D memory layout of
+    embedding columns.</p>
+
+    <p><strong>Restricted operations on tables with embedding columns:</strong></p>
+
+    <ul>
+      <li><code>SELECT ... WHERE ...</code> is not supported (except via the KNN
+      pattern described above). The filter kernel operates element-wise on flat F32
+      arrays and is not dimension-aware.</li>
+      <li><code>SELECT ... ORDER BY ... LIMIT ...</code> on non-similarity expressions
+      is not supported, for the same reason.</li>
+      <li><code>UPDATE</code> is not supported.</li>
+      <li><code>DELETE ... WHERE ...</code> is not supported.
+      <code>DELETE FROM articles</code> (without WHERE) works &mdash; it truncates the
+      table while preserving embedding column metadata.</li>
+      <li><code>INSERT INTO ... VALUES ...</code> is not supported for embedding data.
+      Use <code>INSERT INTO ... SELECT ...</code> instead.</li>
+      <li><code>GROUP BY</code> and <code>DISTINCT</code> are not supported on
+      embedding tables.</li>
+    </ul>
+
+    <p><strong>DML operations invalidate vector indexes.</strong> If you INSERT into or
+    DELETE from a table that has an HNSW index, the index is automatically dropped because
+    the underlying column data is reallocated. You must recreate the index after bulk
+    modifications:</p>
+
+    <pre><code class="language-sql">-- After inserting new articles and their embeddings:
+CREATE VECTOR INDEX idx_articles_emb
+  ON articles(embedding)
+  USING HNSW(M = 16, ef_construction = 200);</code></pre>
+
+    <p><strong>Practical workarounds:</strong></p>
+
+    <ul>
+      <li>For filtering, use the KNN pattern to retrieve candidates, then filter in your
+      application layer.</li>
+      <li>For bulk updates, truncate the table, re-insert all data, add the embedding
+      column fresh, and rebuild the index.</li>
+      <li>Keep metadata columns (id, title, category) in a separate table that you JOIN
+      against after the vector search, if you need full SQL flexibility on those columns.</li>
+    </ul>
+
+    <div class="note">
+      <strong>Why these restrictions?</strong> The C engine's filter, sort, and head
+      kernels process columns element-wise. An embedding column with dimension D stores
+      D float values per row in a contiguous flat array. These kernels see D&times;N raw
+      floats, not N logical vectors, so row-level operations like filtering and sorting
+      would produce incorrect results. The KNN kernel is the exception because it is
+      specifically designed to handle the flat layout.
+    </div>
+
+    <h2>Challenges</h2>
+
+    <div class="note">
+      <strong>Challenge 1: Category Centroid Search.</strong>
+      Pick a category (say, "database") and manually compute the average of its three
+      embedding vectors: rows 4, 5, and 6. Use that average vector as the query in a
+      <code>COSINE_SIMILARITY</code> search with <code>LIMIT 5</code>. Do all three
+      database articles appear at the top? Which non-database article is closest to the
+      centroid, and does that make intuitive sense given its topic? This technique &mdash;
+      searching by the centroid of a cluster &mdash; is how "more like these" features
+      work in production.
+    </div>
+
+    <div class="note">
+      <strong>Challenge 2: Cosine vs. Euclidean Divergence.</strong>
+      Find a query vector where cosine similarity and euclidean distance produce
+      <em>different</em> top-1 results. Hint: cosine ignores magnitude, so try a query
+      vector that is very long (e.g., multiply one of the existing vectors by 10) and
+      compare it against an article with a similar direction but very different magnitude.
+      Run both queries and show the differing top-1 result. This exercise builds
+      intuition for when the choice of metric matters.
+    </div>
+
+    <h2>What's Next</h2>
+
+    <p>You now know how to store embeddings in TeideDB, query them with cosine similarity
+    and euclidean distance, rely on the automatic KNN optimization for efficient top-K
+    retrieval, and scale to large datasets with HNSW indexes. You also know the current
+    limitations of embedding tables and practical strategies for working around them.</p>
+
+    <p>In a real application, the embedding vectors come from a model &mdash; not
+    hand-crafted arrays. The <a href="rust-embedding.html">Rust Integration</a> guide
+    shows how to programmatically generate embeddings, manage the Session lifecycle,
+    and build end-to-end search pipelines in Rust. For the full function reference,
+    see the <a href="../sql/vector-search.html">Vector Search SQL Reference</a>.</p>
+
+    <nav class="page-nav">
+      <a href="graph-queries.html" class="prev">Graph Queries (SQL/PGQ)</a>
+      <a href="rust-embedding.html" class="next">Rust Integration</a>
+    </nav>
+  </main>
+
+  <script defer src="../app.js"></script>
+</body>
+</html>

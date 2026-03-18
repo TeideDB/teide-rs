@@ -22,6 +22,15 @@
       <a href="../tutorial/" class="sidebar-link">Tutorial</a>
     </div>
     <div class="sidebar-section">
+      <div class="sidebar-section-label">Guides</div>
+      <a href="../guides/getting-started.html" class="sidebar-link">From CSV to Insights</a>
+      <a href="../guides/sql-deep-dive.html" class="sidebar-link">Joins, Windows &amp; CTEs</a>
+      <a href="../guides/temporal-queries.html" class="sidebar-link">Working with Time</a>
+      <a href="../guides/graph-queries.html" class="sidebar-link">Graph Queries (SQL/PGQ)</a>
+      <a href="../guides/vector-search.html" class="sidebar-link">Vector Search</a>
+      <a href="../guides/rust-embedding.html" class="sidebar-link">Rust Integration</a>
+    </div>
+    <div class="sidebar-section">
       <div class="sidebar-section-label">SQL Reference</div>
       <a href="./" class="sidebar-link">Overview</a>
       <a href="data-types.html" class="sidebar-link">Data Types</a>
@@ -98,16 +107,29 @@ ORDER BY size DESC;</code></pre>
 
     <h2>Weighted Shortest Path (Dijkstra)</h2>
     <pre><code class="language-sql">SHORTEST_DISTANCE(graph_name, src_id, dst_id, 'weight_col')</code></pre>
-    <p>Dijkstra&rsquo;s algorithm with edge weights read from a property table column. Returns an <code>F64</code> distance value. The weight column name is passed as a string literal.</p>
+    <p>Dijkstra&rsquo;s algorithm with edge weights read from a property table column. Returns an <code>F64</code> distance value. The weight column name is passed as a string literal. Used within GRAPH_TABLE COLUMNS:</p>
     <pre><code class="language-sql">-- Distance between two cities via weighted road edges
-SELECT SHORTEST_DISTANCE(roads, 1, 42, 'km') AS distance;</code></pre>
+SELECT distance
+FROM GRAPH_TABLE (roads
+  MATCH (s:City)-[r:Road]->(d:City)
+  COLUMNS (SHORTEST_DISTANCE(roads, 1, 42, 'km') AS distance)
+)
+LIMIT 1;</code></pre>
+    <p>Alternatively, use <code>CHEAPEST</code> path patterns with a <code>COST</code> expression for shortest-path queries:</p>
+    <pre><code class="language-sql">-- Cheapest path with edge weight
+SELECT src, dst, total_cost
+FROM GRAPH_TABLE (roads
+  MATCH CHEAPEST (s:City WHERE s.id = 1)-[r:Road]->{1,5}(d:City WHERE d.id = 42)
+  COST r.km
+  COLUMNS (s.name AS src, d.name AS dst, COST() AS total_cost)
+);</code></pre>
 
     <h2>Community Detection (Louvain)</h2>
     <pre><code class="language-sql">COMMUNITY(graph_name, node_var)
 LOUVAIN(graph_name, node_var)</code></pre>
     <p>Modularity-optimization algorithm (Louvain Phase 1). Treats the graph as <strong>undirected</strong>. Returns an <code>I64</code> community ID per node.</p>
     <pre><code class="language-sql">-- Find communities in a social network
-SELECT community, COUNT(*) AS members, ARRAY_AGG(name) AS people
+SELECT community, COUNT(*) AS members
 FROM GRAPH_TABLE (social
   MATCH (p:Person)
   COLUMNS (
@@ -117,6 +139,19 @@ FROM GRAPH_TABLE (social
 )
 GROUP BY community
 ORDER BY members DESC;</code></pre>
+
+    <h2>Local Clustering Coefficient</h2>
+    <pre><code class="language-sql">CLUSTERING_COEFFICIENT(graph_name, node_var)
+CLUSTERING_COEFF(graph_name, node_var)</code></pre>
+    <p>Computes the local clustering coefficient for each node &mdash; the fraction of a node&rsquo;s neighbors that are also connected to each other. Returns an <code>F64</code> value between 0.0 and 1.0 (1.0 means all neighbors form a clique). Treats the graph as undirected.</p>
+    <pre><code class="language-sql">-- Find highly clustered nodes (nodes in tight communities)
+SELECT name, lcc
+FROM GRAPH_TABLE (social
+  MATCH (p:Person)
+  COLUMNS (p.name AS name, CLUSTERING_COEFFICIENT(social, p) AS lcc)
+)
+WHERE lcc > 0.5
+ORDER BY lcc DESC;</code></pre>
 
     <h2>Performance</h2>
     <p>All algorithms run as C kernels with direct CSR pointer access &mdash; no FFI boundary per edge.</p>
@@ -147,6 +182,11 @@ ORDER BY members DESC;</code></pre>
         <tr>
           <td>Louvain</td>
           <td>O(iter &times; E)</td>
+          <td>O(N)</td>
+        </tr>
+        <tr>
+          <td>Clustering Coefficient</td>
+          <td>O(N &times; d<sup>2</sup>)</td>
           <td>O(N)</td>
         </tr>
       </tbody>
