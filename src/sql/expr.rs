@@ -167,8 +167,29 @@ pub fn plan_expr(
             if *kind == CastKind::TryCast {
                 return Err(SqlError::Plan("TRY_CAST not supported".into()));
             }
-            let e = plan_expr(g, inner, schema)?;
             let target = map_sql_type(data_type)?;
+            // Special case: string literal to temporal type — parse at plan time
+            if let Expr::Value(Value::SingleQuotedString(s)) = inner.as_ref() {
+                match target {
+                    crate::types::DATE => {
+                        let days = crate::sql::planner::parse_date_str(s)
+                            .map_err(SqlError::Plan)?;
+                        return Ok(g.const_typed_i32(days, crate::types::DATE)?);
+                    }
+                    crate::types::TIME => {
+                        let ms = crate::sql::planner::parse_time_str(s)
+                            .map_err(SqlError::Plan)?;
+                        return Ok(g.const_typed_i32(ms, crate::types::TIME)?);
+                    }
+                    crate::types::TIMESTAMP => {
+                        let us = crate::sql::planner::parse_timestamp_str(s)
+                            .map_err(SqlError::Plan)?;
+                        return Ok(g.const_typed_i64(us, crate::types::TIMESTAMP)?);
+                    }
+                    _ => {}
+                }
+            }
+            let e = plan_expr(g, inner, schema)?;
             Ok(g.cast(e, target)?)
         }
 

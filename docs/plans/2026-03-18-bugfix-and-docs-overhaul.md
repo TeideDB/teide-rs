@@ -390,6 +390,12 @@ When `CAST('2024-01-15' AS DATE)` is used in a SELECT expression, the string sho
 **Files:**
 - Modify: `src/sql/expr.rs:160-173` (the CAST handler in `plan_expr`)
 
+- [x] Step 1: Write the failing test
+- [x] Step 2: Run test to verify it fails
+- [x] Step 3: Write the implementation
+- [x] Step 4: Run tests to verify they pass
+- [x] Step 5: Commit
+
 **Step 1: Write the failing test**
 
 Add to `tests/slt/temporal.slt`:

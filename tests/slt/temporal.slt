@@ -232,3 +232,26 @@ SELECT id, created_at FROM date_lit2 ORDER BY id
 ----
 1 2024-01-15
 2 2024-03-22
+
+# === CAST string to DATE/TIME/TIMESTAMP ===
+
+statement ok
+CREATE TABLE cast_test (id INTEGER)
+
+statement ok
+INSERT INTO cast_test VALUES (1)
+
+query T
+SELECT CAST('2025-01-01' AS DATE) FROM cast_test
+----
+2025-01-01
+
+query T
+SELECT CAST('12:30:00' AS TIME) FROM cast_test
+----
+12:30:00
+
+query T
+SELECT CAST('2025-06-15 09:30:00' AS TIMESTAMP) FROM cast_test
+----
+2025-06-15 09:30:00

@@ -1327,6 +1327,42 @@ impl<'a> Graph<'a> {
         Self::check_op(unsafe { ffi::td_const_i64(self.raw, val) })
     }
 
+    /// Create a constant typed i64 node (e.g. TIMESTAMP).
+    /// Builds a 1-element vector of the given type and wraps it as a graph constant.
+    pub fn const_typed_i64(&self, val: i64, typ: i8) -> Result<Column> {
+        unsafe {
+            let vec = ffi::td_vec_new(typ, 1);
+            if vec.is_null() {
+                return Err(Error::Oom);
+            }
+            let vec = ffi::td_vec_append(vec, &val as *const i64 as *const std::ffi::c_void);
+            if vec.is_null() || ffi_is_err(vec) {
+                return Err(Error::Oom);
+            }
+            let col = Self::check_op(ffi::td_const_vec(self.raw, vec));
+            ffi_release(vec);
+            col
+        }
+    }
+
+    /// Create a constant i32 node with a specific type (e.g. DATE, TIME, I32).
+    /// Builds a 1-element vector of the given type and wraps it as a graph constant.
+    pub fn const_typed_i32(&self, val: i32, typ: i8) -> Result<Column> {
+        unsafe {
+            let vec = ffi::td_vec_new(typ, 1);
+            if vec.is_null() {
+                return Err(Error::Oom);
+            }
+            let vec = ffi::td_vec_append(vec, &val as *const i32 as *const std::ffi::c_void);
+            if vec.is_null() || ffi_is_err(vec) {
+                return Err(Error::Oom);
+            }
+            let col = Self::check_op(ffi::td_const_vec(self.raw, vec));
+            ffi_release(vec);
+            col
+        }
+    }
+
     /// Create a constant bool node.
     pub fn const_bool(&self, val: bool) -> Result<Column> {
         Self::check_op(unsafe { ffi::td_const_bool(self.raw, val) })
