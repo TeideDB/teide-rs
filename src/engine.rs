@@ -1335,10 +1335,12 @@ impl<'a> Graph<'a> {
             if vec.is_null() {
                 return Err(Error::Oom);
             }
-            let vec = ffi::td_vec_append(vec, &val as *const i64 as *const std::ffi::c_void);
-            if vec.is_null() || ffi_is_err(vec) {
+            let vec2 = ffi::td_vec_append(vec, &val as *const i64 as *const std::ffi::c_void);
+            if vec2.is_null() || ffi_is_err(vec2) {
+                ffi_release(vec);
                 return Err(Error::Oom);
             }
+            let vec = vec2;
             let col = Self::check_op(ffi::td_const_vec(self.raw, vec));
             ffi_release(vec);
             col
@@ -1353,10 +1355,12 @@ impl<'a> Graph<'a> {
             if vec.is_null() {
                 return Err(Error::Oom);
             }
-            let vec = ffi::td_vec_append(vec, &val as *const i32 as *const std::ffi::c_void);
-            if vec.is_null() || ffi_is_err(vec) {
+            let vec2 = ffi::td_vec_append(vec, &val as *const i32 as *const std::ffi::c_void);
+            if vec2.is_null() || ffi_is_err(vec2) {
+                ffi_release(vec);
                 return Err(Error::Oom);
             }
+            let vec = vec2;
             let col = Self::check_op(ffi::td_const_vec(self.raw, vec));
             ffi_release(vec);
             col

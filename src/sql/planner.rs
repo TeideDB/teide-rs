@@ -2521,12 +2521,14 @@ fn resolve_from(
             return Err(SqlError::Engine(crate::Error::Oom));
         }
         let zero: i64 = 0;
-        let vec = unsafe {
+        let vec2 = unsafe {
             crate::ffi::td_vec_append(vec, &zero as *const i64 as *const std::ffi::c_void)
         };
-        if vec.is_null() || crate::ffi_is_err(vec) {
+        if vec2.is_null() || crate::ffi_is_err(vec2) {
+            unsafe { crate::ffi_release(vec) };
             return Err(SqlError::Engine(crate::Error::Oom));
         }
+        let vec = vec2;
         let res = builder.add_col(name_id, vec);
         unsafe { crate::ffi_release(vec) };
         res?;
