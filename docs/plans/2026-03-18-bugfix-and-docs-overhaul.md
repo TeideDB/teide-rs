@@ -640,11 +640,9 @@ git commit -m "docs: add constant SELECT and alias examples to queries page"
 - Add CURRENT_DATE and NOW() / CURRENT_TIMESTAMP
 - Organize into clear categories: Math, String, Date/Time, Null-handling
 
-**Step 1: Read and audit `docs/sql/functions.html`**
-
-**Step 2: Make the edits**
-
-**Step 3: Commit**
+- [x] Step 1: Read and audit `docs/sql/functions.html`
+- [x] Step 2: Make the edits
+- [x] Step 3: Commit
 
 ```bash
 git add docs/sql/functions.html

@@ -62,7 +62,7 @@
   <main class="content">
     <div class="section-label">SQL REFERENCE</div>
     <h1>Scalar Functions</h1>
-    <p class="lead">Math and string functions available in expressions.</p>
+    <p class="lead">Built-in scalar functions for math, string manipulation, date/time operations, null handling, and vector similarity.</p>
 
     <h2>Math Functions</h2>
     <table>
@@ -71,21 +71,22 @@
       </thead>
       <tbody>
         <tr><td>ABS(x)</td><td>Absolute value</td><td>ABS(-1.0) &rarr; 1.0</td></tr>
-        <tr><td>CEIL(x)</td><td>Round up</td><td>CEIL(1.2) &rarr; 2.0</td></tr>
-        <tr><td>FLOOR(x)</td><td>Round down</td><td>FLOOR(2.7) &rarr; 2.0</td></tr>
-        <tr><td>SQRT(x)</td><td>Square root</td><td>SQRT(9.0) &rarr; 3.0</td></tr>
+        <tr><td>CEIL(x) / CEILING(x)</td><td>Round up to nearest integer</td><td>CEIL(1.2) &rarr; 2.0</td></tr>
+        <tr><td>FLOOR(x)</td><td>Round down to nearest integer</td><td>FLOOR(2.7) &rarr; 2.0</td></tr>
         <tr><td>ROUND(x)</td><td>Round to nearest integer</td><td>ROUND(2.7) &rarr; 3.0</td></tr>
-        <tr><td>LN(x)</td><td>Natural logarithm</td><td>LN(1.0) &rarr; 0.0</td></tr>
-        <tr><td>EXP(x)</td><td>Exponential</td><td>EXP(0.0) &rarr; 1.0</td></tr>
-        <tr><td>LEAST(a,b,...)</td><td>Minimum of arguments</td><td>LEAST(3, 1, 2) &rarr; 1</td></tr>
-        <tr><td>GREATEST(a,b,...)</td><td>Maximum of arguments</td><td>GREATEST(3, 1, 2) &rarr; 3</td></tr>
+        <tr><td>ROUND(x, n)</td><td>Round to n decimal places</td><td>ROUND(3.14159, 2) &rarr; 3.14</td></tr>
+        <tr><td>SQRT(x)</td><td>Square root</td><td>SQRT(9.0) &rarr; 3.0</td></tr>
+        <tr><td>LN(x) / LOG(x)</td><td>Natural logarithm</td><td>LN(1.0) &rarr; 0.0</td></tr>
+        <tr><td>EXP(x)</td><td>Exponential (e<sup>x</sup>)</td><td>EXP(0.0) &rarr; 1.0</td></tr>
+        <tr><td>LEAST(a, b, ...)</td><td>Minimum of arguments</td><td>LEAST(3, 1, 2) &rarr; 1</td></tr>
+        <tr><td>GREATEST(a, b, ...)</td><td>Maximum of arguments</td><td>GREATEST(3, 1, 2) &rarr; 3</td></tr>
       </tbody>
     </table>
 
     <pre><code class="language-sql">SELECT ABS(x) FROM nums;
-SELECT SQRT(x) FROM nums WHERE x > 0.0;
-SELECT ROUND(LN(v), 6) FROM consts WHERE v = 1.0;   -- 0.0
-SELECT ROUND(EXP(v), 6) FROM consts WHERE v = 0.0;  -- 1.0</code></pre>
+SELECT SQRT(x) FROM nums WHERE x &gt; 0.0;
+SELECT ROUND(price, 2) FROM products;
+SELECT LEAST(a, b, c), GREATEST(a, b, c) FROM t;</code></pre>
 
     <h2>String Functions</h2>
     <table>
@@ -93,42 +94,122 @@ SELECT ROUND(EXP(v), 6) FROM consts WHERE v = 0.0;  -- 1.0</code></pre>
         <tr><th>Function</th><th>Description</th><th>Example</th></tr>
       </thead>
       <tbody>
-        <tr><td>UPPER(s)</td><td>To uppercase</td><td>UPPER('abc') &rarr; 'ABC'</td></tr>
-        <tr><td>LOWER(s)</td><td>To lowercase</td><td>LOWER('ABC') &rarr; 'abc'</td></tr>
+        <tr><td>UPPER(s)</td><td>Convert to uppercase</td><td>UPPER('abc') &rarr; 'ABC'</td></tr>
+        <tr><td>LOWER(s)</td><td>Convert to lowercase</td><td>LOWER('ABC') &rarr; 'abc'</td></tr>
         <tr><td>LENGTH(s)</td><td>String length</td><td>LENGTH('hello') &rarr; 5</td></tr>
-        <tr><td>TRIM(s)</td><td>Remove whitespace</td><td>TRIM('  hi  ') &rarr; 'hi'</td></tr>
-        <tr><td>SUBSTR(s,start,len)</td><td>Substring</td><td>SUBSTR('Hello World',1,5) &rarr; 'Hello'</td></tr>
-        <tr><td>REPLACE(s,from,to)</td><td>Replace substring</td><td>REPLACE('Hello World','World','Teide') &rarr; 'Hello Teide'</td></tr>
-        <tr><td>CONCAT(a,b,...)</td><td>Concatenate</td><td>CONCAT('abc','!') &rarr; 'abc!'</td></tr>
+        <tr><td>TRIM(s)</td><td>Remove leading/trailing whitespace</td><td>TRIM('  hi  ') &rarr; 'hi'</td></tr>
+        <tr><td>SUBSTR(s, start, len)</td><td>Extract substring (1-based)</td><td>SUBSTR('Hello', 1, 3) &rarr; 'Hel'</td></tr>
+        <tr><td>REPLACE(s, from, to)</td><td>Replace all occurrences</td><td>REPLACE('aabaa', 'aa', 'x') &rarr; 'xbx'</td></tr>
+        <tr><td>CONCAT(a, b, ...)</td><td>Concatenate strings</td><td>CONCAT('abc', '!') &rarr; 'abc!'</td></tr>
+        <tr><td>a || b</td><td>String concatenation operator</td><td>'foo' || 'bar' &rarr; 'foobar'</td></tr>
       </tbody>
     </table>
 
-    <p>Aliases: LEN, CHAR_LENGTH, CHARACTER_LENGTH (for LENGTH); BTRIM (for TRIM); SUBSTRING (for SUBSTR).</p>
+    <p>Aliases: LEN, CHAR_LENGTH, CHARACTER_LENGTH (all equivalent to LENGTH); BTRIM (equivalent to TRIM); SUBSTRING (equivalent to SUBSTR).</p>
 
-    <pre><code class="language-sql">SELECT UPPER(s) FROM strs WHERE s = 'abc';           -- ABC
-SELECT LOWER(s) FROM strs WHERE s = 'UPPER lower';   -- upper lower
-SELECT LENGTH(s) FROM strs WHERE s = 'Hello World';  -- 11
-SELECT TRIM(s) FROM strs WHERE s = '  spaces  ';     -- spaces
-SELECT SUBSTR(s, 7, 5) FROM strs WHERE s = 'Hello World'; -- World
-SELECT REPLACE(s, 'World', 'Teide') FROM strs WHERE s = 'Hello World'; -- Hello Teide
-SELECT s || '!' FROM strs WHERE s = 'abc';           -- abc!</code></pre>
+    <pre><code class="language-sql">SELECT UPPER(name) FROM users;
+SELECT LENGTH(description) FROM products;
+SELECT TRIM(raw_input) FROM imports;
+SELECT SUBSTR(name, 1, 5) FROM users;
+SELECT REPLACE(text, 'old', 'new') FROM docs;
+SELECT first_name || ' ' || last_name FROM users;</code></pre>
 
     <h2>Date/Time Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th><th>Return Type</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CURRENT_DATE</td><td>Current date (at query time)</td><td>DATE</td></tr>
+        <tr><td>CURRENT_TIMESTAMP / NOW()</td><td>Current timestamp (at query time)</td><td>TIMESTAMP</td></tr>
+        <tr><td>EXTRACT(field FROM expr)</td><td>Extract a date/time component</td><td>INTEGER</td></tr>
+        <tr><td>DATE_TRUNC(unit, expr)</td><td>Truncate timestamp to specified precision</td><td>TIMESTAMP</td></tr>
+        <tr><td>DATE_DIFF(unit, start, end)</td><td>Difference between two timestamps in specified units</td><td>BIGINT</td></tr>
+      </tbody>
+    </table>
+
+    <h3>EXTRACT Fields</h3>
+    <p>Supported fields for EXTRACT: <code>YEAR</code>, <code>MONTH</code>, <code>DAY</code>, <code>HOUR</code>, <code>MINUTE</code>, <code>SECOND</code>, <code>DOW</code> (day of week), <code>DOY</code> (day of year), <code>EPOCH</code>.</p>
+
+    <pre><code class="language-sql">-- Extract individual date/time components
+SELECT EXTRACT(YEAR FROM created_at) FROM events;
+SELECT EXTRACT(MONTH FROM event_date) FROM calendar;
+SELECT EXTRACT(DOW FROM event_date) FROM calendar;   -- 0=Sun, 6=Sat
+SELECT EXTRACT(EPOCH FROM ts) FROM logs;              -- seconds since epoch</code></pre>
+
+    <h3>DATE_TRUNC Units</h3>
+    <p>Supported units for DATE_TRUNC: <code>YEAR</code>, <code>MONTH</code>, <code>DAY</code>, <code>HOUR</code>, <code>MINUTE</code>, <code>SECOND</code>.</p>
+
+    <pre><code class="language-sql">-- Truncate to different precisions
+SELECT DATE_TRUNC('month', created_at) FROM events;   -- first of month
+SELECT DATE_TRUNC('hour', ts) FROM logs;               -- start of hour
+SELECT DATE_TRUNC('year', event_date) FROM calendar;   -- Jan 1 of that year</code></pre>
+
+    <h3>DATE_DIFF</h3>
+    <p>Compute the difference between two timestamps. Also available as <code>DATEDIFF</code>.</p>
+    <p>Supported units: <code>SECOND</code>, <code>MINUTE</code>, <code>HOUR</code>, <code>DAY</code>, <code>MONTH</code>, <code>YEAR</code>.</p>
+
+    <pre><code class="language-sql">-- Days between two timestamps
+SELECT DATE_DIFF('day', start_ts, end_ts) FROM projects;
+
+-- Months between dates
+SELECT DATEDIFF('month', hire_date, CURRENT_TIMESTAMP) FROM employees;</code></pre>
+
+    <h3>Current Date/Time</h3>
+    <pre><code class="language-sql">-- Get current date and timestamp
+SELECT CURRENT_DATE;
+SELECT NOW();
+SELECT CURRENT_TIMESTAMP;</code></pre>
+
+    <h2>Null-Handling Functions</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Description</th><th>Example</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>COALESCE(a, b, ...)</td><td>Return first non-null argument</td><td>COALESCE(NULL, 'default') &rarr; 'default'</td></tr>
+        <tr><td>NULLIF(a, b)</td><td>Return NULL if a = b, else a</td><td>NULLIF(0, 0) &rarr; NULL</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code class="language-sql">-- Use COALESCE to provide default values
+SELECT COALESCE(nickname, first_name, 'Unknown') FROM users;
+
+-- Use NULLIF to turn sentinel values into NULL
+SELECT NULLIF(status, 'N/A') FROM records;</code></pre>
+
+    <h2>Vector Similarity Functions</h2>
+    <p>These functions operate on embedding columns (TD_F32 arrays) and compute similarity against a query vector specified as an ARRAY literal. See <a href="vector-search.html">Vector Search</a> for full details.</p>
     <table>
       <thead>
         <tr><th>Function</th><th>Description</th></tr>
       </thead>
       <tbody>
-        <tr><td>CURRENT_DATE</td><td>Current date</td></tr>
-        <tr><td>CURRENT_TIMESTAMP / NOW()</td><td>Current timestamp</td></tr>
-        <tr><td>EXTRACT(field FROM expr)</td><td>Extract date part</td></tr>
-        <tr><td>DATE_TRUNC(unit, expr)</td><td>Truncate timestamp</td></tr>
-        <tr><td>DATE_DIFF(unit, start, end)</td><td>Difference between timestamps</td></tr>
+        <tr><td>COSINE_SIMILARITY(col, ARRAY[...])</td><td>Cosine similarity between embedding column and query vector (1.0 = identical)</td></tr>
+        <tr><td>EUCLIDEAN_DISTANCE(col, ARRAY[...])</td><td>Euclidean (L2) distance between embedding column and query vector</td></tr>
       </tbody>
     </table>
 
-    <p>EXTRACT fields: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH</p>
-    <p>DATE_TRUNC units: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND</p>
+    <pre><code class="language-sql">-- Rank items by similarity to a query vector
+SELECT name, COSINE_SIMILARITY(embedding, ARRAY[0.1, 0.2, 0.3]) AS sim
+FROM items
+ORDER BY sim DESC
+LIMIT 10;
+
+-- Find nearest neighbors by Euclidean distance
+SELECT name, EUCLIDEAN_DISTANCE(embedding, ARRAY[0.1, 0.2, 0.3]) AS dist
+FROM items
+ORDER BY dist ASC
+LIMIT 5;</code></pre>
+
+    <h2>Type Conversion</h2>
+    <p>Use CAST or the <code>::</code> shorthand to convert between types. See <a href="data-types.html">Data Types</a> for supported conversions.</p>
+
+    <pre><code class="language-sql">SELECT CAST(42 AS BIGINT);
+SELECT CAST('2025-01-15' AS DATE);
+SELECT CAST('12:30:00' AS TIME);
+SELECT CAST('2025-06-15 09:30:00' AS TIMESTAMP);
+SELECT 42::BIGINT;</code></pre>
 
     <nav class="page-nav">
       <a href="subqueries.html" class="prev">Subqueries &amp; CTEs</a>
