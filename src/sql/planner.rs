@@ -1460,11 +1460,17 @@ pub(crate) fn parse_time_str(s: &str) -> Result<i32, String> {
         .map_err(|_| format!("invalid minute in time '{s}'"))?;
     // seconds may have fractional part
     let sec_parts: Vec<&str> = parts[2].split('.').collect();
+    if sec_parts.len() > 2 {
+        return Err(format!("invalid fractional seconds in time '{s}': too many '.' separators"));
+    }
     let s_val: u32 = sec_parts[0]
         .parse()
         .map_err(|e| format!("invalid second in time '{s}': {e}"))?;
     let ms = if sec_parts.len() > 1 {
         let frac = sec_parts[1];
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid fractional seconds in time '{s}'"));
+        }
         // Pad or truncate to 3 digits for milliseconds
         let padded = format!("{:0<3}", frac);
         padded[..3]
@@ -1500,11 +1506,17 @@ pub(crate) fn parse_timestamp_str(s: &str) -> Result<i64, String> {
         .parse()
         .map_err(|_| format!("invalid minute in timestamp '{s}'"))?;
     let sec_parts: Vec<&str> = time_parts[2].split('.').collect();
+    if sec_parts.len() > 2 {
+        return Err(format!("invalid fractional seconds in timestamp '{s}': too many '.' separators"));
+    }
     let secs: u32 = sec_parts[0]
         .parse()
         .map_err(|_| format!("invalid second in timestamp '{s}'"))?;
     let us: i64 = if sec_parts.len() > 1 {
         let frac = sec_parts[1];
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid fractional seconds in timestamp '{s}'"));
+        }
         let padded = format!("{:0<6}", frac);
         padded[..6]
             .parse::<i64>()
@@ -3632,7 +3644,301 @@ fn plan_expr_select(
         return Ok((result, aliases));
     }
 
+    // When constant expressions (e.g. CURRENT_DATE(), CAST('...' AS DATE)) appear
+    // alongside table columns, the C engine returns 1-element vectors for the
+    // constants while table columns have N elements.  Broadcast any short columns
+    // to match the table's row count so consumers see uniform column lengths.
+    // Pass source_nrows so that when ALL projected columns are constants, we
+    // still know how many rows to broadcast to.
+    let source_nrows = working_table.nrows() as i64;
+    let result = broadcast_short_columns(&result, &aliases, embedding_dims, source_nrows)?;
+
     Ok((result, aliases))
+}
+
+/// Broadcast 1-element (or scalar atom) columns to match the longest column in
+/// the table.  This handles the case where constant expressions (CURRENT_DATE,
+/// CAST literals, plain integer literals) produce 1-element results alongside
+/// N-element table columns.  If all columns already have the same length, the
+/// table is returned as-is.
+///
+/// `aliases` and `embedding_dims` are used to identify embedding columns whose
+/// physical length is N*D (not N), so they are excluded from the row-count
+/// derivation.  Scalar atoms (negative type) are also skipped because their
+/// `len` field aliases the scalar payload, not a row count.
+///
+/// `source_nrows` is the row count of the source table (from the FROM clause).
+/// When all projected columns are constants (atoms), this is used as the target
+/// row count for broadcasting.
+fn broadcast_short_columns(
+    table: &Table,
+    aliases: &[String],
+    embedding_dims: &HashMap<String, i32>,
+    source_nrows: i64,
+) -> Result<Table, SqlError> {
+    let ncols = table.ncols();
+    if ncols == 0 {
+        return Ok(table.clone_ref());
+    }
+
+    // Find the maximum column length, skipping scalar atoms (whose `len`
+    // field aliases the scalar payload — see vendor/teide/src/ops/exec.c:10486)
+    // and embedding columns (whose physical length is N*D, not N).
+    let mut max_len: i64 = 0;
+    for c in 0..ncols {
+        let col = table
+            .get_col_idx(c as i64)
+            .ok_or_else(|| SqlError::Plan("missing column".into()))?;
+        let col_type = unsafe { crate::raw::td_type(col) };
+        // Scalar atoms have negative type; their len is the payload value.
+        if col_type < 0 {
+            continue;
+        }
+        // Embedding columns have physical length N*D; skip them.
+        let name = table.col_name_str(c as usize).to_lowercase();
+        let alias = aliases.get(c as usize);
+        let is_emb = embedding_dims.contains_key(&name)
+            || alias.is_some_and(|a| embedding_dims.contains_key(a));
+        if is_emb {
+            continue;
+        }
+        let len = unsafe { crate::ffi::td_len(col as *const crate::ffi::td_t) };
+        if len > max_len {
+            max_len = len;
+        }
+    }
+
+    // If no vector columns were found, try to derive row count from the first
+    // embedding column (len / dim).
+    if max_len == 0 {
+        for c in 0..ncols {
+            let col = table
+                .get_col_idx(c as i64)
+                .ok_or_else(|| SqlError::Plan("missing column".into()))?;
+            let col_type = unsafe { crate::raw::td_type(col) };
+            if col_type < 0 {
+                continue;
+            }
+            let name = table.col_name_str(c as usize).to_lowercase();
+            let alias = aliases.get(c as usize);
+            let dim = embedding_dims
+                .get(&name)
+                .or_else(|| alias.and_then(|a| embedding_dims.get(a)));
+            if let Some(&d) = dim {
+                if d > 0 {
+                    let phys_len =
+                        unsafe { crate::ffi::td_len(col as *const crate::ffi::td_t) };
+                    max_len = phys_len / d as i64;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Check if any column is a scalar atom (type < 0).  Atoms must always be
+    // materialized into vectors even when max_len <= 1, because the result
+    // validator rejects scalar types.  Their `td_len()` value is the payload,
+    // not a row count, so we must never consult it for length decisions.
+    let has_atoms = (0..ncols).any(|c| {
+        let col = table.get_col_idx(c as i64).unwrap();
+        let t = unsafe { crate::raw::td_type(col) };
+        t < 0
+    });
+
+    // If all vector columns have length <= 1 and there are no atoms, nothing to do.
+    if max_len <= 1 && !has_atoms {
+        return Ok(table.clone_ref());
+    }
+    // If no vector columns contributed a length (all atoms), use the source
+    // table's row count so `SELECT 'x' FROM t` produces N rows, not 1.
+    if max_len == 0 {
+        max_len = source_nrows.max(1);
+    }
+
+    let mut needs_broadcast = has_atoms;
+    if !needs_broadcast {
+        for c in 0..ncols {
+            let col = table.get_col_idx(c as i64).unwrap();
+            let col_type = unsafe { crate::raw::td_type(col) };
+            if col_type < 0 {
+                // Atoms always need broadcast (already set via has_atoms above).
+                needs_broadcast = true;
+                break;
+            }
+            let len = unsafe { crate::ffi::td_len(col as *const crate::ffi::td_t) };
+            if len < max_len && len <= 1 {
+                needs_broadcast = true;
+                break;
+            }
+        }
+    }
+    if !needs_broadcast {
+        return Ok(table.clone_ref());
+    }
+
+    let mut builder = RawTableBuilder::new(ncols as i64)?;
+    for c in 0..ncols {
+        let col = table.get_col_idx(c as i64).unwrap();
+        let col_type = unsafe { crate::raw::td_type(col) };
+        let name = table.col_name_str(c as usize);
+        let name_id = crate::sym_intern(&name)?;
+
+        if col_type >= 0 {
+            // Vector column: check length.  (Do NOT call td_len on atoms — their
+            // len field is the scalar payload, not a row count.)
+            let len = unsafe { crate::ffi::td_len(col as *const crate::ffi::td_t) };
+            if len >= max_len {
+                // Already the right length — reuse.
+                unsafe { crate::ffi_retain(col) };
+                let res = builder.add_col(name_id, col);
+                if res.is_err() {
+                    unsafe { crate::ffi_release(col) };
+                }
+                res?;
+                continue;
+            }
+        }
+        // Atom (col_type < 0) or short vector: replicate to max_len elements.
+        let new_col = replicate_column(col, col_type, max_len)?;
+        let res = builder.add_col(name_id, new_col);
+        unsafe { crate::ffi_release(new_col) };
+        res?;
+    }
+    builder.finish()
+}
+
+/// Choose the minimum symbol width that can represent the given ID.
+fn sym_width_for_id(id: i64) -> u8 {
+    if id >= 0 && id <= u8::MAX as i64 {
+        crate::ffi::TD_SYM_W8
+    } else if id >= 0 && id <= u16::MAX as i64 {
+        crate::ffi::TD_SYM_W16
+    } else if id >= 0 && id <= u32::MAX as i64 {
+        crate::ffi::TD_SYM_W32
+    } else {
+        crate::ffi::TD_SYM_W64
+    }
+}
+
+/// Replicate a 1-element column (or scalar atom) to `target_len` elements.
+fn replicate_column(
+    col: *mut crate::ffi::td_t,
+    col_type: i8,
+    target_len: i64,
+) -> Result<*mut crate::ffi::td_t, SqlError> {
+    // Determine vector type and element size.
+    let (vec_type, is_sym) = if col_type < 0 {
+        if col_type == crate::ffi::TD_ATOM_STR {
+            (crate::ffi::TD_SYM, true)
+        } else {
+            (-col_type, -col_type == crate::ffi::TD_SYM)
+        }
+    } else {
+        (col_type, col_type == crate::ffi::TD_SYM)
+    };
+
+    // Read the single value to replicate.
+    // For atoms: value is in the val union.  For 1-element vectors: value is at td_data offset.
+    let elem_size = unsafe { crate::ffi::td_elem_size(vec_type) } as usize;
+    if elem_size == 0 && !is_sym {
+        return Err(SqlError::Plan("cannot broadcast list-type column".into()));
+    }
+
+    let new_vec = if is_sym {
+        // SYM columns: read the symbol ID and fill, preserving the source width.
+        // The engine supports W8/W16/W32/W64 symbol storage; we must not assume W32.
+        let (sym_id, src_width): (i64, u8) = if col_type < 0 {
+            // Atom: symbol ID is in val.i64_
+            let id = if col_type == crate::ffi::TD_ATOM_STR {
+                let ptr = unsafe { crate::ffi::td_str_ptr(col) };
+                let slen = unsafe { crate::ffi::td_str_len(col) };
+                let s = if ptr.is_null() || slen == 0 {
+                    ""
+                } else {
+                    unsafe {
+                        std::str::from_utf8(std::slice::from_raw_parts(
+                            ptr as *const u8,
+                            slen,
+                        ))
+                        .unwrap_or("")
+                    }
+                };
+                crate::sym_intern(s)?
+            } else {
+                unsafe { (*col).val.i64_ }
+            };
+            // Choose minimum width that fits the symbol ID.
+            let w = sym_width_for_id(id);
+            (id, w)
+        } else {
+            // 1-element SYM vector: read using the source column's width.
+            let attrs = unsafe { crate::ffi::td_attrs(col as *const crate::ffi::td_t) };
+            let data = unsafe { crate::ffi::td_data(col) as *const u8 };
+            let id = unsafe { crate::ffi::read_sym(data, 0, vec_type, attrs) };
+            (id, attrs & crate::ffi::TD_SYM_W_MASK)
+        };
+        let vec = unsafe { crate::ffi::td_sym_vec_new(src_width, target_len) };
+        if vec.is_null() {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        // Fill using the correct element size for the chosen width.
+        let dst = unsafe { crate::ffi::td_data(vec) as *mut u8 };
+        let esz = match src_width {
+            crate::ffi::TD_SYM_W8 => 1usize,
+            crate::ffi::TD_SYM_W16 => 2,
+            crate::ffi::TD_SYM_W32 => 4,
+            _ => 8, // W64
+        };
+        for i in 0..target_len as usize {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &sym_id as *const i64 as *const u8,
+                    dst.add(i * esz),
+                    esz,
+                );
+            }
+        }
+        unsafe { (*vec).val.len = target_len };
+        vec
+    } else {
+        // Numeric / fixed-size types: read value bytes and fill.
+        let mut val_buf = [0u8; 16]; // max 16 bytes (GUID)
+        if col_type < 0 {
+            // Atom: value in val union (bytes 24-31 of td_t).
+            let val_ptr = unsafe {
+                &(*col).val as *const crate::ffi::td_t_val as *const u8
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(val_ptr, val_buf.as_mut_ptr(), elem_size.min(16));
+            }
+        } else {
+            // 1-element vector: value at td_data offset.
+            let data = unsafe { crate::ffi::td_data(col) as *const u8 };
+            unsafe {
+                std::ptr::copy_nonoverlapping(data, val_buf.as_mut_ptr(), elem_size.min(16));
+            }
+        };
+
+        let vec = unsafe { crate::raw::td_vec_new(vec_type, target_len) };
+        if vec.is_null() {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        // Fill the vector by writing directly into the data buffer.
+        let dst = unsafe { crate::ffi::td_data(vec) as *mut u8 };
+        for i in 0..target_len as usize {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    val_buf.as_ptr(),
+                    dst.add(i * elem_size),
+                    elem_size,
+                );
+            }
+        }
+        unsafe { (*vec).val.len = target_len };
+        vec
+    };
+
+    Ok(new_vec)
 }
 
 /// Convert a table whose columns may be scalar atoms into a table where every
@@ -3672,7 +3978,8 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
             };
             let vec = if col_type == crate::ffi::TD_ATOM_STR {
                 // String atoms store inline string data, not symbol IDs.
-                // Read the string, intern it, and create a SYM vector.
+                // Read the string, intern it, and create a SYM vector with
+                // the minimum width that fits the interned ID.
                 let ptr = unsafe { crate::ffi::td_str_ptr(col) };
                 let slen = unsafe { crate::ffi::td_str_len(col) };
                 let s = if ptr.is_null() || slen == 0 {
@@ -3686,43 +3993,57 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
                         .unwrap_or("")
                     }
                 };
-                let sym_id = crate::sym_intern(s)? as u32;
-                let vec = unsafe { crate::ffi::td_sym_vec_new(crate::ffi::TD_SYM_W32, 1) };
-                if vec.is_null() {
+                let sym_id = crate::sym_intern(s)?;
+                let w = sym_width_for_id(sym_id);
+                let orig = unsafe { crate::ffi::td_sym_vec_new(w, 1) };
+                if orig.is_null() {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
-                unsafe {
+                let appended = unsafe {
                     crate::ffi::td_vec_append(
-                        vec,
-                        &sym_id as *const u32 as *const std::ffi::c_void,
+                        orig,
+                        &sym_id as *const i64 as *const std::ffi::c_void,
                     )
+                };
+                if appended.is_null() || crate::ffi_is_err(appended) {
+                    unsafe { crate::ffi_release(orig) };
+                    return Err(SqlError::Engine(crate::Error::Oom));
                 }
+                appended
             } else if vec_type == crate::ffi::TD_SYM {
                 // SYM atoms store the symbol ID as i64 in val.
-                let sym_id = unsafe { (*col).val.i64_ } as u32;
-                let vec = unsafe { crate::ffi::td_sym_vec_new(crate::ffi::TD_SYM_W32, 1) };
-                if vec.is_null() {
+                let sym_id = unsafe { (*col).val.i64_ };
+                let w = sym_width_for_id(sym_id);
+                let orig = unsafe { crate::ffi::td_sym_vec_new(w, 1) };
+                if orig.is_null() {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
-                unsafe {
+                let appended = unsafe {
                     crate::ffi::td_vec_append(
-                        vec,
-                        &sym_id as *const u32 as *const std::ffi::c_void,
+                        orig,
+                        &sym_id as *const i64 as *const std::ffi::c_void,
                     )
+                };
+                if appended.is_null() || crate::ffi_is_err(appended) {
+                    unsafe { crate::ffi_release(orig) };
+                    return Err(SqlError::Engine(crate::Error::Oom));
                 }
+                appended
             } else {
-                let vec = unsafe { crate::raw::td_vec_new(vec_type, 1) };
-                if vec.is_null() {
+                let orig = unsafe { crate::raw::td_vec_new(vec_type, 1) };
+                if orig.is_null() {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
                 let val_ptr = unsafe {
                     &(*col).val as *const crate::ffi::td_t_val as *const std::ffi::c_void
                 };
-                unsafe { crate::ffi::td_vec_append(vec, val_ptr) }
+                let appended = unsafe { crate::ffi::td_vec_append(orig, val_ptr) };
+                if appended.is_null() || crate::ffi_is_err(appended) {
+                    unsafe { crate::ffi_release(orig) };
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                appended
             };
-            if vec.is_null() || crate::ffi_is_err(vec) {
-                return Err(SqlError::Engine(crate::Error::Oom));
-            }
             let res = builder.add_col(name_id, vec);
             unsafe { crate::ffi_release(vec) };
             res?;

@@ -128,15 +128,12 @@ fn select_columns() {
 }
 
 #[test]
-fn select_literal_scalar_rejected() {
+fn select_literal_scalar_broadcast() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let (mut session, _f) = setup_session();
-    let err = match session.execute("SELECT 'x' as s FROM csv") {
-        Ok(_) => panic!("expected scalar literal projection to be rejected"),
-        Err(err) => err,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("scalar type"));
+    let result = unwrap_query(session.execute("SELECT 'x' as s FROM csv").unwrap());
+    assert_eq!(result.nrows, 20);
+    assert_eq!(result.columns, vec!["s"]);
 }
 
 #[test]
@@ -550,48 +547,48 @@ fn union_distinct() {
 fn union_all_literal_column_from_table() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let (mut session, _f) = setup_session();
-    let err = match session.execute(
-        "SELECT 'x' AS s FROM csv \
-         UNION ALL \
-         SELECT 'x' AS s FROM csv",
-    ) {
-        Ok(_) => panic!("expected UNION ALL literal-column rejection"),
-        Err(err) => err,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("scalar type"));
+    let result = unwrap_query(
+        session
+            .execute(
+                "SELECT 'x' AS s FROM csv \
+                 UNION ALL \
+                 SELECT 'x' AS s FROM csv",
+            )
+            .unwrap(),
+    );
+    assert_eq!(result.nrows, 40);
 }
 
 #[test]
 fn intersect_all_literal_column_from_table() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let (mut session, _f) = setup_session();
-    let err = match session.execute(
-        "SELECT 'x' AS s FROM csv \
-         INTERSECT ALL \
-         SELECT 'x' AS s FROM csv",
-    ) {
-        Ok(_) => panic!("expected INTERSECT ALL literal-column rejection"),
-        Err(err) => err,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("scalar type"));
+    let result = unwrap_query(
+        session
+            .execute(
+                "SELECT 'x' AS s FROM csv \
+                 INTERSECT ALL \
+                 SELECT 'x' AS s FROM csv",
+            )
+            .unwrap(),
+    );
+    assert_eq!(result.nrows, 20);
 }
 
 #[test]
 fn except_all_literal_column_from_table() {
     let _guard = ENGINE_LOCK.lock().unwrap();
     let (mut session, _f) = setup_session();
-    let err = match session.execute(
-        "SELECT 'x' AS s FROM csv \
-         EXCEPT ALL \
-         SELECT 'x' AS s FROM csv",
-    ) {
-        Ok(_) => panic!("expected EXCEPT ALL literal-column rejection"),
-        Err(err) => err,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("scalar type"));
+    let result = unwrap_query(
+        session
+            .execute(
+                "SELECT 'x' AS s FROM csv \
+                 EXCEPT ALL \
+                 SELECT 'x' AS s FROM csv",
+            )
+            .unwrap(),
+    );
+    assert_eq!(result.nrows, 0);
 }
 
 #[test]

@@ -56,17 +56,101 @@ SELECT b, a FROM twocol
 ----
 2 1
 
-statement error
+query T
 SELECT 'x' AS s FROM csv
+----
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
 
-statement error
+query T
 SELECT 'x' AS s FROM csv UNION ALL SELECT 'x' AS s FROM csv
+----
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
 
-statement error
+query T
 SELECT 'x' AS s FROM csv INTERSECT ALL SELECT 'x' AS s FROM csv
+----
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
 
-statement error
+query T
 SELECT 'x' AS s FROM csv EXCEPT ALL SELECT 'x' AS s FROM csv
+----
 
 query T
 SELECT id1 FROM csv WHERE id1 = 'id001' INTERSECT ALL SELECT id1 FROM csv WHERE id1 = 'id002'
