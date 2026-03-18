@@ -1,0 +1,41 @@
+# SELECT without FROM clause — constant expressions
+
+query I
+SELECT 1
+----
+1
+
+query T
+SELECT 'hello'
+----
+hello
+
+query R
+SELECT 3.14
+----
+3.14
+
+query B
+SELECT true
+----
+true
+
+query ITR
+SELECT 1, 'hello', 3.14
+----
+1 hello 3.14
+
+query I
+SELECT 1 + 2
+----
+3
+
+query R
+SELECT 42.0
+----
+42.0
+
+query T
+SELECT 'foo' || 'bar'
+----
+foobar

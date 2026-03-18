@@ -371,3 +371,8 @@ fn slt_pgq_var_edge_props() {
 fn slt_pgq_list_return() {
     run_slt("tests/slt/pgq_list_return.slt");
 }
+
+#[test]
+fn slt_constant_select() {
+    run_slt("tests/slt/constant_select.slt");
+}

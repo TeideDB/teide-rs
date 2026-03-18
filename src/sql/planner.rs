@@ -2482,7 +2482,31 @@ fn resolve_from(
     graphs: Option<&HashMap<String, pgq::PropertyGraph>>,
 ) -> Result<(Table, HashMap<String, usize>, HashMap<String, i32>), SqlError> {
     if from.is_empty() {
-        return Err(SqlError::Plan("Missing FROM clause".into()));
+        // Constant SELECT (no FROM): synthesize a 1-row table with a dummy
+        // column so that constant expressions broadcast to 1 row during graph
+        // execution.  The `_dummy` column is included in the schema so the
+        // graph can reference it; plan_constant_select strips it from output.
+        let mut builder = RawTableBuilder::new(1)?;
+        let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_I64, 1) };
+        if vec.is_null() {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        let zero: i64 = 0;
+        let vec = unsafe {
+            crate::ffi::td_vec_append(vec, &zero as *const i64 as *const std::ffi::c_void)
+        };
+        if vec.is_null() || crate::ffi_is_err(vec) {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        let name_id = crate::sym_intern("_dummy")?;
+        let res = builder.add_col(name_id, vec);
+        unsafe { crate::ffi_release(vec) };
+        res?;
+        let table = builder.finish()?;
+        let mut schema = HashMap::new();
+        schema.insert("_dummy".to_string(), 0);
+        let emb_dims = HashMap::new();
+        return Ok((table, schema, emb_dims));
     }
 
     // Multiple FROM tables = implicit CROSS JOIN: SELECT * FROM t1, t2
@@ -3564,7 +3588,107 @@ fn plan_expr_select(
 
     let proj = g.select(table_node, &proj_cols)?;
     let result = g.execute(proj)?;
+
+    // For constant SELECT (no real columns, only _dummy), the graph produces
+    // scalar atoms for constant expressions. Convert each scalar column to a
+    // 1-element vector so the result validator accepts them.
+    let is_constant_select = schema.len() == 1 && schema.contains_key("_dummy");
+    if is_constant_select {
+        let result = scalar_table_to_vector_table(&result)?;
+        return Ok((result, aliases));
+    }
+
     Ok((result, aliases))
+}
+
+/// Convert a table whose columns may be scalar atoms into a table where every
+/// column is a 1-element vector. Used for constant SELECT results.
+fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
+    let ncols = table.ncols();
+    let mut builder = RawTableBuilder::new(ncols as i64)?;
+    for c in 0..ncols {
+        let col = table
+            .get_col_idx(c as i64)
+            .ok_or_else(|| SqlError::Plan("missing column in constant select".into()))?;
+        let col_type = unsafe { crate::raw::td_type(col) };
+        let name = table.col_name_str(c as usize);
+        let name_id = crate::sym_intern(&name)?;
+        if col_type > 0 {
+            // Already a vector — reuse it directly
+            unsafe { crate::ffi_retain(col) };
+            let res = builder.add_col(name_id, col);
+            if res.is_err() {
+                unsafe { crate::ffi_release(col) };
+            }
+            res?;
+        } else {
+            // Scalar atom: create a 1-element vector and copy the value.
+            // For atoms, the value lives in the `val` union (bytes 24-31),
+            // not at td_data() offset 32 which is for vector payloads.
+            // Special case: TD_ATOM_STR (-8) maps to TD_SYM (20), not TD_F32.
+            let vec_type = if col_type == crate::ffi::TD_ATOM_STR {
+                crate::ffi::TD_SYM
+            } else {
+                -col_type
+            };
+            let vec = if col_type == crate::ffi::TD_ATOM_STR {
+                // String atoms store inline string data, not symbol IDs.
+                // Read the string, intern it, and create a SYM vector.
+                let ptr = unsafe { crate::ffi::td_str_ptr(col) };
+                let slen = unsafe { crate::ffi::td_str_len(col) };
+                let s = if ptr.is_null() || slen == 0 {
+                    ""
+                } else {
+                    unsafe {
+                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                            ptr as *const u8,
+                            slen,
+                        ))
+                    }
+                };
+                let sym_id = crate::sym_intern(s)? as u32;
+                let vec = unsafe { crate::ffi::td_sym_vec_new(crate::ffi::TD_SYM_W32, 1) };
+                if vec.is_null() {
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                unsafe {
+                    crate::ffi::td_vec_append(
+                        vec,
+                        &sym_id as *const u32 as *const std::ffi::c_void,
+                    )
+                }
+            } else if vec_type == crate::ffi::TD_SYM {
+                // SYM atoms store the symbol ID as i64 in val.
+                let sym_id = unsafe { (*col).val.i64_ } as u32;
+                let vec = unsafe { crate::ffi::td_sym_vec_new(crate::ffi::TD_SYM_W32, 1) };
+                if vec.is_null() {
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                unsafe {
+                    crate::ffi::td_vec_append(
+                        vec,
+                        &sym_id as *const u32 as *const std::ffi::c_void,
+                    )
+                }
+            } else {
+                let vec = unsafe { crate::raw::td_vec_new(vec_type, 1) };
+                if vec.is_null() {
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
+                let val_ptr = unsafe {
+                    &(*col).val as *const crate::ffi::td_t_val as *const std::ffi::c_void
+                };
+                unsafe { crate::ffi::td_vec_append(vec, val_ptr) }
+            };
+            if vec.is_null() || crate::ffi_is_err(vec) {
+                return Err(SqlError::Engine(crate::Error::Oom));
+            }
+            let res = builder.add_col(name_id, vec);
+            unsafe { crate::ffi_release(vec) };
+            res?;
+        }
+    }
+    builder.finish()
 }
 
 // ---------------------------------------------------------------------------

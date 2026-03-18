@@ -247,6 +247,12 @@ Allow `SELECT 1, 'hello', 3.14, true;` by synthesizing a single-row dummy table.
 **Files:**
 - Modify: `src/sql/planner.rs:2355-2363` (the `resolve_from` function)
 
+- [x] Step 1: Write the failing test
+- [x] Step 2: Run test to verify it fails
+- [x] Step 3: Write the implementation
+- [x] Step 4: Run tests to verify they pass
+- [x] Step 5: Commit
+
 **Step 1: Write the failing test**
 
 Create `tests/slt/constant_select.slt`:
