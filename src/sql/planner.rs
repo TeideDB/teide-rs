@@ -1421,6 +1421,21 @@ pub(crate) fn parse_date_str(s: &str) -> Result<i32, String> {
     if m < 1 || m > 12 || d < 1 || d > 31 {
         return Err(format!("date out of range: '{s}'"));
     }
+    // Per-month day validation (accounts for leap years)
+    let max_day = match m {
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if d > max_day {
+        return Err(format!("date out of range: '{s}'"));
+    }
     // Hinnant days_from_civil: compute days since 1970-01-01, then adjust to 2000-01-01
     let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -1497,6 +1512,9 @@ pub(crate) fn parse_timestamp_str(s: &str) -> Result<i64, String> {
     } else {
         0
     };
+    if h > 23 || m > 59 || secs > 59 {
+        return Err(format!("time out of range in timestamp: '{s}'"));
+    }
     let day_us = days as i64 * 86_400_000_000;
     let time_us = h * 3_600_000_000 + m * 60_000_000 + secs * 1_000_000 + us;
     Ok(day_us + time_us)
@@ -2075,6 +2093,16 @@ fn plan_query(
         // SQL allows ORDER BY columns not present in SELECT output.
         // Keep those as hidden columns during sorting, then trim before returning.
         let hidden_order_cols = collect_hidden_order_columns(&order_by_exprs, &aliases, &schema);
+        // Reject SELECT * without a real FROM clause (only _dummy in schema).
+        let is_constant_select = schema.len() == 1 && schema.contains_key("_dummy");
+        if is_constant_select
+            && select_items.len() == 1
+            && matches!(select_items[0], SelectItem::Wildcard(_))
+        {
+            return Err(SqlError::Plan(
+                "SELECT * requires a FROM clause".into(),
+            ));
+        }
         // Skip projection only for true identity projections (`SELECT *` or
         // selecting all base columns in table order). This prevents silently
         // returning wrong columns for reordered/missing identifiers.
@@ -2485,7 +2513,8 @@ fn resolve_from(
         // Constant SELECT (no FROM): synthesize a 1-row table with a dummy
         // column so that constant expressions broadcast to 1 row during graph
         // execution.  The `_dummy` column is included in the schema so the
-        // graph can reference it; plan_constant_select strips it from output.
+        // graph can reference it; scalar_table_to_vector_table strips it from output.
+        let name_id = crate::sym_intern("_dummy")?;
         let mut builder = RawTableBuilder::new(1)?;
         let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_I64, 1) };
         if vec.is_null() {
@@ -2498,7 +2527,6 @@ fn resolve_from(
         if vec.is_null() || crate::ffi_is_err(vec) {
             return Err(SqlError::Engine(crate::Error::Oom));
         }
-        let name_id = crate::sym_intern("_dummy")?;
         let res = builder.add_col(name_id, vec);
         unsafe { crate::ffi_release(vec) };
         res?;
@@ -3557,6 +3585,10 @@ fn plan_expr_select(
                 let mut cols: Vec<_> = schema.iter().collect();
                 cols.sort_by_key(|(_name, idx)| **idx);
                 for (name, _) in cols {
+                    // Skip internal _dummy column used for constant SELECT
+                    if name == "_dummy" {
+                        continue;
+                    }
                     proj_cols.push(g.scan(name)?);
                     aliases.push(name.clone());
                 }

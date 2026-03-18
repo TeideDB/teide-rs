@@ -218,7 +218,10 @@ SELECT CAST(3.14 AS INTEGER);
 -- Temporal CAST from string literals
 SELECT CAST('2025-01-15' AS DATE);
 SELECT CAST('12:30:00' AS TIME);
-SELECT CAST('2025-01-15 09:30:00' AS TIMESTAMP);</code></pre>
+SELECT CAST('2025-01-15 09:30:00' AS TIMESTAMP);
+
+-- PostgreSQL :: shorthand
+SELECT 42::REAL;</code></pre>
 
     <h2>NULL Representation</h2>
     <p>Teide uses type-specific sentinel values for NULL:</p>

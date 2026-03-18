@@ -39,3 +39,7 @@ query T
 SELECT 'foo' || 'bar'
 ----
 foobar
+
+# SELECT * without FROM should error
+statement error
+SELECT *

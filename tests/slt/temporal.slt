@@ -255,3 +255,29 @@ query T
 SELECT CAST('2025-06-15 09:30:00' AS TIMESTAMP) FROM cast_test
 ----
 2025-06-15 09:30:00
+
+# === Error paths: invalid temporal literals ===
+
+statement ok
+CREATE TABLE date_err (d DATE)
+
+statement error
+INSERT INTO date_err VALUES ('2025-02-29')
+
+statement error
+INSERT INTO date_err VALUES ('2025-04-31')
+
+statement error
+INSERT INTO date_err VALUES ('not-a-date')
+
+statement ok
+CREATE TABLE ts_err (ts TIMESTAMP)
+
+statement error
+INSERT INTO ts_err VALUES ('2025-01-01 25:00:00')
+
+statement error
+INSERT INTO ts_err VALUES ('2025-01-01 12:60:00')
+
+statement error
+INSERT INTO ts_err VALUES ('2025-01-01 12:00:60')
