@@ -134,6 +134,9 @@ fn select_literal_scalar_broadcast() {
     let result = unwrap_query(session.execute("SELECT 'x' as s FROM csv").unwrap());
     assert_eq!(result.nrows, 20);
     assert_eq!(result.columns, vec!["s"]);
+    // Verify actual cell values to catch broadcast data corruption.
+    assert_eq!(result.table.get_str(0, 0).unwrap(), "x");
+    assert_eq!(result.table.get_str(0, 19).unwrap(), "x");
 }
 
 #[test]

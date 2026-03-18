@@ -1332,7 +1332,7 @@ impl<'a> Graph<'a> {
     pub(crate) fn const_typed_i64(&self, val: i64, typ: i8) -> Result<Column> {
         unsafe {
             let vec = ffi::td_vec_new(typ, 1);
-            if vec.is_null() {
+            if vec.is_null() || ffi_is_err(vec) {
                 return Err(Error::Oom);
             }
             let vec2 = ffi::td_vec_append(vec, &val as *const i64 as *const std::ffi::c_void);
@@ -1352,7 +1352,7 @@ impl<'a> Graph<'a> {
     pub(crate) fn const_typed_i32(&self, val: i32, typ: i8) -> Result<Column> {
         unsafe {
             let vec = ffi::td_vec_new(typ, 1);
-            if vec.is_null() {
+            if vec.is_null() || ffi_is_err(vec) {
                 return Err(Error::Oom);
             }
             let vec2 = ffi::td_vec_append(vec, &val as *const i32 as *const std::ffi::c_void);

@@ -42,6 +42,10 @@ use super::expr::{
 };
 use super::{pgq, ExecResult, Session, SqlError, SqlResult, StoredTable};
 
+/// Sentinel column name used by constant SELECT (no FROM clause) to provide
+/// a 1-row dummy table for the graph executor.
+const CONST_SELECT_DUMMY: &str = "__teide_const_dummy__";
+
 // ---------------------------------------------------------------------------
 // Session-aware entry point
 // ---------------------------------------------------------------------------
@@ -2106,7 +2110,7 @@ fn plan_query(
         // Keep those as hidden columns during sorting, then trim before returning.
         let hidden_order_cols = collect_hidden_order_columns(&order_by_exprs, &aliases, &schema);
         // Reject SELECT * without a real FROM clause (only __teide_const_dummy__ in schema).
-        let is_constant_select = schema.len() == 1 && schema.contains_key("__teide_const_dummy__");
+        let is_constant_select = schema.len() == 1 && schema.contains_key(CONST_SELECT_DUMMY);
         if is_constant_select
             && select_items.len() == 1
             && matches!(select_items[0], SelectItem::Wildcard(_))
@@ -2526,10 +2530,10 @@ fn resolve_from(
         // column so that constant expressions broadcast to 1 row during graph
         // execution.  The `__teide_const_dummy__` column is included in the schema so the
         // graph can reference it; plan_expr_select's projection excludes it from output.
-        let name_id = crate::sym_intern("__teide_const_dummy__")?;
+        let name_id = crate::sym_intern(CONST_SELECT_DUMMY)?;
         let mut builder = RawTableBuilder::new(1)?;
         let vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_I64, 1) };
-        if vec.is_null() {
+        if vec.is_null() || crate::ffi_is_err(vec) {
             return Err(SqlError::Engine(crate::Error::Oom));
         }
         let zero: i64 = 0;
@@ -2546,7 +2550,7 @@ fn resolve_from(
         res?;
         let table = builder.finish()?;
         let mut schema = HashMap::new();
-        schema.insert("__teide_const_dummy__".to_string(), 0);
+        schema.insert(CONST_SELECT_DUMMY.to_string(), 0);
         let emb_dims = HashMap::new();
         return Ok((table, schema, emb_dims));
     }
@@ -3599,8 +3603,8 @@ fn plan_expr_select(
                 let mut cols: Vec<_> = schema.iter().collect();
                 cols.sort_by_key(|(_name, idx)| **idx);
                 for (name, _) in cols {
-                    // Skip internal __teide_const_dummy__ column used for constant SELECT
-                    if name == "__teide_const_dummy__" {
+                    // Skip internal dummy column used for constant SELECT
+                    if name == CONST_SELECT_DUMMY {
                         continue;
                     }
                     proj_cols.push(g.scan(name)?);
@@ -3638,7 +3642,7 @@ fn plan_expr_select(
     // For constant SELECT (no real columns, only __teide_const_dummy__), the graph produces
     // scalar atoms for constant expressions. Convert each scalar column to a
     // 1-element vector so the result validator accepts them.
-    let is_constant_select = schema.len() == 1 && schema.contains_key("__teide_const_dummy__");
+    let is_constant_select = schema.len() == 1 && schema.contains_key(CONST_SELECT_DUMMY);
     if is_constant_select {
         let result = scalar_table_to_vector_table(&result)?;
         return Ok((result, aliases));
@@ -3739,11 +3743,19 @@ fn broadcast_short_columns(
     // materialized into vectors even when max_len <= 1, because the result
     // validator rejects scalar types.  Their `td_len()` value is the payload,
     // not a row count, so we must never consult it for length decisions.
-    let has_atoms = (0..ncols).any(|c| {
-        let col = table.get_col_idx(c as i64).unwrap();
-        let t = unsafe { crate::raw::td_type(col) };
-        t < 0
-    });
+    let has_atoms = {
+        let mut found = false;
+        for c in 0..ncols {
+            let col = table
+                .get_col_idx(c as i64)
+                .ok_or_else(|| SqlError::Plan("missing column".into()))?;
+            if unsafe { crate::raw::td_type(col) } < 0 {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
 
     // If all vector columns have length <= 1 and there are no atoms, nothing to do.
     if max_len <= 1 && !has_atoms {
@@ -3758,7 +3770,9 @@ fn broadcast_short_columns(
     let mut needs_broadcast = has_atoms;
     if !needs_broadcast {
         for c in 0..ncols {
-            let col = table.get_col_idx(c as i64).unwrap();
+            let col = table
+                .get_col_idx(c as i64)
+                .ok_or_else(|| SqlError::Plan("missing column".into()))?;
             let col_type = unsafe { crate::raw::td_type(col) };
             if col_type < 0 {
                 // Atoms always need broadcast (already set via has_atoms above).
@@ -3778,7 +3792,9 @@ fn broadcast_short_columns(
 
     let mut builder = RawTableBuilder::new(ncols as i64)?;
     for c in 0..ncols {
-        let col = table.get_col_idx(c as i64).unwrap();
+        let col = table
+            .get_col_idx(c as i64)
+            .ok_or_else(|| SqlError::Plan("missing column".into()))?;
         let col_type = unsafe { crate::raw::td_type(col) };
         let name = table.col_name_str(c as usize);
         let name_id = crate::sym_intern(&name)?;
@@ -3878,24 +3894,55 @@ fn replicate_column(
             (id, attrs & crate::ffi::TD_SYM_W_MASK)
         };
         let vec = unsafe { crate::ffi::td_sym_vec_new(src_width, target_len) };
-        if vec.is_null() {
+        if vec.is_null() || crate::ffi_is_err(vec) {
             return Err(SqlError::Engine(crate::Error::Oom));
         }
         // Fill using the correct element size for the chosen width.
+        // Cast sym_id to the target width type to ensure correct byte layout
+        // on both little-endian and big-endian architectures.
         let dst = unsafe { crate::ffi::td_data(vec) as *mut u8 };
-        let esz = match src_width {
-            crate::ffi::TD_SYM_W8 => 1usize,
-            crate::ffi::TD_SYM_W16 => 2,
-            crate::ffi::TD_SYM_W32 => 4,
-            _ => 8, // W64
-        };
-        for i in 0..target_len as usize {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    &sym_id as *const i64 as *const u8,
-                    dst.add(i * esz),
-                    esz,
-                );
+        match src_width {
+            crate::ffi::TD_SYM_W8 => {
+                let v = sym_id as u8;
+                for i in 0..target_len as usize {
+                    unsafe { std::ptr::copy_nonoverlapping(&v as *const u8, dst.add(i), 1) };
+                }
+            }
+            crate::ffi::TD_SYM_W16 => {
+                let v = sym_id as u16;
+                for i in 0..target_len as usize {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            &v as *const u16 as *const u8,
+                            dst.add(i * 2),
+                            2,
+                        )
+                    };
+                }
+            }
+            crate::ffi::TD_SYM_W32 => {
+                let v = sym_id as u32;
+                for i in 0..target_len as usize {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            &v as *const u32 as *const u8,
+                            dst.add(i * 4),
+                            4,
+                        )
+                    };
+                }
+            }
+            _ => {
+                // W64
+                for i in 0..target_len as usize {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            &sym_id as *const i64 as *const u8,
+                            dst.add(i * 8),
+                            8,
+                        )
+                    };
+                }
             }
         }
         unsafe { (*vec).val.len = target_len };
@@ -3920,7 +3967,7 @@ fn replicate_column(
         };
 
         let vec = unsafe { crate::raw::td_vec_new(vec_type, target_len) };
-        if vec.is_null() {
+        if vec.is_null() || crate::ffi_is_err(vec) {
             return Err(SqlError::Engine(crate::Error::Oom));
         }
         // Fill the vector by writing directly into the data buffer.
