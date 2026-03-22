@@ -39,6 +39,21 @@
  * (rejecting '/', '\\', '..', leading '.') cover main attack vector.
  * -------------------------------------------------------------------------- */
 
+/* Post-load validation: reject if sym table is empty but table has TD_SYM
+ * columns, or if schema expected columns but none could be loaded. */
+static td_err_t validate_sym_columns(td_t* tbl, int64_t schema_ncols) {
+    if (td_sym_count() != 0) return TD_OK;
+
+    int64_t nc = td_table_ncols(tbl);
+    if (schema_ncols > 0 && nc == 0) return TD_ERR_CORRUPT;
+
+    for (int64_t c = 0; c < nc; c++) {
+        td_t* col = td_table_get_col_idx(tbl, c);
+        if (col && col->type == TD_SYM) return TD_ERR_CORRUPT;
+    }
+    return TD_OK;
+}
+
 /* --------------------------------------------------------------------------
  * td_splay_save — save a table to a splayed table directory
  * -------------------------------------------------------------------------- */
@@ -104,8 +119,14 @@ td_err_t td_splay_save(td_t* tbl, const char* dir, const char* sym_path) {
  * td_splay_load — load a splayed table from a directory
  * -------------------------------------------------------------------------- */
 
-td_t* td_splay_load(const char* dir) {
+td_t* td_splay_load(const char* dir, const char* sym_path) {
     if (!dir) return TD_ERR_PTR(TD_ERR_IO);
+
+    /* Load symbol table if sym_path provided */
+    if (sym_path) {
+        td_err_t sym_err = td_sym_load(sym_path);
+        if (sym_err != TD_OK) return TD_ERR_PTR(sym_err);
+    }
 
     /* Load .d schema */
     char path[1024];
@@ -128,16 +149,26 @@ td_t* td_splay_load(const char* dir) {
     for (int64_t c = 0; c < ncols; c++) {
         int64_t name_id = name_ids[c];
         td_t* name_atom = td_sym_str(name_id);
-        if (!name_atom) continue;
+        if (!name_atom) {
+            /* Schema references a sym ID that doesn't exist — sym table
+             * is stale or wrong for this data. */
+            td_release(schema);
+            td_release(tbl);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
 
         const char* name = td_str_ptr(name_atom);
         size_t name_len = td_str_len(name_atom);
 
-        /* Reject names with path separators, traversal, or starting with '.' */
+        /* Reject names with path separators, traversal, or starting with '.'
+         * — these indicate a stale/wrong sym file, not a column to skip. */
         if (name_len == 0 || name[0] == '.' ||
             memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
-            memchr(name, '\0', name_len))
-            continue;
+            memchr(name, '\0', name_len)) {
+            td_release(schema);
+            td_release(tbl);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
 
         path_len = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
         if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
@@ -165,6 +196,13 @@ td_t* td_splay_load(const char* dir) {
     }
 
     td_release(schema);
+
+    td_err_t sym_check = validate_sym_columns(tbl, ncols);
+    if (sym_check != TD_OK) {
+        td_release(tbl);
+        return TD_ERR_PTR(sym_check);
+    }
+
     return tbl;
 }
 
@@ -178,12 +216,10 @@ td_t* td_splay_load(const char* dir) {
 td_t* td_read_splayed(const char* dir, const char* sym_path) {
     if (!dir) return TD_ERR_PTR(TD_ERR_IO);
 
-    /* Load symbol table if sym_path provided */
+    /* Load symbol table if sym_path provided — failure is fatal */
     if (sym_path) {
         td_err_t sym_err = td_sym_load(sym_path);
-        if (sym_err != TD_OK) {
-            /* Non-fatal: proceed without symbols; columns may be unnamed */
-        }
+        if (sym_err != TD_OK) return TD_ERR_PTR(sym_err);
     }
 
     /* Load .d schema (small, use td_col_load — buddy copy is fine) */
@@ -207,15 +243,22 @@ td_t* td_read_splayed(const char* dir, const char* sym_path) {
     for (int64_t c = 0; c < ncols; c++) {
         int64_t name_id = name_ids[c];
         td_t* name_atom = td_sym_str(name_id);
-        if (!name_atom) continue;
+        if (!name_atom) {
+            td_release(schema);
+            td_release(tbl);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
 
         const char* name = td_str_ptr(name_atom);
         size_t name_len = td_str_len(name_atom);
 
         if (name_len == 0 || name[0] == '.' ||
             memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
-            memchr(name, '\0', name_len))
-            continue;
+            memchr(name, '\0', name_len)) {
+            td_release(schema);
+            td_release(tbl);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
 
         path_len = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
         if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
@@ -243,5 +286,12 @@ td_t* td_read_splayed(const char* dir, const char* sym_path) {
     }
 
     td_release(schema);
+
+    td_err_t sym_check = validate_sym_columns(tbl, ncols);
+    if (sym_check != TD_OK) {
+        td_release(tbl);
+        return TD_ERR_PTR(sym_check);
+    }
+
     return tbl;
 }

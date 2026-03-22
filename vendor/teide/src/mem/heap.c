@@ -316,6 +316,9 @@ static void td_release_owned_refs(td_t* v) {
         v->ext_nullmap && !TD_IS_ERR(v->ext_nullmap))
         td_release(v->ext_nullmap);
 
+    if (v->type == TD_STR && v->str_pool && !TD_IS_ERR(v->str_pool))
+        td_release(v->str_pool);
+
     if (TD_IS_PARTED(v->type)) {
         int64_t n_segs = v->len;
         td_t** segs = (td_t**)td_data(v);
@@ -375,6 +378,9 @@ void td_retain_owned_refs(td_t* v) {
         v->ext_nullmap && !TD_IS_ERR(v->ext_nullmap))
         td_retain(v->ext_nullmap);
 
+    if (v->type == TD_STR && v->str_pool && !TD_IS_ERR(v->str_pool))
+        td_retain(v->str_pool);
+
     if (TD_IS_PARTED(v->type)) {
         int64_t n_segs = v->len;
         td_t** segs = (td_t**)td_data(v);
@@ -432,6 +438,10 @@ static void td_detach_owned_refs(td_t* v) {
     if (v->attrs & TD_ATTR_NULLMAP_EXT) {
         v->ext_nullmap = NULL;
         v->attrs &= (uint8_t)~TD_ATTR_NULLMAP_EXT;
+    }
+
+    if (v->type == TD_STR) {
+        v->str_pool = NULL;
     }
 
     if (TD_IS_PARTED(v->type)) {
@@ -558,6 +568,7 @@ td_t* td_alloc(size_t data_size) {
 
 void td_free(td_t* v) {
     if (!v || TD_IS_ERR(v)) return;
+    if (v->attrs & TD_ATTR_ARENA) return;  /* arena-owned, bulk-freed */
 
     /* Guard: keep rc=1 while releasing children so buddy coalescing
      * won't merge this block prematurely (it checks buddy_rc==0). */
@@ -716,7 +727,8 @@ td_t* td_scratch_realloc(td_t* v, size_t new_data_size) {
         new_v->mmod = new_mmod;
         new_v->order = new_order;
         atomic_store_explicit(&new_v->rc, 1, memory_order_relaxed);
-        td_retain_owned_refs(new_v);
+        /* Ownership transfers via memcpy — no retain needed on new_v.
+         * Detach nulls old pointers so td_free won't double-release. */
         td_detach_owned_refs(v);
         td_free(v);
     }

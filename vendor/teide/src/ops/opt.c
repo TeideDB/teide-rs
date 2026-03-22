@@ -46,6 +46,7 @@ static td_op_ext_t* find_ext(td_graph_t* g, uint32_t node_id);
  * -------------------------------------------------------------------------- */
 
 static int8_t promote_type(int8_t a, int8_t b) {
+    if (a == TD_STR || b == TD_STR) return TD_STR;
     if (a == TD_F64 || b == TD_F64) return TD_F64;
     /* Treat SYM/TIMESTAMP/DATE/TIME as integer-class types */
     if (a == TD_I64 || b == TD_I64 || a == TD_SYM || b == TD_SYM ||

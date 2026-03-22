@@ -398,8 +398,10 @@ static td_op_t* make_binary(td_graph_t* g, uint16_t opcode, td_op_t* a, td_op_t*
     return n;
 }
 
-/* Type promotion: BOOL < U8 < I16 < I32 < I64 < F64 */
+/* Type promotion: BOOL < U8 < I16 < I32 < I64 < F64.
+ * TD_STR is its own type class — not promotable to numeric types. */
 static int8_t promote(int8_t a, int8_t b) {
+    if (a == TD_STR || b == TD_STR) return TD_STR;
     if (a == TD_F64 || b == TD_F64) return TD_F64;
     if (a == TD_I64 || b == TD_I64 || a == TD_SYM || b == TD_SYM ||
         a == TD_TIMESTAMP || b == TD_TIMESTAMP) return TD_I64;
@@ -455,8 +457,10 @@ td_op_t* td_if(td_graph_t* g, td_op_t* cond, td_op_t* then_val, td_op_t* else_va
     uint32_t then_id = then_val->id;
     uint32_t else_id = else_val->id;
     int8_t out_type = promote(then_val->out_type, else_val->out_type);
-    /* String types always resolve to SYM (global sym IDs) */
-    if (then_val->out_type == TD_SYM || else_val->out_type == TD_SYM)
+    /* IF preserves string types: promote() handles TD_STR (wins over SYM);
+     * SYM override only applies when neither side is TD_STR */
+    if (out_type != TD_STR &&
+        (then_val->out_type == TD_SYM || else_val->out_type == TD_SYM))
         out_type = TD_SYM;
     uint32_t est = cond->est_rows;
 
@@ -490,10 +494,10 @@ td_op_t* td_ilike(td_graph_t* g, td_op_t* input, td_op_t* pattern) {
 }
 
 /* String ops */
-td_op_t* td_upper(td_graph_t* g, td_op_t* a)   { return make_unary(g, OP_UPPER, a, TD_SYM); }
-td_op_t* td_lower(td_graph_t* g, td_op_t* a)   { return make_unary(g, OP_LOWER, a, TD_SYM); }
+td_op_t* td_upper(td_graph_t* g, td_op_t* a)   { return make_unary(g, OP_UPPER, a, a->out_type == TD_STR ? TD_STR : TD_SYM); }
+td_op_t* td_lower(td_graph_t* g, td_op_t* a)   { return make_unary(g, OP_LOWER, a, a->out_type == TD_STR ? TD_STR : TD_SYM); }
 td_op_t* td_strlen(td_graph_t* g, td_op_t* a)  { return make_unary(g, OP_STRLEN, a, TD_I64); }
-td_op_t* td_trim_op(td_graph_t* g, td_op_t* a) { return make_unary(g, OP_TRIM, a, TD_SYM); }
+td_op_t* td_trim_op(td_graph_t* g, td_op_t* a) { return make_unary(g, OP_TRIM, a, a->out_type == TD_STR ? TD_STR : TD_SYM); }
 
 td_op_t* td_substr(td_graph_t* g, td_op_t* str, td_op_t* start, td_op_t* len) {
     /* 3-input: str=inputs[0], start=inputs[1], len stored via literal field */
@@ -511,7 +515,7 @@ td_op_t* td_substr(td_graph_t* g, td_op_t* str, td_op_t* start, td_op_t* len) {
     ext->base.arity = 2;
     ext->base.inputs[0] = str;
     ext->base.inputs[1] = start;
-    ext->base.out_type = TD_SYM;
+    ext->base.out_type = (str->out_type == TD_STR) ? TD_STR : TD_SYM;
     ext->base.est_rows = est;
     ext->literal = (td_t*)(uintptr_t)l_id;
 
@@ -535,7 +539,7 @@ td_op_t* td_replace(td_graph_t* g, td_op_t* str, td_op_t* from, td_op_t* to) {
     ext->base.arity = 2;
     ext->base.inputs[0] = str;
     ext->base.inputs[1] = from;
-    ext->base.out_type = TD_SYM;
+    ext->base.out_type = (str->out_type == TD_STR) ? TD_STR : TD_SYM;
     ext->base.est_rows = est;
     ext->literal = (td_t*)(uintptr_t)t_id;
 
@@ -564,7 +568,12 @@ td_op_t* td_concat(td_graph_t* g, td_op_t** args, int n) {
     ext->base.arity = 2;
     ext->base.inputs[0] = &g->nodes[ids[0]];
     ext->base.inputs[1] = &g->nodes[ids[1]];
-    ext->base.out_type = TD_SYM;
+    /* TD_STR if any input is TD_STR, else TD_SYM */
+    int8_t out_type = TD_SYM;
+    for (int i = 0; i < n; i++) {
+        if (args[i]->out_type == TD_STR) { out_type = TD_STR; break; }
+    }
+    ext->base.out_type = out_type;
     ext->base.est_rows = est;
     ext->sym = n; /* total arg count stored in sym field */
 
@@ -1220,23 +1229,6 @@ td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel, uint16_t max_iter) {
     ext->graph.rel      = rel;
     ext->graph.max_iter  = max_iter > 0 ? max_iter : 100;
     ext->graph.direction = 2;
-
-    g->nodes[ext->base.id] = ext->base;
-    return &g->nodes[ext->base.id];
-}
-
-td_op_t* td_local_clustering_coeff(td_graph_t* g, td_rel_t* rel) {
-    if (!g || !rel) return NULL;
-
-    td_op_ext_t* ext = graph_alloc_ext_node(g);
-    if (!ext) return NULL;
-
-    ext->base.opcode   = OP_LOCAL_CLUSTERING_COEFF;
-    ext->base.arity    = 0;
-    ext->base.out_type = TD_TABLE;
-    ext->base.est_rows = (uint32_t)rel->fwd.n_nodes;
-    ext->graph.rel     = rel;
-    ext->graph.direction = 2;  /* both directions for undirected */
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];

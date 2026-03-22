@@ -46,4 +46,5 @@ const uint8_t td_type_sizes[TD_TYPE_COUNT] = {
     /*                = 18 */ 0,
     /*                = 19 */ 0,
     /* [TD_SYM]       = 20 */ 8,   /* W64 default; narrow widths use td_sym_elem_size */
+    /* [TD_STR]       = 21 */ 16,  /* sizeof(td_str_t) */
 };

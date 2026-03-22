@@ -481,6 +481,89 @@ static MunitResult test_vec_slice_range(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- vec_slice_null ---------------------------------------------------- */
+
+static MunitResult test_vec_slice_null(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t vals[] = {10, 20, 30, 40};
+    td_t* v = td_vec_from_raw(TD_I64, vals, 4);
+    td_vec_set_null(v, 1, true);
+    td_vec_set_null(v, 3, true);
+
+    td_t* s = td_vec_slice(v, 1, 2);
+    munit_assert_ptr_not_null(s);
+    munit_assert_false(TD_IS_ERR(s));
+
+    /* Slice index 0 = parent index 1 = null */
+    munit_assert_true(td_vec_is_null(s, 0));
+    /* Slice index 1 = parent index 2 = not null */
+    munit_assert_false(td_vec_is_null(s, 1));
+
+    td_release(s);
+    td_release(v);
+    return MUNIT_OK;
+}
+
+/* ---- vec_concat_null_propagation --------------------------------------- */
+
+static MunitResult test_vec_concat_null(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t a_raw[] = {1, 2, 3};
+    int64_t b_raw[] = {4, 5};
+    td_t* a = td_vec_from_raw(TD_I64, a_raw, 3);
+    td_t* b = td_vec_from_raw(TD_I64, b_raw, 2);
+
+    td_vec_set_null(a, 1, true);   /* a[1] = null */
+    td_vec_set_null(b, 0, true);   /* b[0] = null */
+
+    td_t* c = td_vec_concat(a, b);
+    munit_assert_ptr_not_null(c);
+    munit_assert_false(TD_IS_ERR(c));
+    munit_assert_int(c->len, ==, 5);
+
+    munit_assert_false(td_vec_is_null(c, 0));  /* a[0]=1 */
+    munit_assert_true(td_vec_is_null(c, 1));   /* a[1]=null */
+    munit_assert_false(td_vec_is_null(c, 2));  /* a[2]=3 */
+    munit_assert_true(td_vec_is_null(c, 3));   /* b[0]=null */
+    munit_assert_false(td_vec_is_null(c, 4));  /* b[1]=5 */
+
+    td_release(c);
+    td_release(a);
+    td_release(b);
+    return MUNIT_OK;
+}
+
+/* ---- vec_concat_slice_null_propagation --------------------------------- */
+
+static MunitResult test_vec_concat_slice_null(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t raw[] = {10, 20, 30, 40};
+    td_t* v = td_vec_from_raw(TD_I64, raw, 4);
+    td_vec_set_null(v, 1, true);  /* v[1] = null */
+
+    td_t* s = td_vec_slice(v, 1, 2);  /* s = [null, 30] */
+
+    int64_t b_raw[] = {50};
+    td_t* b = td_vec_from_raw(TD_I64, b_raw, 1);
+
+    td_t* c = td_vec_concat(s, b);
+    munit_assert_ptr_not_null(c);
+    munit_assert_false(TD_IS_ERR(c));
+    munit_assert_int(c->len, ==, 3);
+
+    munit_assert_true(td_vec_is_null(c, 0));   /* slice[0]=null */
+    munit_assert_false(td_vec_is_null(c, 1));  /* slice[1]=30 */
+    munit_assert_false(td_vec_is_null(c, 2));  /* b[0]=50 */
+
+    td_release(c);
+    td_release(s);
+    td_release(b);
+    td_release(v);
+    return MUNIT_OK;
+}
+
 /* ---- Suite definition -------------------------------------------------- */
 
 static MunitTest vec_tests[] = {
@@ -503,6 +586,9 @@ static MunitTest vec_tests[] = {
     { "/bool",               test_vec_bool,                vec_setup, vec_teardown, 0, NULL },
     { "/concat_type_mismatch", test_vec_concat_type_mismatch, vec_setup, vec_teardown, 0, NULL },
     { "/slice_range",        test_vec_slice_range,         vec_setup, vec_teardown, 0, NULL },
+    { "/slice_null",         test_vec_slice_null,          vec_setup, vec_teardown, 0, NULL },
+    { "/concat_null",        test_vec_concat_null,         vec_setup, vec_teardown, 0, NULL },
+    { "/concat_slice_null",  test_vec_concat_slice_null,   vec_setup, vec_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

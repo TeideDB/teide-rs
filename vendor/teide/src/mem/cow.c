@@ -30,6 +30,7 @@
 
 void td_retain(td_t* v) {
     if (!v || TD_IS_ERR(v)) return;
+    if (v->attrs & TD_ATTR_ARENA) return;  /* arena-owned, no-op */
     /* conc-L3: Relaxed ordering is sufficient for retain — the caller already
      * holds a valid reference, so no inter-thread synchronization is needed
      * for the increment itself. Release synchronizes via td_release's acq_rel. */
@@ -42,6 +43,7 @@ void td_retain(td_t* v) {
 
 void td_release(td_t* v) {
     if (!v || TD_IS_ERR(v)) return;
+    if (v->attrs & TD_ATTR_ARENA) return;  /* arena-owned, no-op */
     uint32_t prev = atomic_fetch_sub_explicit(&v->rc, 1, memory_order_acq_rel);
     if (prev == 1) td_free(v);
 }
@@ -52,6 +54,7 @@ void td_release(td_t* v) {
 
 td_t* td_cow(td_t* v) {
     if (!v || TD_IS_ERR(v)) return v;
+    if (v->attrs & TD_ATTR_ARENA) return v;  /* arena-owned, no-op */
     /* Caller must hold exclusive logical ownership — no concurrent
        td_retain/td_release allowed. The acquire load ensures visibility
        of prior writes by threads that have released their reference. */

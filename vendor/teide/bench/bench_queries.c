@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 199309L
 #include <teide/td.h>
 #include <mem/sys.h>
 #include <stdio.h>

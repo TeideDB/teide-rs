@@ -1,17 +1,17 @@
 /*
  *   Copyright (c) 2024-2026 Anton Kundenko <singaraiona@gmail.com>
  *   All rights reserved.
-
+ *
  *   Permission is hereby granted, free of charge, to any person obtaining a copy
  *   of this software and associated documentation files (the "Software"), to deal
  *   in the Software without restriction, including without limitation the rights
  *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  *   copies of the Software, and to permit persons to whom the Software is
  *   furnished to do so, subject to the following conditions:
-
+ *
  *   The above copyright notice and this permission notice shall be included in all
  *   copies or substantial portions of the Software.
-
+ *
  *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -21,21 +21,18 @@
  *   SOFTWARE.
  */
 
-#ifndef TD_SYM_H
-#define TD_SYM_H
-
-/*
- * sym.h -- Global symbol intern table.
- *
- * Sequential mode: simple hash map + array. wyhash (truncated to 32-bit),
- * open addressing with linear probing. Stores (hash32 << 32) | (id + 1)
- * so that 0 means empty bucket.
- */
+#ifndef TD_FILEIO_H
+#define TD_FILEIO_H
 
 #include <teide/td.h>
 
-/* Intern with pre-computed wyhash, no lock.
- * Caller must guarantee single-threaded access. */
-int64_t td_sym_intern_prehashed(uint32_t hash, const char* str, size_t len);
+/* td_fd_t, TD_FD_INVALID, TD_OPEN_*, and td_file_* function declarations
+ * are provided by <teide/td.h>.  This header exists only for internal
+ * source files that need the Windows-specific includes for the
+ * implementation (fileio.c). */
 
-#endif /* TD_SYM_H */
+#ifdef _WIN32
+  #include <windows.h>
+#endif
+
+#endif /* TD_FILEIO_H */

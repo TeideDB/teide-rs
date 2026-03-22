@@ -83,7 +83,7 @@ _Static_assert(sizeof(td_pool_hdr_t) <= 16,
  *
  * Empty list: sentinel.prev = sentinel.next = &sentinel.
  * -------------------------------------------------------------------------- */
-typedef struct {
+typedef struct TD_ALIGN(32) {
     td_t* fl_prev;   /* offset 0 — same as td_t.fl_prev */
     td_t* fl_next;   /* offset 8 — same as td_t.fl_next */
 } td_fl_head_t;

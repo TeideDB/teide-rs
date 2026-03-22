@@ -26,6 +26,54 @@
 #include <stdio.h>
 #include <stdatomic.h>
 
+/* --------------------------------------------------------------------------
+ * validate_sym_bounds -- check all indices in a TD_SYM column are < sym_count
+ *
+ * Width-dispatched scan for maximum index. Returns TD_ERR_CORRUPT if any
+ * index >= sym_count. Skipped when sym_count == 0 (allows raw column loads
+ * in tests without a sym file).
+ * -------------------------------------------------------------------------- */
+
+static td_err_t validate_sym_bounds(const void* data, int64_t len,
+                                     uint8_t attrs, uint32_t sym_count) {
+    if (sym_count == 0 || len == 0) return TD_OK;
+
+    uint64_t max_id = 0;
+    switch (attrs & TD_SYM_W_MASK) {
+    case TD_SYM_W8: {
+        const uint8_t* p = (const uint8_t*)data;
+        for (int64_t i = 0; i < len; i++)
+            if (p[i] > max_id) max_id = p[i];
+        break;
+    }
+    case TD_SYM_W16: {
+        const uint16_t* p = (const uint16_t*)data;
+        for (int64_t i = 0; i < len; i++)
+            if (p[i] > max_id) max_id = p[i];
+        break;
+    }
+    case TD_SYM_W32: {
+        const uint32_t* p = (const uint32_t*)data;
+        for (int64_t i = 0; i < len; i++)
+            if (p[i] > max_id) max_id = p[i];
+        break;
+    }
+    case TD_SYM_W64: {
+        const int64_t* p = (const int64_t*)data;
+        for (int64_t i = 0; i < len; i++) {
+            if (p[i] < 0) return TD_ERR_CORRUPT;
+            if ((uint64_t)p[i] > max_id) max_id = (uint64_t)p[i];
+        }
+        break;
+    }
+    default:
+        return TD_ERR_CORRUPT;
+    }
+
+    if (max_id >= sym_count) return TD_ERR_CORRUPT;
+    return TD_OK;
+}
+
 /* Magic numbers for extended column formats */
 #define STR_LIST_MAGIC  0x4C525453U  /* "STRL" */
 #define LIST_MAGIC      0x4754534CU  /* "LSTG" */
@@ -109,7 +157,7 @@ static td_t* col_load_str_list(const uint8_t* ptr, size_t remaining) {
     memcpy(&count, ptr, 8);
     ptr += 8; remaining -= 8;
 
-    if (count < 0 || (uint64_t)count > remaining)
+    if (count < 0 || (uint64_t)count > remaining / 4)
         return TD_ERR_PTR(TD_ERR_CORRUPT);
 
     td_t* list = td_list_new(count);
@@ -170,9 +218,14 @@ static td_err_t col_write_recursive(td_t* obj, FILE* f) {
     }
 
     if (is_serializable_type(type)) {
-        /* Fixed-size vector: write len + raw data */
+        /* Fixed-size vector: write len + raw data.
+         * TD_SYM: also write attrs byte (adaptive width W8/W16/W32/W64). */
         int64_t len = obj->len;
         if (fwrite(&len, 8, 1, f) != 1) return TD_ERR_IO;
+        if (type == TD_SYM) {
+            uint8_t attrs = obj->attrs;
+            if (fwrite(&attrs, 1, 1, f) != 1) return TD_ERR_IO;
+        }
         uint8_t esz = td_sym_elem_size(type, obj->attrs);
         size_t data_size = (size_t)len * esz;
         if (data_size > 0 && fwrite(td_data(obj), 1, data_size, f) != data_size)
@@ -252,18 +305,34 @@ static td_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
         *pp += 8; *remaining -= 8;
         if (len < 0) return TD_ERR_PTR(TD_ERR_CORRUPT);
 
-        uint8_t esz = td_type_sizes[type];
+        /* TD_SYM: read attrs byte for adaptive width */
+        uint8_t attrs = 0;
+        if (type == TD_SYM) {
+            if (*remaining < 1) return TD_ERR_PTR(TD_ERR_CORRUPT);
+            memcpy(&attrs, *pp, 1);
+            *pp += 1; *remaining -= 1;
+        }
+
+        uint8_t esz = td_sym_elem_size(type, attrs);
         if (esz > 0 && (uint64_t)len > SIZE_MAX / esz)
             return TD_ERR_PTR(TD_ERR_CORRUPT);
         size_t data_size = (size_t)len * esz;
         if (data_size > *remaining) return TD_ERR_PTR(TD_ERR_CORRUPT);
 
-        td_t* vec = td_vec_new(type, len);
+        td_t* vec = (type == TD_SYM)
+            ? td_sym_vec_new(attrs & TD_SYM_W_MASK, len)
+            : td_vec_new(type, len);
         if (!vec || TD_IS_ERR(vec)) return vec;
         vec->len = len;
         if (data_size > 0)
             memcpy(td_data(vec), *pp, data_size);
         *pp += data_size; *remaining -= data_size;
+
+        if (type == TD_SYM) {
+            uint32_t sc = td_sym_count();
+            td_err_t ve = validate_sym_bounds(td_data(vec), len, attrs, sc);
+            if (ve != TD_OK) { td_release(vec); return TD_ERR_PTR(ve); }
+        }
         return vec;
     }
 
@@ -384,7 +453,11 @@ td_err_t td_col_save(td_t* vec, const char* path) {
     memcpy(&header, vec, 32);
     header.mmod = 0;
     header.order = 0;
-    atomic_store_explicit(&header.rc, 0, memory_order_relaxed);
+    /* For TD_SYM: store sym count in rc field (always 0 on disk otherwise).
+     * This serves as O(1) fast-reject metadata on load. */
+    atomic_store_explicit(&header.rc,
+        (vec->type == TD_SYM) ? td_sym_count() : 0,
+        memory_order_relaxed);
 
     /* Clear slice field; preserve ext_nullmap flag for bitmap append */
     header.attrs &= ~TD_ATTR_SLICE;
@@ -515,6 +588,18 @@ td_t* td_col_load(const char* path) {
         return TD_ERR_PTR(TD_ERR_CORRUPT);
     }
 
+    /* TD_SYM: fast-reject via sym count in header rc field.
+     * Use memcpy (not atomic_load) since file data is not atomic storage. */
+    if (tmp->type == TD_SYM) {
+        uint32_t saved_sc;
+        memcpy(&saved_sc, (const char*)ptr + offsetof(td_t, rc), sizeof(saved_sc));
+        uint32_t cur_sc = td_sym_count();
+        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
+            td_vm_unmap_file(ptr, mapped_size);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
+    }
+
     /* Allocate buddy block and copy file data */
     td_t* vec = td_alloc(data_size);
     if (!vec || TD_IS_ERR(vec)) {
@@ -547,6 +632,16 @@ td_t* td_col_load(const char* path) {
     if (!has_ext_nullmap)
         vec->attrs &= ~TD_ATTR_NULLMAP_EXT;
     atomic_store_explicit(&vec->rc, 1, memory_order_relaxed);
+
+    /* TD_SYM: validate sym count footer + bounds check */
+    if (vec->type == TD_SYM) {
+        td_err_t sym_err = validate_sym_bounds(td_data(vec), vec->len,
+                                                vec->attrs, td_sym_count());
+        if (sym_err != TD_OK) {
+            td_release(vec);
+            return TD_ERR_PTR(sym_err);
+        }
+    }
 
     return vec;
 }
@@ -605,6 +700,24 @@ td_t* td_col_mmap(const char* path) {
     if (expected != mapped_size) {
         td_vm_unmap_file(ptr, mapped_size);
         return TD_ERR_PTR(TD_ERR_IO);
+    }
+
+    /* TD_SYM: fast-reject via sym count in header rc field + bounds check.
+     * Use memcpy (not atomic_load) since file data is not atomic storage. */
+    if (vec->type == TD_SYM) {
+        uint32_t saved_sc;
+        memcpy(&saved_sc, (const char*)ptr + offsetof(td_t, rc), sizeof(saved_sc));
+        uint32_t cur_sc = td_sym_count();
+        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
+            td_vm_unmap_file(ptr, mapped_size);
+            return TD_ERR_PTR(TD_ERR_CORRUPT);
+        }
+        td_err_t sym_err = validate_sym_bounds(
+            (const char*)ptr + 32, vec->len, vec->attrs, cur_sc);
+        if (sym_err != TD_OK) {
+            td_vm_unmap_file(ptr, mapped_size);
+            return TD_ERR_PTR(sym_err);
+        }
     }
 
     /* Restore external nullmap: allocate buddy-backed copy

@@ -174,6 +174,15 @@ td_t* td_part_load(const char* db_root, const char* table_name) {
         }
     }
 
+    /* Build sym_path for this db_root */
+    char sym_path[1024];
+    int sn = snprintf(sym_path, sizeof(sym_path), "%s/sym", db_root);
+    if (sn < 0 || (size_t)sn >= sizeof(sym_path)) {
+        for (int64_t i = 0; i < part_count; i++) td_sys_free(part_dirs[i]);
+        td_sys_free(part_dirs);
+        return TD_ERR_PTR(TD_ERR_IO);
+    }
+
     /* Load first partition to get schema. */
     char path[1024];
     int n = snprintf(path, sizeof(path), "%s/%s/%s", db_root, part_dirs[0], table_name);
@@ -182,7 +191,7 @@ td_t* td_part_load(const char* db_root, const char* table_name) {
         td_sys_free(part_dirs);
         return TD_ERR_PTR(TD_ERR_IO);
     }
-    td_t* first = td_splay_load(path);
+    td_t* first = td_splay_load(path, sym_path);
     if (!first || TD_IS_ERR(first)) {
         for (int64_t i = 0; i < part_count; i++) td_sys_free(part_dirs[i]);
         td_sys_free(part_dirs);
@@ -211,7 +220,7 @@ td_t* td_part_load(const char* db_root, const char* table_name) {
     for (int64_t p = 1; p < part_count; p++) {
         n = snprintf(path, sizeof(path), "%s/%s/%s", db_root, part_dirs[p], table_name);
         if (n < 0 || (size_t)n >= sizeof(path)) { all_dfs[p] = NULL; fail_count++; continue; }
-        all_dfs[p] = td_splay_load(path);
+        all_dfs[p] = td_splay_load(path, NULL);
         if (!all_dfs[p] || TD_IS_ERR(all_dfs[p])) {
             all_dfs[p] = NULL;
             fail_count++;
@@ -365,7 +374,7 @@ td_t* td_read_parted(const char* db_root, const char* table_name) {
             part_tables[p] = NULL;
             goto fail_tables;
         }
-        part_tables[p] = td_read_splayed(path, sym_path);
+        part_tables[p] = td_read_splayed(path, NULL);
         if (!part_tables[p] || TD_IS_ERR(part_tables[p])) {
             part_tables[p] = NULL;
             goto fail_tables;

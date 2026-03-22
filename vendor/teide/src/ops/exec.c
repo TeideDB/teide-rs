@@ -154,6 +154,18 @@ static inline td_t* col_vec_new(const td_t* src, int64_t cap) {
     return td_vec_new(src->type, cap);
 }
 
+/* Propagate str_pool from source to gathered result.
+ * Source may be a slice — resolve to owner's pool. */
+static inline void col_propagate_str_pool(td_t* dst, const td_t* src) {
+    if (src->type != TD_STR || dst->type != TD_STR) return;
+    const td_t* owner = (src->attrs & TD_ATTR_SLICE) ? src->slice_parent : src;
+    if (owner->str_pool) {
+        if (dst->str_pool) td_release(dst->str_pool);
+        td_retain(owner->str_pool);
+        dst->str_pool = owner->str_pool;
+    }
+}
+
 /* Same but from explicit type + attrs (for parted base type, etc.) */
 static inline td_t* typed_vec_new(int8_t type, uint8_t attrs, int64_t cap) {
     if (type == TD_SYM)
@@ -802,6 +814,7 @@ static bool expr_compile(td_graph_t* g, td_t* tbl, td_op_t* root, td_expr_t* out
                 td_t* col = td_table_get_col(tbl, ext->sym);
                 if (!col) return false;
                 if (col->type == TD_MAPCOMMON) return false;
+                if (col->type == TD_STR) return false; /* TD_STR needs string comparison path */
                 out->regs[r].kind = REG_SCAN;
                 if (TD_IS_PARTED(col->type)) {
                     int8_t base = (int8_t)TD_PARTED_BASETYPE(col->type);
@@ -1352,6 +1365,120 @@ static td_t* exec_elementwise_unary(td_graph_t* g, td_op_t* op, td_t* input) {
     return result;
 }
 
+/* Convert an atom (TD_ATOM_STR or TD_SYM scalar) to td_str_t for comparison */
+static void atom_to_str_t(td_t* atom, td_str_t* out, const char** out_pool) {
+    const char* sp;
+    size_t sl;
+    if (atom->type == TD_ATOM_STR) {
+        sp = td_str_ptr(atom);
+        sl = td_str_len(atom);
+    } else if (atom->type == TD_STR) {
+        /* Length-1 TD_STR vector used as scalar */
+        if (atom->len < 1) {
+            memset(out, 0, sizeof(td_str_t));
+            *out_pool = NULL;
+            return;
+        }
+        const td_str_t* elems = (const td_str_t*)td_data(atom);
+        *out = elems[0];
+        *out_pool = atom->str_pool ? (const char*)td_data(atom->str_pool) : NULL;
+        return;
+    } else if (TD_IS_SYM(atom->type) && td_is_atom(atom)) {
+        /* SAFETY: td_sym_str returns a borrowed pointer into the append-only
+         * sym table.  The pointer is valid for the lifetime of the sym table
+         * (i.e., the entire query execution).  If the sym table ever gains
+         * eviction, this must retain the returned atom. */
+        td_t* s = td_sym_str(atom->i64);
+        sp = s ? td_str_ptr(s) : "";
+        sl = s ? td_str_len(s) : 0;
+    } else {
+        sp = ""; sl = 0;
+    }
+    memset(out, 0, sizeof(td_str_t));
+    out->len = (uint32_t)sl;
+    if (sl <= TD_STR_INLINE_MAX) {
+        if (sl > 0) memcpy(out->data, sp, sl);
+        *out_pool = NULL;
+    } else {
+        memcpy(out->prefix, sp, 4);
+        out->pool_off = 0;
+        *out_pool = sp; /* point directly at atom's string data */
+    }
+}
+
+/* Resolve TD_STR vec to data owner, accounting for slices.
+ * Returns element pointer (already offset for slices) and pool pointer. */
+static inline void str_resolve(const td_t* v, const td_str_t** elems,
+                               const char** pool) {
+    const td_t* owner = (v->attrs & TD_ATTR_SLICE) ? v->slice_parent : v;
+    int64_t base = (v->attrs & TD_ATTR_SLICE) ? v->slice_offset : 0;
+    *elems = (const td_str_t*)td_data((td_t*)owner) + base;
+    *pool = owner->str_pool ? (const char*)td_data(owner->str_pool) : NULL;
+}
+
+/* Inner loop for binary element-wise string comparison over [start, end) */
+static void binary_range_str(td_op_t* op, td_t* lhs, td_t* rhs, td_t* result,
+                             bool l_scalar, bool r_scalar,
+                             int64_t start, int64_t end) {
+    uint8_t* dst = (uint8_t*)td_data(result) + start;
+    int64_t n = end - start;
+    uint16_t opc = op->opcode;
+
+    const td_str_t* l_elems = NULL;
+    const td_str_t* r_elems = NULL;
+    const char* l_pool = NULL;
+    const char* r_pool = NULL;
+    if (!l_scalar) { str_resolve(lhs, &l_elems, &l_pool); l_elems += start; }
+    if (!r_scalar) { str_resolve(rhs, &r_elems, &r_pool); r_elems += start; }
+
+    /* For scalar side, build a single td_str_t */
+    td_str_t l_scalar_elem = {0}, r_scalar_elem = {0};
+    const char* l_scalar_pool = NULL;
+    const char* r_scalar_pool = NULL;
+    if (l_scalar) {
+        atom_to_str_t(lhs, &l_scalar_elem, &l_scalar_pool);
+        l_elems = &l_scalar_elem;
+    }
+    if (r_scalar) {
+        atom_to_str_t(rhs, &r_scalar_elem, &r_scalar_pool);
+        r_elems = &r_scalar_elem;
+    }
+
+    for (int64_t i = 0; i < n; i++) {
+        const td_str_t* a = l_scalar ? l_elems : &l_elems[i];
+        const td_str_t* b = r_scalar ? r_elems : &r_elems[i];
+        const char* pa = l_scalar ? l_scalar_pool : l_pool;
+        const char* pb = r_scalar ? r_scalar_pool : r_pool;
+
+        switch (opc) {
+            case OP_EQ: dst[i] = td_str_t_eq(a, pa, b, pb); break;
+            case OP_NE: dst[i] = !td_str_t_eq(a, pa, b, pb); break;
+            case OP_LT: dst[i] = td_str_t_cmp(a, pa, b, pb) < 0; break;
+            case OP_LE: dst[i] = td_str_t_cmp(a, pa, b, pb) <= 0; break;
+            case OP_GT: dst[i] = td_str_t_cmp(a, pa, b, pb) > 0; break;
+            case OP_GE: dst[i] = td_str_t_cmp(a, pa, b, pb) >= 0; break;
+            default: dst[i] = 0; break;
+        }
+    }
+}
+
+/* Context for parallel TD_STR binary dispatch */
+typedef struct {
+    td_op_t* op;
+    td_t*    lhs;
+    td_t*    rhs;
+    td_t*    result;
+    bool     l_scalar;
+    bool     r_scalar;
+} par_binary_str_ctx_t;
+
+static void par_binary_str_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
+    (void)worker_id;
+    par_binary_str_ctx_t* c = (par_binary_str_ctx_t*)ctx;
+    binary_range_str(c->op, c->lhs, c->rhs, c->result,
+                     c->l_scalar, c->r_scalar, start, end);
+}
+
 /* Inner loop for binary element-wise over a range [start, end) */
 static void binary_range(td_op_t* op, int8_t out_type,
                          td_t* lhs, td_t* rhs, td_t* result,
@@ -1510,6 +1637,44 @@ static td_t* exec_elementwise_binary(td_graph_t* g, td_op_t* op, td_t* lhs, td_t
     td_t* result = td_vec_new(out_type, len);
     if (!result || TD_IS_ERR(result)) return result;
     result->len = len;
+
+    /* TD_STR comparison: use td_str_t_eq / td_str_t_cmp directly.
+       Handles TD_STR column vs TD_STR column, or TD_ATOM_STR scalar vs TD_STR column. */
+    {
+        bool l_is_str = (!l_scalar && lhs->type == TD_STR);
+        bool r_is_str = (!r_scalar && rhs->type == TD_STR);
+        bool l_atom_str = (l_scalar && (lhs->type == TD_ATOM_STR
+                          || lhs->type == TD_STR
+                          || (TD_IS_SYM(lhs->type) && td_is_atom(lhs))));
+        bool r_atom_str = (r_scalar && (rhs->type == TD_ATOM_STR
+                          || rhs->type == TD_STR
+                          || (TD_IS_SYM(rhs->type) && td_is_atom(rhs))));
+
+        if (l_is_str || r_is_str || (l_atom_str && r_atom_str)) {
+            /* TD_STR only supports comparison ops — reject arithmetic */
+            uint16_t opc = op->opcode;
+            if (opc < OP_EQ || opc > OP_GE) { td_release(result); return TD_ERR_PTR(TD_ERR_TYPE); }
+            /* At least one side is a TD_STR column — use string comparison path.
+               The scalar side (if any) must be TD_ATOM_STR or TD_SYM atom.
+               The non-scalar side must be TD_STR. */
+            if (l_scalar && !l_atom_str) { td_release(result); return TD_ERR_PTR(TD_ERR_TYPE); }
+            if (r_scalar && !r_atom_str) { td_release(result); return TD_ERR_PTR(TD_ERR_TYPE); }
+            if (!l_scalar && !l_is_str) { td_release(result); return TD_ERR_PTR(TD_ERR_TYPE); }
+            if (!r_scalar && !r_is_str) { td_release(result); return TD_ERR_PTR(TD_ERR_TYPE); }
+
+            td_pool_t* pool = td_pool_get();
+            if (pool && len >= TD_PARALLEL_THRESHOLD) {
+                par_binary_str_ctx_t ctx = {
+                    .op = op, .lhs = lhs, .rhs = rhs, .result = result,
+                    .l_scalar = l_scalar, .r_scalar = r_scalar,
+                };
+                td_pool_dispatch(pool, par_binary_str_fn, &ctx, len);
+                return result;
+            }
+            binary_range_str(op, lhs, rhs, result, l_scalar, r_scalar, 0, len);
+            return result;
+        }
+    }
 
     /* SYM vs STR comparison: resolve string constant to intern ID so we
        can compare numerically against SYM intern indices.
@@ -1999,6 +2164,7 @@ static td_t* exec_filter_vec(td_t* input, td_t* pred, int64_t pass_count) {
         }
     }
 
+    col_propagate_str_pool(result, input);
     return result;
 }
 
@@ -2212,6 +2378,13 @@ static td_t* exec_filter(td_graph_t* g, td_op_t* op, td_t* input, td_t* pred) {
             for (int64_t i = 0; i < pass_count; i++)
                 memcpy(dst + i * esz, src + match_idx[i] * esz, esz);
         }
+    }
+
+    /* Propagate str_pool for any TD_STR columns gathered by index */
+    for (int64_t c = 0; c < ncols; c++) {
+        if (!new_cols[c]) continue;
+        td_t* col = td_table_get_col_idx(input, c);
+        if (col) col_propagate_str_pool(new_cols[c], col);
     }
 
     for (int64_t c = 0; c < ncols; c++) {
@@ -2472,6 +2645,7 @@ static td_t* sel_compact(td_graph_t* g, td_t* tbl, td_t* sel) {
 
     for (int64_t c = 0; c < ncols; c++) {
         if (!new_cols[c]) continue;
+        col_propagate_str_pool(new_cols[c], td_table_get_col_idx(tbl, c));
         out = td_table_add_col(out, col_names[c], new_cols[c]);
         td_release(new_cols[c]);
     }
@@ -2551,6 +2725,11 @@ static int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             int32_t vb = ((int32_t*)td_data(col))[b];
             if (va < vb) cmp = -1;
             else if (va > vb) cmp = 1;
+        } else if (col->type == TD_STR) {
+            const td_str_t* elems;
+            const char* pool;
+            str_resolve(col, &elems, &pool);
+            cmp = td_str_t_cmp(&elems[a], pool, &elems[b], pool);
         }
 
         if (desc && !null_cmp) cmp = -cmp;
@@ -4801,6 +4980,13 @@ static td_t* exec_sort(td_graph_t* g, td_op_t* op, td_t* tbl, int64_t limit) {
                     memcpy(dst_p + i * esz, src_p + sorted_idx[i] * esz, esz);
             }
         }
+    }
+
+    /* Propagate str_pool for any TD_STR columns gathered by index */
+    for (int64_t c = 0; c < ncols; c++) {
+        if (!new_cols[c]) continue;
+        td_t* col = td_table_get_col_idx(tbl, c);
+        if (col) col_propagate_str_pool(new_cols[c], col);
     }
 
     for (int64_t c = 0; c < ncols; c++) {
@@ -7387,6 +7573,17 @@ ht_path:;
         if (aop == OP_MAX) ght_need |= GHT_NEED_MAX;
     }
 
+    /* TD_STR keys not yet supported in HT path (16-byte elements vs 8-byte slots) */
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if (key_types[k] == TD_STR) {
+            for (uint8_t kk = 0; kk < n_keys; kk++)
+                if (key_owned[kk] && key_vecs[kk]) td_release(key_vecs[kk]);
+            for (uint8_t a = 0; a < n_aggs; a++)
+                if (agg_owned[a] && agg_vecs[a]) td_release(agg_vecs[a]);
+            return TD_ERR_PTR(TD_ERR_NYI);
+        }
+    }
+
     /* Compute row-layout: keys + agg values inline */
     ght_layout_t ght_layout = ght_compute_layout(n_keys, n_aggs, agg_vecs, ght_need, ext->agg_ops);
 
@@ -9131,6 +9328,13 @@ static td_t* exec_join(td_graph_t* g, td_op_t* op, td_t* left_table, td_t* right
             r_key_vecs[k] = rk->literal;
     }
 
+    /* TD_STR keys not yet supported (16-byte elements vs 8-byte hash/eq slots) */
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if ((l_key_vecs[k] && l_key_vecs[k]->type == TD_STR) ||
+            (r_key_vecs[k] && r_key_vecs[k]->type == TD_STR))
+            return TD_ERR_PTR(TD_ERR_NYI);
+    }
+
     td_pool_t* pool = td_pool_get();
 
     /* Shared output state — used by both radix and chained HT paths */
@@ -9931,6 +10135,7 @@ static td_t* exec_window_join(td_graph_t* g, td_op_t* op,
             wi++;
         }
         dst_col->len = out_n;
+        col_propagate_str_pool(dst_col, src_col);
         out = td_table_add_col(out, col_name, dst_col);
         td_release(dst_col);
     }
@@ -9957,6 +10162,7 @@ static td_t* exec_window_join(td_graph_t* g, td_op_t* op,
             wi++;
         }
         dst_col->len = out_n;
+        col_propagate_str_pool(dst_col, src_col);
         out = td_table_add_col(out, col_name, dst_col);
         td_release(dst_col);
     }
@@ -9996,8 +10202,8 @@ static td_t* exec_if(td_graph_t* g, td_op_t* op) {
     }
 
     int64_t len = cond_v->len;
-    bool then_scalar = td_is_atom(then_v);
-    bool else_scalar = td_is_atom(else_v);
+    bool then_scalar = td_is_atom(then_v) || (then_v->type > 0 && then_v->len == 1);
+    bool else_scalar = td_is_atom(else_v) || (else_v->type > 0 && else_v->len == 1);
     if (then_scalar && !else_scalar) len = else_v->len;
     if (!then_scalar) len = then_v->len;
 
@@ -10038,6 +10244,63 @@ static td_t* exec_if(td_graph_t* g, td_op_t* op) {
         for (int64_t i = 0; i < len; i++)
             dst[i] = cond_p[i] ? (t_arr ? t_arr[i] : t_scalar)
                                : (e_arr ? e_arr[i] : e_scalar);
+    } else if (out_type == TD_STR) {
+        /* TD_STR: resolve each side to string data and td_str_vec_append.
+         * Scalars may be TD_ATOM_STR or TD_SYM atoms. */
+        result->len = 0; /* td_str_vec_append manages len */
+        for (int64_t i = 0; i < len; i++) {
+            const char* sp;
+            size_t sl;
+            if (cond_p[i]) {
+                if (then_scalar) {
+                    if (then_v->type == TD_ATOM_STR) {
+                        sp = td_str_ptr(then_v);
+                        sl = td_str_len(then_v);
+                    } else if (then_v->type == TD_STR) {
+                        sp = td_str_vec_get(then_v, 0, &sl);
+                        if (!sp) { sp = ""; sl = 0; }
+                    } else if (TD_IS_SYM(then_v->type)) {
+                        td_t* s = td_sym_str(then_v->i64);
+                        sp = s ? td_str_ptr(s) : "";
+                        sl = s ? td_str_len(s) : 0;
+                    } else { sp = ""; sl = 0; }
+                } else if (then_v->type == TD_STR) {
+                    sp = td_str_vec_get(then_v, i, &sl);
+                    if (!sp) { sp = ""; sl = 0; }
+                } else {
+                    /* TD_SYM column */
+                    int64_t sid = td_read_sym(td_data(then_v), i, then_v->type, then_v->attrs);
+                    td_t* sa = td_sym_str(sid);
+                    sp = sa ? td_str_ptr(sa) : "";
+                    sl = sa ? td_str_len(sa) : 0;
+                }
+            } else {
+                if (else_scalar) {
+                    if (else_v->type == TD_ATOM_STR) {
+                        sp = td_str_ptr(else_v);
+                        sl = td_str_len(else_v);
+                    } else if (else_v->type == TD_STR) {
+                        sp = td_str_vec_get(else_v, 0, &sl);
+                        if (!sp) { sp = ""; sl = 0; }
+                    } else if (TD_IS_SYM(else_v->type)) {
+                        td_t* s = td_sym_str(else_v->i64);
+                        sp = s ? td_str_ptr(s) : "";
+                        sl = s ? td_str_len(s) : 0;
+                    } else { sp = ""; sl = 0; }
+                } else if (else_v->type == TD_STR) {
+                    sp = td_str_vec_get(else_v, i, &sl);
+                    if (!sp) { sp = ""; sl = 0; }
+                } else {
+                    /* TD_SYM column */
+                    int64_t sid = td_read_sym(td_data(else_v), i, else_v->type, else_v->attrs);
+                    td_t* sa = td_sym_str(sid);
+                    sp = sa ? td_str_ptr(sa) : "";
+                    sl = sa ? td_str_len(sa) : 0;
+                }
+            }
+            result = td_str_vec_append(result, sp, sl);
+            if (TD_IS_ERR(result)) break;
+        }
     } else if (out_type == TD_SYM) {
         /* SYM columns may have narrow widths (W8/W16/W32) — use td_read_sym.
          * Scalars may be string atoms that need interning. Output is always W64. */
@@ -10157,7 +10420,15 @@ static td_t* exec_like(td_graph_t* g, td_op_t* op) {
     uint8_t* dst = (uint8_t*)td_data(result);
 
     int8_t in_type = input->type;
-    if (TD_IS_SYM(in_type)) {
+    if (in_type == TD_STR) {
+        const td_str_t* elems; const char* pool;
+        str_resolve(input, &elems, &pool);
+        for (int64_t i = 0; i < len; i++) {
+            const char* sp = td_str_t_ptr(&elems[i], pool);
+            size_t sl = elems[i].len;
+            dst[i] = like_match(sp, sl, pat_str, pat_len) ? 1 : 0;
+        }
+    } else if (TD_IS_SYM(in_type)) {
         const void* base = td_data(input);
         for (int64_t i = 0; i < len; i++) {
             int64_t sym_id = td_read_sym(base, i, in_type, input->attrs);
@@ -10222,7 +10493,15 @@ static td_t* exec_ilike(td_graph_t* g, td_op_t* op) {
     uint8_t* dst = (uint8_t*)td_data(result);
 
     int8_t in_type = input->type;
-    if (TD_IS_SYM(in_type)) {
+    if (in_type == TD_STR) {
+        const td_str_t* elems; const char* pool;
+        str_resolve(input, &elems, &pool);
+        for (int64_t i = 0; i < len; i++) {
+            const char* sp = td_str_t_ptr(&elems[i], pool);
+            size_t sl = elems[i].len;
+            dst[i] = ilike_match(sp, sl, pat_str, pat_len) ? 1 : 0;
+        }
+    } else if (TD_IS_SYM(in_type)) {
         const void* base = td_data(input);
         for (int64_t i = 0; i < len; i++) {
             int64_t sym_id = td_read_sym(base, i, in_type, input->attrs);
@@ -10256,27 +10535,60 @@ static inline void sym_elem(const td_t* input, int64_t i,
     *out_len = td_str_len(atom);
 }
 
-/* UPPER / LOWER / TRIM — unary SYM → SYM */
+/* UPPER / LOWER / TRIM — unary SYM/STR → SYM/STR */
 static td_t* exec_string_unary(td_graph_t* g, td_op_t* op) {
     td_t* input = exec_node(g, op->inputs[0]);
     if (!input || TD_IS_ERR(input)) return input;
 
     int64_t len = input->len;
-    td_t* result = td_vec_new(TD_SYM, len);
+    bool is_str = (input->type == TD_STR);
+
+    td_t* result;
+    if (is_str) {
+        result = td_vec_new(TD_STR, len);
+    } else {
+        result = td_vec_new(TD_SYM, len);
+    }
     if (!result || TD_IS_ERR(result)) { td_release(input); return result; }
-    result->len = len;
-    int64_t* dst = (int64_t*)td_data(result);
+    if (!is_str) result->len = len;
+    int64_t* sym_dst = is_str ? NULL : (int64_t*)td_data(result);
+
+    const td_str_t* str_elems = NULL;
+    const char* str_pool = NULL;
+    if (is_str) str_resolve(input, &str_elems, &str_pool);
 
     uint16_t opc = op->opcode;
     for (int64_t i = 0; i < len; i++) {
+        /* Propagate null */
+        if (td_vec_is_null((td_t*)input, i)) {
+            if (is_str) {
+                result = td_str_vec_append(result, "", 0);
+                if (TD_IS_ERR(result)) break;
+                td_vec_set_null(result, result->len - 1, true);
+            } else {
+                sym_dst[i] = 0;
+                td_vec_set_null(result, i, true);
+            }
+            continue;
+        }
         const char* sp; size_t sl;
-        sym_elem(input, i, &sp, &sl);
+        if (is_str) {
+            sp = td_str_t_ptr(&str_elems[i], str_pool);
+            sl = str_elems[i].len;
+        } else {
+            sym_elem(input, i, &sp, &sl);
+        }
+
         char sbuf[8192];
         char* buf = sbuf;
         td_t* dyn_hdr = NULL;
         if (sl >= sizeof(sbuf)) {
             buf = (char*)scratch_alloc(&dyn_hdr, sl + 1);
-            if (!buf) { dst[i] = td_sym_intern("", 0); continue; }
+            if (!buf) {
+                td_release(result);
+                td_release(input);
+                return TD_ERR_PTR(TD_ERR_OOM);
+            }
         }
         size_t out_len = sl;
         if (opc == OP_UPPER) {
@@ -10290,8 +10602,14 @@ static td_t* exec_string_unary(td_graph_t* g, td_op_t* op) {
             out_len = end - start;
             memcpy(buf, sp + start, out_len);
         }
-        buf[out_len] = '\0';
-        dst[i] = td_sym_intern(buf, out_len);
+
+        if (is_str) {
+            result = td_str_vec_append(result, buf, out_len);
+            if (TD_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+        } else {
+            buf[out_len] = '\0';
+            sym_dst[i] = td_sym_intern(buf, out_len);
+        }
         scratch_free(dyn_hdr);
     }
     td_release(input);
@@ -10309,10 +10627,28 @@ static td_t* exec_strlen(td_graph_t* g, td_op_t* op) {
     result->len = len;
     int64_t* dst = (int64_t*)td_data(result);
 
-    for (int64_t i = 0; i < len; i++) {
-        const char* sp; size_t sl;
-        sym_elem(input, i, &sp, &sl);
-        dst[i] = (int64_t)sl;
+    if (input->type == TD_STR) {
+        const td_str_t* elems; const char* pool;
+        str_resolve(input, &elems, &pool);
+        for (int64_t i = 0; i < len; i++) {
+            if (td_vec_is_null((td_t*)input, i)) {
+                dst[i] = 0;
+                td_vec_set_null(result, i, true);
+                continue;
+            }
+            dst[i] = (int64_t)elems[i].len;
+        }
+    } else {
+        for (int64_t i = 0; i < len; i++) {
+            if (td_vec_is_null((td_t*)input, i)) {
+                dst[i] = 0;
+                td_vec_set_null(result, i, true);
+                continue;
+            }
+            const char* sp; size_t sl;
+            sym_elem(input, i, &sp, &sl);
+            dst[i] = (int64_t)sl;
+        }
     }
     td_release(input);
     return result;
@@ -10332,10 +10668,21 @@ static td_t* exec_substr(td_graph_t* g, td_op_t* op) {
     if (!len_v || TD_IS_ERR(len_v)) { td_release(input); td_release(start_v); return len_v; }
 
     int64_t nrows = input->len;
-    td_t* result = td_vec_new(TD_SYM, nrows);
+    bool is_str = (input->type == TD_STR);
+
+    td_t* result;
+    if (is_str) {
+        result = td_vec_new(TD_STR, nrows);
+    } else {
+        result = td_vec_new(TD_SYM, nrows);
+    }
     if (!result || TD_IS_ERR(result)) { td_release(input); td_release(start_v); td_release(len_v); return result; }
-    result->len = nrows;
-    int64_t* dst = (int64_t*)td_data(result);
+    if (!is_str) result->len = nrows;
+    int64_t* sym_dst = is_str ? NULL : (int64_t*)td_data(result);
+
+    const td_str_t* str_elems = NULL;
+    const char* str_pool = NULL;
+    if (is_str) str_resolve(input, &str_elems, &str_pool);
 
     /* start_v and len_v may be atom scalars or vectors.
      * Handle TD_I32 vectors correctly (read as int32_t, not int64_t). */
@@ -10370,14 +10717,45 @@ static td_t* exec_substr(td_graph_t* g, td_op_t* op) {
     else l_data = (const int64_t*)td_data(len_v);
 
     for (int64_t i = 0; i < nrows; i++) {
+        /* Propagate null — from input, start, or length */
+        if (td_vec_is_null((td_t*)input, i) ||
+            ((s_data || s_data_i32) && td_vec_is_null((td_t*)start_v, i)) ||
+            ((l_data || l_data_i32) && td_vec_is_null((td_t*)len_v, i))) {
+            if (is_str) {
+                result = td_str_vec_append(result, "", 0);
+                if (TD_IS_ERR(result)) break;
+                td_vec_set_null(result, result->len - 1, true);
+            } else {
+                sym_dst[i] = 0;
+                td_vec_set_null(result, i, true);
+            }
+            continue;
+        }
         const char* sp; size_t sl;
-        sym_elem(input, i, &sp, &sl);
+        if (is_str) {
+            sp = td_str_t_ptr(&str_elems[i], str_pool);
+            sl = str_elems[i].len;
+        } else {
+            sym_elem(input, i, &sp, &sl);
+        }
         int64_t st = (s_data ? s_data[i] : s_data_i32 ? (int64_t)s_data_i32[i] : s_scalar) - 1; /* 1-based → 0-based */
         int64_t ln = l_data ? l_data[i] : l_data_i32 ? (int64_t)l_data_i32[i] : l_scalar;
         if (st < 0) st = 0;
-        if ((size_t)st >= sl) { dst[i] = td_sym_intern("", 0); continue; }
+        if ((size_t)st >= sl) {
+            if (is_str) {
+                result = td_str_vec_append(result, "", 0);
+                if (TD_IS_ERR(result)) break;
+            }
+            else { sym_dst[i] = td_sym_intern("", 0); }
+            continue;
+        }
         if (ln < 0 || ln > (int64_t)(sl - (size_t)st)) ln = (int64_t)sl - st;
-        dst[i] = td_sym_intern(sp + st, (size_t)ln);
+        if (is_str) {
+            result = td_str_vec_append(result, sp + st, (size_t)ln);
+            if (TD_IS_ERR(result)) break;
+        } else {
+            sym_dst[i] = td_sym_intern(sp + st, (size_t)ln);
+        }
     }
     td_release(input); td_release(start_v); td_release(len_v);
     return result;
@@ -10402,32 +10780,66 @@ static td_t* exec_replace(td_graph_t* g, td_op_t* op) {
     size_t to_len = td_str_len(to_v);
 
     int64_t nrows = input->len;
-    td_t* result = td_vec_new(TD_SYM, nrows);
+    bool is_str = (input->type == TD_STR);
+
+    td_t* result;
+    if (is_str) {
+        result = td_vec_new(TD_STR, nrows);
+    } else {
+        result = td_vec_new(TD_SYM, nrows);
+    }
     if (!result || TD_IS_ERR(result)) { td_release(input); td_release(from_v); td_release(to_v); return result; }
-    result->len = nrows;
-    int64_t* dst = (int64_t*)td_data(result);
+    if (!is_str) result->len = nrows;
+    int64_t* sym_dst = is_str ? NULL : (int64_t*)td_data(result);
+
+    const td_str_t* str_elems = NULL;
+    const char* str_pool = NULL;
+    if (is_str) str_resolve(input, &str_elems, &str_pool);
 
     for (int64_t i = 0; i < nrows; i++) {
+        /* Propagate null */
+        if (td_vec_is_null((td_t*)input, i)) {
+            if (is_str) {
+                result = td_str_vec_append(result, "", 0);
+                if (TD_IS_ERR(result)) break;
+                td_vec_set_null(result, result->len - 1, true);
+            } else {
+                sym_dst[i] = 0;
+                td_vec_set_null(result, i, true);
+            }
+            continue;
+        }
         const char* sp; size_t sl;
-        sym_elem(input, i, &sp, &sl);
+        if (is_str) {
+            sp = td_str_t_ptr(&str_elems[i], str_pool);
+            sl = str_elems[i].len;
+        } else {
+            sym_elem(input, i, &sp, &sl);
+        }
         /* Simple find-and-replace-all */
         /* Worst case: every char is a match, each replaced by to_len bytes.
          * Guard against size_t overflow when to_len >> from_len. */
         size_t n_matches = (from_len > 0) ? sl / from_len : 0;
         size_t worst;
-        if (from_len > 0 && to_len > 0 && n_matches > SIZE_MAX / to_len) {
+        if (from_len > 0 && to_len > from_len && n_matches > SIZE_MAX / to_len) {
             worst = SIZE_MAX; /* overflow → cap at max; scratch_alloc will OOM */
+        } else if (from_len > 0 && to_len >= from_len) {
+            /* Expanding or same-size: max output when every chunk matches */
+            worst = n_matches * to_len + (sl % from_len) + 1;
         } else {
-            worst = (from_len > 0)
-                ? n_matches * to_len + (sl % from_len) + 1
-                : sl + 1;
+            /* Shrinking or from_len==0: max output when nothing matches → sl */
+            worst = sl + 1;
         }
         char sbuf[8192];
         char* buf = sbuf;
         td_t* dyn_hdr = NULL;
         if (worst > sizeof(sbuf)) {
             buf = (char*)scratch_alloc(&dyn_hdr, worst);
-            if (!buf) { dst[i] = td_sym_intern("", 0); continue; }
+            if (!buf) {
+                td_release(result);
+                td_release(input); td_release(from_v); td_release(to_v);
+                return TD_ERR_PTR(TD_ERR_OOM);
+            }
         }
         size_t buf_cap = dyn_hdr ? worst : sizeof(sbuf);
         size_t bi = 0;
@@ -10440,8 +10852,13 @@ static td_t* exec_replace(td_graph_t* g, td_op_t* op) {
                 j++;
             }
         }
-        buf[bi] = '\0';
-        dst[i] = td_sym_intern(buf, bi);
+        if (is_str) {
+            result = td_str_vec_append(result, buf, bi);
+            if (TD_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+        } else {
+            buf[bi] = '\0';
+            sym_dst[i] = td_sym_intern(buf, bi);
+        }
         scratch_free(dyn_hdr);
     }
     td_release(input); td_release(from_v); td_release(to_v);
@@ -10485,32 +10902,58 @@ static td_t* exec_concat(td_graph_t* g, td_op_t* op) {
 
     /* Derive nrows from first vector arg (scalar args have byte-length in len) */
     int64_t nrows = 1;
+    bool out_str = false;
     for (int a = 0; a < n_args; a++) {
         int8_t at = args[a]->type;
-        if (TD_IS_SYM(at)) { nrows = args[a]->len; break; }
-        if (!td_is_atom(args[a])) { nrows = args[a]->len; break; }
+        if (at == TD_STR) { out_str = true; if (nrows == 1) nrows = args[a]->len; }
+        if (TD_IS_SYM(at)) { if (nrows == 1) nrows = args[a]->len; }
+        if (!td_is_atom(args[a]) && nrows == 1) { nrows = args[a]->len; }
     }
-    td_t* result = td_vec_new(TD_SYM, nrows);
+    td_t* result = td_vec_new(out_str ? TD_STR : TD_SYM, nrows);
     if (!result || TD_IS_ERR(result)) {
         for (int i = 0; i < n_args; i++) td_release(args[i]);
         scratch_free(args_hdr);
         return result;
     }
-    result->len = nrows;
-    int64_t* dst = (int64_t*)td_data(result);
+    if (!out_str) result->len = nrows;
+    int64_t* dst = out_str ? NULL : (int64_t*)td_data(result);
 
     for (int64_t r = 0; r < nrows; r++) {
+        /* Check if any arg is null at this row */
+        bool any_null = false;
+        for (int a = 0; a < n_args; a++) {
+            if (!td_is_atom(args[a]) && td_vec_is_null((td_t*)args[a], r < args[a]->len ? r : 0)) {
+                any_null = true;
+                break;
+            }
+        }
+        if (any_null) {
+            if (out_str) {
+                result = td_str_vec_append(result, "", 0);
+                if (TD_IS_ERR(result)) break;
+                td_vec_set_null(result, result->len - 1, true);
+            } else {
+                dst[r] = 0;
+                td_vec_set_null(result, r, true);
+            }
+            continue;
+        }
         /* Pre-scan to compute total concat length for this row */
         size_t total = 0;
         for (int a = 0; a < n_args; a++) {
             int8_t t = args[a]->type;
-            if (TD_IS_SYM(t)) {
+            if (t == TD_STR) {
+                const td_str_t* elems; const char* p;
+                str_resolve(args[a], &elems, &p);
+                int64_t ar = td_is_atom(args[a]) ? 0 : (r < args[a]->len ? r : 0);
+                total += elems[ar].len;
+            } else if (TD_IS_SYM(t)) {
                 const char* sp; size_t sl;
-                sym_elem(args[a], r, &sp, &sl);
+                int64_t ar = td_is_atom(args[a]) ? 0 : (r < args[a]->len ? r : 0);
+                sym_elem(args[a], ar, &sp, &sl);
                 total += sl;
             } else if (t == TD_ATOM_STR) {
-                size_t sl = td_str_len(args[a]);
-                total += sl;
+                total += td_str_len(args[a]);
             }
         }
         char sbuf[8192];
@@ -10519,15 +10962,28 @@ static td_t* exec_concat(td_graph_t* g, td_op_t* op) {
         size_t buf_cap = sizeof(sbuf);
         if (total >= sizeof(sbuf)) {
             buf = (char*)scratch_alloc(&dyn_hdr, total + 1);
-            if (!buf) { buf = sbuf; buf_cap = sizeof(sbuf); }
-            else buf_cap = total + 1;
+            if (!buf) {
+                td_release(result);
+                for (int i = 0; i < n_args; i++) td_release(args[i]);
+                scratch_free(args_hdr);
+                return TD_ERR_PTR(TD_ERR_OOM);
+            }
+            buf_cap = total + 1;
         }
         size_t bi = 0;
         for (int a = 0; a < n_args; a++) {
             int8_t t = args[a]->type;
-            if (TD_IS_SYM(t)) {
+            if (t == TD_STR) {
+                const td_str_t* elems; const char* pool;
+                str_resolve(args[a], &elems, &pool);
+                int64_t ar = td_is_atom(args[a]) ? 0 : (r < args[a]->len ? r : 0);
+                const char* sp = td_str_t_ptr(&elems[ar], pool);
+                size_t sl = elems[ar].len;
+                if (bi + sl < buf_cap) { memcpy(buf + bi, sp, sl); bi += sl; }
+            } else if (TD_IS_SYM(t)) {
                 const char* sp; size_t sl;
-                sym_elem(args[a], r, &sp, &sl);
+                int64_t ar = td_is_atom(args[a]) ? 0 : (r < args[a]->len ? r : 0);
+                sym_elem(args[a], ar, &sp, &sl);
                 if (bi + sl < buf_cap) { memcpy(buf + bi, sp, sl); bi += sl; }
             } else if (t == TD_ATOM_STR) {
                 const char* sp = td_str_ptr(args[a]);
@@ -10535,8 +10991,13 @@ static td_t* exec_concat(td_graph_t* g, td_op_t* op) {
                 if (sp && bi + sl < buf_cap) { memcpy(buf + bi, sp, sl); bi += sl; }
             }
         }
-        buf[bi] = '\0';
-        dst[r] = td_sym_intern(buf, bi);
+        if (out_str) {
+            result = td_str_vec_append(result, buf, bi);
+            if (TD_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+        } else {
+            buf[bi] = '\0';
+            dst[r] = td_sym_intern(buf, bi);
+        }
         scratch_free(dyn_hdr);
     }
     for (int i = 0; i < n_args; i++) td_release(args[i]);
@@ -13090,114 +13551,6 @@ static td_t* exec_louvain(td_graph_t* g, td_op_t* op) {
 }
 
 /* --------------------------------------------------------------------------
- * exec_local_clustering_coeff: local clustering coefficient per node.
- * Treats graph as undirected (uses both forward and reverse CSR).
- * LCC(v) = triangles / (deg * (deg-1)), where triangles = directed edges
- * between v's undirected neighbors (fwd scan only).
- * -------------------------------------------------------------------------- */
-static td_t* exec_local_clustering_coeff(td_graph_t* g, td_op_t* op) {
-    td_op_ext_t* ext = find_ext(g, op->id);
-    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
-
-    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
-    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
-
-    int64_t n = rel->fwd.n_nodes;
-    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
-
-    td_scratch_arena_t arena;
-    td_scratch_arena_init(&arena);
-
-    /* Scratch: merged neighbor list per node (max possible size = n) */
-    int64_t* nbrs = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
-    /* Scratch: quick-lookup set for neighbor checking */
-    uint8_t* in_nbr = (uint8_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(uint8_t));
-    if (!nbrs || !in_nbr) {
-        td_scratch_arena_reset(&arena);
-        return TD_ERR_PTR(TD_ERR_OOM);
-    }
-    memset(in_nbr, 0, (size_t)n * sizeof(uint8_t));
-
-    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
-    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
-    int64_t* rev_off = (int64_t*)td_data(rel->rev.offsets);
-    int64_t* rev_tgt = (int64_t*)td_data(rel->rev.targets);
-
-    /* Allocate result vectors */
-    td_t* node_vec = td_vec_new(TD_I64, n);
-    td_t* lcc_vec  = td_vec_new(TD_F64, n);
-    if (!node_vec || TD_IS_ERR(node_vec) || !lcc_vec || TD_IS_ERR(lcc_vec)) {
-        td_scratch_arena_reset(&arena);
-        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
-        if (lcc_vec  && !TD_IS_ERR(lcc_vec))  td_release(lcc_vec);
-        return TD_ERR_PTR(TD_ERR_OOM);
-    }
-
-    int64_t* ndata = (int64_t*)td_data(node_vec);
-    double*  ldata = (double*)td_data(lcc_vec);
-
-    for (int64_t v = 0; v < n; v++) {
-        ndata[v] = v;
-
-        /* Merge forward and reverse neighbors into deduplicated list */
-        int64_t deg = 0;
-        for (int64_t j = fwd_off[v]; j < fwd_off[v + 1]; j++) {
-            int64_t u = fwd_tgt[j];
-            if (u >= 0 && u < n && !in_nbr[u]) {
-                in_nbr[u] = 1;
-                nbrs[deg++] = u;
-            }
-        }
-        for (int64_t j = rev_off[v]; j < rev_off[v + 1]; j++) {
-            int64_t u = rev_tgt[j];
-            if (u >= 0 && u < n && !in_nbr[u]) {
-                in_nbr[u] = 1;
-                nbrs[deg++] = u;
-            }
-        }
-
-        if (deg < 2) {
-            ldata[v] = 0.0;
-        } else {
-            /* Count directed fwd edges between neighbors of v */
-            int64_t triangles = 0;
-            for (int64_t i = 0; i < deg; i++) {
-                int64_t u = nbrs[i];
-                /* Check fwd edges of u against neighbor set */
-                for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
-                    if (in_nbr[fwd_tgt[j]]) triangles++;
-                }
-            }
-            /* Each undirected edge {u,w} between neighbors appears once in the
-             * fwd scan (u->w). For the denominator: deg*(deg-1) counts ordered
-             * pairs. So LCC = triangles / (deg*(deg-1)). */
-            ldata[v] = (double)triangles / ((double)deg * (double)(deg - 1));
-        }
-
-        /* Reset in_nbr for next node */
-        for (int64_t i = 0; i < deg; i++) in_nbr[nbrs[i]] = 0;
-    }
-
-    node_vec->len = n;
-    lcc_vec->len  = n;
-
-    td_scratch_arena_reset(&arena);
-
-    td_t* result = td_table_new(2);
-    if (!result || TD_IS_ERR(result)) {
-        td_release(node_vec);
-        td_release(lcc_vec);
-        return TD_ERR_PTR(TD_ERR_OOM);
-    }
-    result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
-    td_release(node_vec);
-    result = td_table_add_col(result, td_sym_intern("_clustering_coeff", 17), lcc_vec);
-    td_release(lcc_vec);
-
-    return result;
-}
-
-/* --------------------------------------------------------------------------
  * exec_cosine_sim: cosine similarity between embedding column and query vector.
  * dot(a,b) / (||a|| * ||b||) per row.
  * Input: TD_F32 embedding column (flat N*D floats)
@@ -14214,10 +14567,6 @@ static td_t* exec_node(td_graph_t* g, td_op_t* op) {
 
         case OP_LOUVAIN: {
             return exec_louvain(g, op);
-        }
-
-        case OP_LOCAL_CLUSTERING_COEFF: {
-            return exec_local_clustering_coeff(g, op);
         }
 
         case OP_COSINE_SIM: {
