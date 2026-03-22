@@ -344,6 +344,7 @@ pub union td_t_head {
     pub nullmap: [u8; 16],
     pub slice: td_t_slice,
     pub ext: td_t_ext_nullmap,
+    pub str: td_t_str_pool,
 }
 
 #[repr(C)]
@@ -357,7 +358,14 @@ pub struct td_t_slice {
 #[derive(Debug, Copy, Clone)]
 pub struct td_t_ext_nullmap {
     pub ext_nullmap: *mut td_t,
-    pub _reserved: i64,
+    pub sym_dict: *mut td_t,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct td_t_str_pool {
+    pub str_ext_null: *mut td_t,
+    pub str_pool: *mut td_t,
 }
 
 /// Bytes 24-31 value union
@@ -685,6 +693,12 @@ extern "C" {
     pub fn td_vec_set_null(vec: *mut td_t, idx: i64, is_null: bool);
     pub fn td_vec_is_null(vec: *mut td_t, idx: i64) -> bool;
 
+    // --- String Vector API ---
+    pub fn td_str_vec_append(vec: *mut td_t, s: *const c_char, len: usize) -> *mut td_t;
+    pub fn td_str_vec_get(vec: *mut td_t, idx: i64, out_len: *mut usize) -> *const c_char;
+    pub fn td_str_vec_set(vec: *mut td_t, idx: i64, s: *const c_char, len: usize) -> *mut td_t;
+    pub fn td_str_vec_compact(vec: *mut td_t) -> *mut td_t;
+
     // --- String API ---
     pub fn td_str_ptr(s: *mut td_t) -> *const c_char;
     pub fn td_str_len(s: *mut td_t) -> usize;
@@ -703,6 +717,7 @@ extern "C" {
     pub fn td_sym_find(s: *const c_char, len: usize) -> i64;
     pub fn td_sym_str(id: i64) -> *mut td_t;
     pub fn td_sym_count() -> u32;
+    pub fn td_sym_ensure_cap(needed: u32) -> bool;
 
     // --- Table API ---
     pub fn td_table_new(ncols: i64) -> *mut td_t;
@@ -992,7 +1007,7 @@ extern "C" {
     pub fn td_col_save(vec: *mut td_t, path: *const c_char) -> td_err_t;
     pub fn td_col_load(path: *const c_char) -> *mut td_t;
     pub fn td_splay_save(tbl: *mut td_t, dir: *const c_char, sym_path: *const c_char) -> td_err_t;
-    pub fn td_splay_load(dir: *const c_char) -> *mut td_t;
+    pub fn td_splay_load(dir: *const c_char, sym_path: *const c_char) -> *mut td_t;
     pub fn td_read_splayed(dir: *const c_char, sym_path: *const c_char) -> *mut td_t;
     pub fn td_part_load(db_root: *const c_char, table_name: *const c_char) -> *mut td_t;
     pub fn td_read_parted(db_root: *const c_char, table_name: *const c_char) -> *mut td_t;
@@ -1002,6 +1017,16 @@ extern "C" {
     // --- Symbol Persistence ---
     pub fn td_sym_save(path: *const c_char) -> td_err_t;
     pub fn td_sym_load(path: *const c_char) -> td_err_t;
+
+    // --- File I/O API ---
+    pub fn td_file_open(path: *const c_char, flags: c_int) -> c_int;
+    pub fn td_file_close(fd: c_int);
+    pub fn td_file_lock_ex(fd: c_int) -> td_err_t;
+    pub fn td_file_lock_sh(fd: c_int) -> td_err_t;
+    pub fn td_file_unlock(fd: c_int) -> td_err_t;
+    pub fn td_file_sync(fd: c_int) -> td_err_t;
+    pub fn td_file_sync_dir(path: *const c_char) -> td_err_t;
+    pub fn td_file_rename(old_path: *const c_char, new_path: *const c_char) -> td_err_t;
 
     // --- Embedding / Vector ops ---
     pub fn td_embedding_new(nrows: i64, dim: i32) -> *mut td_t;
