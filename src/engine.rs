@@ -1095,23 +1095,37 @@ impl Table {
     }
 
     unsafe fn read_str_from_vec(vec: *mut ffi::td_t, t: i8, row: usize) -> Option<String> {
-        let sym_id = match t {
+        match t {
+            ffi::TD_STR => {
+                let mut out_len: usize = 0;
+                let ptr = unsafe { ffi::td_str_vec_get(vec, row as i64, &mut out_len) };
+                if ptr.is_null() || out_len == 0 {
+                    if unsafe { ffi::td_vec_is_null(vec, row as i64) } {
+                        return None;
+                    }
+                    return Some(String::new());
+                }
+                unsafe {
+                    let slice = std::slice::from_raw_parts(ptr as *const u8, out_len);
+                    std::str::from_utf8(slice).ok().map(|s| s.to_owned())
+                }
+            }
             ffi::TD_SYM => {
                 let data = unsafe { ffi::td_data(vec) as *const u8 };
                 let attrs = unsafe { ffi::td_attrs(vec) };
-                unsafe { ffi::read_sym(data, row, t, attrs) }
+                let sym_id = unsafe { ffi::read_sym(data, row, t, attrs) };
+                let atom = unsafe { ffi::td_sym_str(sym_id) };
+                if atom.is_null() {
+                    return None;
+                }
+                unsafe {
+                    let ptr = ffi::td_str_ptr(atom);
+                    let slen = ffi::td_str_len(atom);
+                    let slice = std::slice::from_raw_parts(ptr as *const u8, slen);
+                    std::str::from_utf8(slice).ok().map(|s| s.to_owned())
+                }
             }
-            _ => return None,
-        };
-        let atom = unsafe { ffi::td_sym_str(sym_id) };
-        if atom.is_null() {
-            return None;
-        }
-        unsafe {
-            let ptr = ffi::td_str_ptr(atom);
-            let slen = ffi::td_str_len(atom);
-            let slice = std::slice::from_raw_parts(ptr as *const u8, slen);
-            std::str::from_utf8(slice).ok().map(|s| s.to_owned())
+            _ => None,
         }
     }
 
@@ -1279,6 +1293,9 @@ impl<'a> Graph<'a> {
     fn check_op(raw: *mut ffi::td_op_t) -> Result<Column> {
         if raw.is_null() {
             return Err(Error::NullPointer); // graph operation failed (null result)
+        }
+        if ffi::td_is_err(raw as *mut ffi::td_t) {
+            return Err(Error::NullPointer); // error sentinel from C engine
         }
         Ok(Column { raw })
     }
@@ -2710,4 +2727,5 @@ pub mod types {
     pub const TIMESTAMP: i8 = super::ffi::TD_TIMESTAMP;
     pub const TABLE: i8 = super::ffi::TD_TABLE;
     pub const SYM: i8 = super::ffi::TD_SYM;
+    pub const STR: i8 = super::ffi::TD_STR;
 }
