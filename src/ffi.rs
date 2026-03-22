@@ -44,8 +44,9 @@ pub const TD_GUID: i8 = 12;
 pub const TD_TABLE: i8 = 13;
 pub const TD_SEL: i8 = 16;
 pub const TD_SYM: i8 = 20;
+pub const TD_STR: i8 = 21;
 
-pub const TD_TYPE_COUNT: usize = 21;
+pub const TD_TYPE_COUNT: usize = 22;
 
 // Parted types
 pub const TD_PARTED_BASE: i8 = 32;
@@ -74,7 +75,7 @@ pub const TD_ATOM_I16: i8 = -TD_I16;
 pub const TD_ATOM_I32: i8 = -TD_I32;
 pub const TD_ATOM_I64: i8 = -TD_I64;
 pub const TD_ATOM_F64: i8 = -TD_F64;
-pub const TD_ATOM_STR: i8 = -8;
+pub const TD_ATOM_STR: i8 = -TD_STR;
 pub const TD_ATOM_DATE: i8 = -TD_DATE;
 pub const TD_ATOM_TIME: i8 = -TD_TIME;
 pub const TD_ATOM_TIMESTAMP: i8 = -TD_TIMESTAMP;
@@ -112,6 +113,7 @@ pub unsafe fn read_sym(data: *const u8, row: usize, _t: i8, attrs: u8) -> i64 {
 pub const TD_ATTR_SLICE: u8 = 0x10;
 pub const TD_ATTR_NULLMAP_EXT: u8 = 0x20;
 pub const TD_ATTR_HAS_NULLS: u8 = 0x40;
+pub const TD_ATTR_ARENA: u8 = 0x80;
 
 // ===== Morsel Constants =====
 
@@ -246,6 +248,7 @@ pub const OP_COSINE_SIM: u16 = 88;
 pub const OP_EUCLIDEAN_DIST: u16 = 89;
 pub const OP_KNN: u16 = 90;
 pub const OP_HNSW_KNN: u16 = 91;
+pub const OP_LOCAL_CLUSTERING_COEFF: u16 = 92;
 
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
