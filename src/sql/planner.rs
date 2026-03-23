@@ -1282,6 +1282,15 @@ fn append_value_to_vec(
             check_vec_append(next)
         }
 
+        ffi::TD_STR => {
+            let s = eval_str_literal(expr)
+                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+            let cstr = std::ffi::CString::new(s.as_str())
+                .map_err(|_| SqlError::Plan(format!("column '{}': string contains null byte", col_names[col_idx])))?;
+            let next = unsafe { ffi::td_str_vec_append(vec, cstr.as_ptr(), s.len()) };
+            check_vec_append(next)
+        }
+
         ffi::TD_SYM => {
             let s = eval_str_literal(expr)
                 .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
