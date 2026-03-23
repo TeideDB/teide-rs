@@ -99,6 +99,11 @@ SELECT COUNT(*) FROM str_test
 ----
 4
 
+# Note: IS NULL / IS NOT NULL filtering on TD_STR columns is not yet supported
+# by the C engine's ISNULL op (expr_compile rejects TD_STR, and the fallback
+# exec_elementwise_unary lacks a TD_STR branch). Tests omitted until upstream
+# adds support.
+
 # --- SYMBOL type (explicit dictionary encoding) ---
 
 statement ok

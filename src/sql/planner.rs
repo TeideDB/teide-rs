@@ -1293,12 +1293,20 @@ fn append_value_to_vec(
         }
 
         ffi::TD_STR => {
-            let s = eval_str_literal(expr)
-                .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
-            let cstr = std::ffi::CString::new(s.as_str())
-                .map_err(|_| SqlError::Plan(format!("column '{}': string contains null byte", col_names[col_idx])))?;
-            let next = unsafe { ffi::td_str_vec_append(vec, cstr.as_ptr(), s.len()) };
-            check_vec_append(next)
+            if matches!(expr, Expr::Value(Value::Null)) {
+                let row_idx = unsafe { ffi::td_len(vec as *const crate::td_t) };
+                let next = unsafe { ffi::td_str_vec_append(vec, b"\0".as_ptr() as *const i8, 0) };
+                let next = check_vec_append(next)?;
+                unsafe { ffi::td_vec_set_null(next, row_idx, true) };
+                Ok(next)
+            } else {
+                let s = eval_str_literal(expr)
+                    .map_err(|e| SqlError::Plan(format!("column '{}': {e}", col_names[col_idx])))?;
+                let cstr = std::ffi::CString::new(s.as_str())
+                    .map_err(|_| SqlError::Plan(format!("column '{}': string contains null byte", col_names[col_idx])))?;
+                let next = unsafe { ffi::td_str_vec_append(vec, cstr.as_ptr(), s.len()) };
+                check_vec_append(next)
+            }
         }
 
         ffi::TD_SYM => {
