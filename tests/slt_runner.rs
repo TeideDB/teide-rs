@@ -396,3 +396,8 @@ fn slt_guide_temporal() {
 fn slt_guide_graph_queries() {
     run_slt("tests/slt/guide_graph_queries.slt");
 }
+
+#[test]
+fn slt_str() {
+    run_slt("tests/slt/str.slt");
+}

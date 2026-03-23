@@ -1,0 +1,124 @@
+# TD_STR variable-length string column tests
+
+# --- Setup: create table with VARCHAR (now TD_STR) ---
+
+statement ok
+CREATE TABLE str_test (id INTEGER, name VARCHAR, bio TEXT)
+
+statement ok
+INSERT INTO str_test VALUES (1, 'alice', 'short'), (2, 'bob', 'a medium length biography'), (3, 'carol', 'this is a longer biography that exceeds twelve bytes for pool storage')
+
+# --- Basic SELECT ---
+
+query IT
+SELECT id, name FROM str_test ORDER BY id
+----
+1 alice
+2 bob
+3 carol
+
+# --- String functions ---
+
+query T
+SELECT UPPER(name) FROM str_test WHERE id = 1
+----
+ALICE
+
+query T
+SELECT LOWER(name) FROM str_test WHERE id = 2
+----
+bob
+
+query I
+SELECT LENGTH(name) FROM str_test WHERE id = 1
+----
+5
+
+query T
+SELECT TRIM(name) FROM str_test WHERE id = 1
+----
+alice
+
+query T
+SELECT SUBSTR(bio, 1, 5) FROM str_test WHERE id = 1
+----
+short
+
+query T
+SELECT REPLACE(name, 'alice', 'ALICE') FROM str_test WHERE id = 1
+----
+ALICE
+
+# --- String concatenation ---
+
+query T
+SELECT name || ' - ' || bio FROM str_test WHERE id = 1
+----
+alice - short
+
+# --- WHERE on string columns ---
+
+query IT
+SELECT id, name FROM str_test WHERE name = 'bob'
+----
+2 bob
+
+query IT
+SELECT id, name FROM str_test WHERE name LIKE 'a%'
+----
+1 alice
+
+query IT
+SELECT id, name FROM str_test WHERE name ILIKE 'A%'
+----
+1 alice
+
+# --- ORDER BY string ---
+
+query T
+SELECT name FROM str_test ORDER BY name
+----
+alice
+bob
+carol
+
+# --- COUNT DISTINCT on strings ---
+
+query I
+SELECT COUNT(DISTINCT name) FROM str_test
+----
+3
+
+# --- NULL strings ---
+
+statement ok
+INSERT INTO str_test VALUES (4, NULL, NULL)
+
+query I
+SELECT COUNT(*) FROM str_test
+----
+4
+
+# --- SYMBOL type (explicit dictionary encoding) ---
+
+statement ok
+CREATE TABLE sym_test (id INTEGER, category SYMBOL)
+
+statement ok
+INSERT INTO sym_test VALUES (1, 'cat_a'), (2, 'cat_b'), (3, 'cat_a')
+
+query IT
+SELECT id, category FROM sym_test ORDER BY id
+----
+1 cat_a
+2 cat_b
+3 cat_a
+
+query I
+SELECT COUNT(DISTINCT category) FROM sym_test
+----
+2
+
+# Note: CAST(int AS VARCHAR) produces TD_STR atoms which are not yet
+# fully supported in the display path — test omitted until upstream
+# adds atom-to-string formatting for TD_STR.
