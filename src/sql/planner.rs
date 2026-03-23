@@ -2772,11 +2772,19 @@ fn resolve_from(
             ));
         }
 
+        // C engine hash JOIN does not support TD_STR keys — convert to TD_SYM.
+        let left_key_names: Vec<String> = join_keys.iter().map(|(lk, _)| lk.clone()).collect();
+        let right_key_names: Vec<String> = join_keys.iter().map(|(_, rk)| rk.clone()).collect();
+        let sym_al = convert_str_keys_to_sym(&al_table, &left_key_names)?;
+        let sym_ar = convert_str_keys_to_sym(&ar_table, &right_key_names)?;
+        let eff_al = sym_al.as_ref().unwrap_or(&al_table);
+        let eff_ar = sym_ar.as_ref().unwrap_or(&ar_table);
+
         // Build join graph (scoped to avoid borrow conflict)
         let result = {
-            let mut g = ctx.graph(&al_table)?;
-            let left_table_node = g.const_table(&al_table)?;
-            let right_table_node = g.const_table(&ar_table)?;
+            let mut g = ctx.graph(eff_al)?;
+            let left_table_node = g.const_table(eff_al)?;
+            let right_table_node = g.const_table(eff_ar)?;
 
             let left_key_nodes: Vec<crate::Column> = join_keys
                 .iter()
@@ -2788,7 +2796,7 @@ fn resolve_from(
             for (_, rk) in &join_keys {
                 let right_sym = crate::sym_intern(rk)?;
                 let right_col_ptr =
-                    unsafe { crate::ffi_table_get_col(ar_table.as_raw(), right_sym) };
+                    unsafe { crate::ffi_table_get_col(eff_ar.as_raw(), right_sym) };
                 if right_col_ptr.is_null() || crate::ffi_is_err(right_col_ptr) {
                     return Err(SqlError::Plan(format!(
                         "Right key column '{}' not found",
@@ -3196,7 +3204,13 @@ fn plan_group_select(
     }
 
     // Phase 2: Execute GROUP BY with keys + all unique aggregates
-    let mut g = ctx.graph(working_table)?;
+    //
+    // The C engine's hash-table GROUP BY does not support TD_STR keys.
+    // If any GROUP BY key is TD_STR, convert those columns to TD_SYM first.
+    let sym_table = convert_str_keys_to_sym(working_table, &key_names)?;
+    let effective_table = sym_table.as_ref().unwrap_or(working_table);
+
+    let mut g = ctx.graph(effective_table)?;
     g.column_embedding_dims = embedding_dims.clone();
 
     let mut key_nodes: Vec<Column> = Vec::new();
@@ -3443,7 +3457,11 @@ fn plan_count_distinct_group(
         }
     }
 
-    let mut g = ctx.graph(working_table)?;
+    // C engine GROUP BY does not support TD_STR keys — convert to TD_SYM.
+    let sym_table = convert_str_keys_to_sym(working_table, &phase1_keys)?;
+    let effective_table = sym_table.as_ref().unwrap_or(working_table);
+
+    let mut g = ctx.graph(effective_table)?;
     g.column_embedding_dims = embedding_dims.clone();
     let mut key_nodes: Vec<Column> = Vec::new();
     for k in &phase1_keys {
@@ -3589,8 +3607,12 @@ fn plan_distinct(
         }
     }
 
+    // C engine DISTINCT uses hash table which does not support TD_STR keys.
+    let sym_table = convert_str_keys_to_sym(working_table, col_names)?;
+    let effective_table = sym_table.as_ref().unwrap_or(working_table);
+
     // Native DISTINCT: GROUP BY with 0 aggregates — single graph, no dummy COUNT
-    let mut g = ctx.graph(working_table)?;
+    let mut g = ctx.graph(effective_table)?;
     let key_nodes: Vec<Column> = col_names
         .iter()
         .map(|k| g.scan(k))
@@ -4565,6 +4587,107 @@ where
         vec = next;
     }
     Ok(vec)
+}
+
+/// Convert all TD_STR columns in the table to TD_SYM.
+///
+/// The C engine's hash-table GROUP BY, DISTINCT, and JOIN do not support
+/// TD_STR keys (16-byte variable-length elements).  This helper materialises
+/// a copy of the table where all TD_STR columns are interned into TD_SYM
+/// vectors so that hash-based operations can proceed.  Non-TD_STR columns
+/// are shared (retained).
+///
+/// Returns `Ok(None)` if no conversion was needed (no TD_STR columns).
+/// The caller must release the returned table when done.
+fn convert_str_keys_to_sym(
+    table: &crate::Table,
+    _key_cols: &[String],
+) -> Result<Option<crate::Table>, SqlError> {
+    let ncols = table.ncols();
+    let nrows = table.nrows();
+
+    // Check if any column is TD_STR
+    let mut has_str = false;
+    for i in 0..ncols {
+        if let Some(col) = table.get_col_idx(i) {
+            if unsafe { crate::ffi::td_type(col) } == crate::ffi::TD_STR {
+                has_str = true;
+                break;
+            }
+        }
+    }
+    if !has_str {
+        return Ok(None);
+    }
+
+    // Create new table, converting all TD_STR columns to TD_SYM
+    let mut new_tbl = unsafe { crate::ffi::td_table_new(ncols) };
+    if new_tbl.is_null() || crate::ffi_is_err(new_tbl) {
+        return Err(SqlError::Engine(crate::Error::Oom));
+    }
+
+    for i in 0..ncols {
+        let name_id = table.col_name(i);
+        let col = table.get_col_idx(i).ok_or(SqlError::Engine(crate::Error::Oom))?;
+        let col_type = unsafe { crate::ffi::td_type(col) };
+        let new_col = if col_type == crate::ffi::TD_STR {
+            // Convert TD_STR → TD_SYM
+            let mut max_id: i64 = 0;
+            let mut sym_ids: Vec<i64> = Vec::with_capacity(nrows as usize);
+            for row in 0..nrows {
+                let mut out_len: usize = 0;
+                let ptr = unsafe { crate::ffi::td_str_vec_get(col, row, &mut out_len) };
+                if unsafe { crate::ffi::td_vec_is_null(col, row) } {
+                    sym_ids.push(0); // null placeholder
+                } else {
+                    let id = unsafe { crate::ffi::td_sym_intern(ptr, out_len) };
+                    if id > max_id { max_id = id; }
+                    sym_ids.push(id);
+                }
+            }
+            let w = sym_width_for_id(max_id);
+            let sym_vec = unsafe { crate::ffi::td_sym_vec_new(w, nrows) };
+            if sym_vec.is_null() || crate::ffi_is_err(sym_vec) {
+                unsafe { crate::ffi_release(new_tbl) };
+                return Err(SqlError::Engine(crate::Error::Oom));
+            }
+            for (row, &id) in sym_ids.iter().enumerate() {
+                if unsafe { crate::ffi::td_vec_is_null(col, row as i64) } {
+                    unsafe { crate::ffi::td_vec_set_null(sym_vec, row as i64, true) };
+                } else {
+                    let appended = unsafe {
+                        crate::ffi::td_vec_append(
+                            sym_vec,
+                            &id as *const i64 as *const std::ffi::c_void,
+                        )
+                    };
+                    if appended.is_null() || crate::ffi_is_err(appended) {
+                        unsafe { crate::ffi_release(sym_vec) };
+                        unsafe { crate::ffi_release(new_tbl) };
+                        return Err(SqlError::Engine(crate::Error::Oom));
+                    }
+                }
+            }
+            sym_vec
+        } else {
+            // Non-STR column: retain and share
+            unsafe { crate::ffi::td_retain(col) };
+            col
+        };
+
+        let next = unsafe { crate::ffi::td_table_add_col(new_tbl, name_id, new_col) };
+        // td_table_add_col retains, so release our reference
+        unsafe { crate::ffi_release(new_col) };
+        if next.is_null() || crate::ffi_is_err(next) {
+            unsafe { crate::ffi_release(new_tbl) };
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        new_tbl = next;
+    }
+
+    let result_table = unsafe { crate::Table::from_raw(new_tbl) }
+        .map_err(|e| SqlError::Engine(e))?;
+    Ok(Some(result_table))
 }
 
 // ---------------------------------------------------------------------------

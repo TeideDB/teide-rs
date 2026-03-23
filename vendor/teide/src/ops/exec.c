@@ -11300,6 +11300,13 @@ static inline bool win_keys_differ(td_t* const* vecs, uint8_t n_keys,
             if (((const uint8_t*)td_data(col))[ra] !=
                 ((const uint8_t*)td_data(col))[rb]) return true;
             break;
+        case TD_STR: {
+            const td_str_t* elems;
+            const char* pool;
+            str_resolve(col, &elems, &pool);
+            if (!td_str_t_eq(&elems[ra], pool, &elems[rb], pool)) return true;
+            break;
+        }
         default: break;
         }
     }

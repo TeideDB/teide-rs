@@ -128,7 +128,7 @@ fn format_cell(table: &teide::Table, col: usize, row: usize) -> String {
             Some(v) => teide::Table::format_timestamp(v),
             None => "NULL".to_string(),
         },
-        20 => match table.get_str(col, row) {
+        20 | 21 => match table.get_str(col, row) {
             Some(s) => s.to_string(),
             None => "NULL".to_string(),
         },
