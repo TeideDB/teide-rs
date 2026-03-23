@@ -1770,20 +1770,7 @@ impl<'a> Graph<'a> {
         Self::check_op(raw)
     }
 
-    /// Project (select) specific columns from a table node.
-    pub fn project(&self, input: Column, cols: &[Column]) -> Result<Column> {
-        let mut col_ptrs: Vec<*mut ffi::td_op_t> = cols.iter().map(|c| c.raw).collect();
-        Self::check_op(unsafe {
-            ffi::td_project(
-                self.raw,
-                input.raw,
-                col_ptrs.as_mut_ptr(),
-                to_u8(cols.len())?,
-            )
-        })
-    }
-
-    /// Select specific columns from a table node (alias for project).
+    /// Select specific columns from a table node.
     pub fn select(&self, input: Column, cols: &[Column]) -> Result<Column> {
         let mut col_ptrs: Vec<*mut ffi::td_op_t> = cols.iter().map(|c| c.raw).collect();
         Self::check_op(unsafe {

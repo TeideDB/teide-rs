@@ -215,7 +215,7 @@ pub const OP_SORT: u16 = 61;
 pub const OP_GROUP: u16 = 62;
 pub const OP_JOIN: u16 = 63;
 pub const OP_WINDOW_JOIN: u16 = 64;
-pub const OP_PROJECT: u16 = 65;
+// OP_PROJECT removed from C engine — use OP_SELECT instead
 pub const OP_SELECT: u16 = 66;
 pub const OP_HEAD: u16 = 67;
 pub const OP_TAIL: u16 = 68;
@@ -248,7 +248,17 @@ pub const OP_COSINE_SIM: u16 = 88;
 pub const OP_EUCLIDEAN_DIST: u16 = 89;
 pub const OP_KNN: u16 = 90;
 pub const OP_HNSW_KNN: u16 = 91;
-pub const OP_LOCAL_CLUSTERING_COEFF: u16 = 92;
+// Graph algorithm ops (batch 1–3)
+pub const OP_DEGREE_CENT:   u16 = 92;
+pub const OP_TOPSORT:       u16 = 93;
+pub const OP_DFS:           u16 = 94;
+pub const OP_ASTAR:         u16 = 95;
+pub const OP_K_SHORTEST:    u16 = 96;
+pub const OP_CLUSTER_COEFF: u16 = 97;
+pub const OP_RANDOM_WALK:   u16 = 98;
+pub const OP_BETWEENNESS:   u16 = 99;
+pub const OP_CLOSENESS:     u16 = 100;
+pub const OP_MST:           u16 = 101;
 
 // Window function kinds
 pub const TD_WIN_ROW_NUMBER: u8 = 0;
@@ -883,13 +893,7 @@ extern "C" {
         frame_end_n: i64,
     ) -> *mut td_op_t;
 
-    pub fn td_project(
-        g: *mut td_graph_t,
-        input: *mut td_op_t,
-        cols: *mut *mut td_op_t,
-        n_cols: u8,
-    ) -> *mut td_op_t;
-
+    // td_project removed from C engine — use td_select
     pub fn td_select(
         g: *mut td_graph_t,
         input: *mut td_op_t,
