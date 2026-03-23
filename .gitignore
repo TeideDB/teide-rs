@@ -1,6 +1,7 @@
 target/
 .DS_Store
 *.swp
+vendor/teide/Testing/
 
 # ralphex progress logs
 .ralphex/progress/

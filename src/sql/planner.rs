@@ -4637,6 +4637,10 @@ fn convert_str_keys_to_sym(
                     let mut out_len: usize = 0;
                     let ptr = unsafe { crate::ffi::td_str_vec_get(col, row, &mut out_len) };
                     let id = unsafe { crate::ffi::td_sym_intern(ptr, out_len) };
+                    if id < 0 {
+                        unsafe { crate::ffi_release(new_tbl) };
+                        return Err(SqlError::Engine(crate::Error::Oom));
+                    }
                     if id > max_id { max_id = id; }
                     sym_ids.push(id);
                 }
@@ -4748,10 +4752,16 @@ fn exec_cross_join(
     let left = ensure_vector_columns(left, "CROSS JOIN")?;
     let right = ensure_vector_columns(right, "CROSS JOIN")?;
 
-    // Reject columns that carry null bitmaps — memcpy cannot preserve them.
+    // Reject non-TD_STR columns that carry null bitmaps — memcpy cannot
+    // preserve them.  TD_STR columns are handled via copy_str_vec_rows which
+    // correctly propagates null flags.
     for tbl in [&left, &right] {
         for c in 0..tbl.ncols() {
             if let Some(col) = tbl.get_col_idx(c) {
+                let col_type = unsafe { (*col).type_ };
+                if col_type == crate::ffi::TD_STR {
+                    continue;
+                }
                 let attrs = unsafe { (*col).attrs };
                 if attrs & crate::ffi::TD_ATTR_HAS_NULLS != 0 {
                     return Err(SqlError::Plan(
