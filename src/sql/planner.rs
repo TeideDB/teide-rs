@@ -658,7 +658,12 @@ fn sql_type_to_td(dt: &DataType) -> Result<i8, SqlError> {
         | DataType::Text
         | DataType::Char(_)
         | DataType::CharVarying(_)
-        | DataType::String(_) => Ok(ffi::TD_SYM),
+        | DataType::String(_) => Ok(ffi::TD_STR),
+        DataType::Custom(name, _)
+            if name.0.len() == 1 && name.0[0].value.eq_ignore_ascii_case("symbol") =>
+        {
+            Ok(ffi::TD_SYM)
+        }
         DataType::Date => Ok(ffi::TD_DATE),
         DataType::Time(_, _) => Ok(ffi::TD_TIME),
         DataType::Timestamp(_, _) => Ok(ffi::TD_TIMESTAMP),
