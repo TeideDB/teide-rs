@@ -83,7 +83,7 @@ The C engine's `!Send` constraint requires special handling: each pgwire connect
 
 ### Type System
 
-Every C object is a `td_t*` (32-byte header + data). Key type constants in `ffi.rs`: `TD_BOOL=1`, `TD_I16=4`, `TD_I32=5`, `TD_I64=6`, `TD_F64=7`, `TD_F32=8`, `TD_DATE=9`, `TD_TIME=10`, `TD_TIMESTAMP=11`, `TD_SYM=20`, `TD_TABLE=13`. Positive type = vector, negative = atom, 0 = list. Error returns use low pointer values (< 32) as sentinels checked via `td_is_err()`.
+Every C object is a `td_t*` (32-byte header + data). Key type constants in `ffi.rs`: `TD_BOOL=1`, `TD_I16=4`, `TD_I32=5`, `TD_I64=6`, `TD_F64=7`, `TD_F32=8`, `TD_DATE=9`, `TD_TIME=10`, `TD_TIMESTAMP=11`, `TD_SYM=20`, `TD_STR=21`, `TD_TABLE=13`. Positive type = vector, negative = atom, 0 = list. Error returns use low pointer values (< 32) as sentinels checked via `td_is_err()`. `TD_STR` is a variable-length string type with inline (≤12 bytes) and pool storage; `TD_SYM` is dictionary-encoded via the global symbol table. SQL `VARCHAR`/`TEXT`/`STRING` types map to `TD_STR`; the `SYMBOL` DDL keyword maps to `TD_SYM` for explicit dictionary encoding.
 
 ## Critical: Test Serialization
 
