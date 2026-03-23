@@ -13188,6 +13188,54 @@ static dijk_entry_t dijk_heap_pop(dijk_entry_t* heap, int64_t* size) {
     return top;
 }
 
+/* Reusable Dijkstra with optional node/edge masks (for Yen's k-shortest) */
+static double dijkstra_masked(
+    int64_t* fwd_off, int64_t* fwd_tgt, int64_t* fwd_row,
+    double* weights, int64_t n,
+    int64_t src_id, int64_t dst_id,
+    bool* node_mask,    /* NULL or bool[n]: true = blocked */
+    bool* edge_mask,    /* NULL or bool[m]: true = blocked */
+    double* dist,       /* pre-allocated double[n] */
+    int64_t* parent,    /* pre-allocated int64_t[n] */
+    dijk_entry_t* heap, /* pre-allocated */
+    bool* visited)      /* pre-allocated bool[n] */
+{
+    for (int64_t i = 0; i < n; i++) {
+        dist[i] = 1e308;
+        parent[i] = -1;
+        visited[i] = false;
+    }
+
+    dist[src_id] = 0.0;
+    int64_t heap_size = 0;
+    dijk_heap_push(heap, &heap_size, 0.0, src_id);
+
+    while (heap_size > 0) {
+        dijk_entry_t top = dijk_heap_pop(heap, &heap_size);
+        int64_t u = top.node;
+        if (visited[u]) continue;
+        visited[u] = true;
+
+        if (u == dst_id) break;
+
+        for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
+            if (edge_mask && edge_mask[j]) continue;
+            int64_t v = fwd_tgt[j];
+            if (node_mask && node_mask[v]) continue;
+            int64_t edge_row = fwd_row[j];
+            double w = weights[edge_row];
+            double new_dist = dist[u] + w;
+            if (new_dist < dist[v]) {
+                dist[v] = new_dist;
+                parent[v] = u;
+                dijk_heap_push(heap, &heap_size, new_dist, v);
+            }
+        }
+    }
+
+    return dist[dst_id];
+}
+
 static td_t* exec_dijkstra(td_graph_t* g, td_op_t* op,
                              td_t* src_val, td_t* dst_val) {
     td_op_ext_t* ext = find_ext(g, op->id);
@@ -13572,12 +13620,10 @@ static td_t* exec_louvain(td_graph_t* g, td_op_t* op) {
 }
 
 /* --------------------------------------------------------------------------
- * exec_local_clustering_coeff: local clustering coefficient per node.
- * Treats graph as undirected (uses both forward and reverse CSR).
- * LCC(v) = triangles / (deg * (deg-1)), where triangles = directed edges
- * between v's undirected neighbors (fwd scan only).
+ * exec_cluster_coeff: clustering coefficient via triangle counting. O(n*d^2).
+ * For each node v, count triangles among undirected neighbors using bitset.
  * -------------------------------------------------------------------------- */
-static td_t* exec_local_clustering_coeff(td_graph_t* g, td_op_t* op) {
+static td_t* exec_cluster_coeff(td_graph_t* g, td_op_t* op) {
     td_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
 
@@ -13670,9 +13716,519 @@ static td_t* exec_local_clustering_coeff(td_graph_t* g, td_op_t* op) {
     }
     result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
     td_release(node_vec);
-    result = td_table_add_col(result, td_sym_intern("_clustering_coeff", 17), lcc_vec);
+    result = td_table_add_col(result, td_sym_intern("_coefficient", 12), lcc_vec);
     td_release(lcc_vec);
 
+    return result;
+}
+
+/* --------------------------------------------------------------------------
+ * exec_random_walk: random walk from source node using xorshift64 PRNG.
+ * -------------------------------------------------------------------------- */
+static td_t* exec_random_walk(td_graph_t* g, td_op_t* op, td_t* src_val) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    uint16_t walk_len = ext->graph.max_iter;
+    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
+
+    int64_t start_node;
+    if (td_is_atom(src_val)) {
+        start_node = src_val->i64;
+    } else {
+        start_node = ((int64_t*)td_data(src_val))[0];
+    }
+    if (start_node < 0 || start_node >= n) return TD_ERR_PTR(TD_ERR_RANGE);
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+
+    int64_t total = (int64_t)walk_len + 1;
+    td_t* step_vec = td_vec_new(TD_I64, total);
+    td_t* node_vec = td_vec_new(TD_I64, total);
+    if (!step_vec || TD_IS_ERR(step_vec) || !node_vec || TD_IS_ERR(node_vec)) {
+        if (step_vec && !TD_IS_ERR(step_vec)) td_release(step_vec);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t* sdata = (int64_t*)td_data(step_vec);
+    int64_t* ndata = (int64_t*)td_data(node_vec);
+
+    /* xorshift64 PRNG seeded from source node */
+    uint64_t rng = (uint64_t)start_node * 6364136223846793005ULL + 1442695040888963407ULL;
+    if (rng == 0) rng = 1;
+
+    int64_t current = start_node;
+    int64_t count = 0;
+    for (int64_t i = 0; i < total; i++) {
+        sdata[i] = i;
+        ndata[i] = current;
+        count++;
+        if (i < walk_len) {
+            int64_t deg = fwd_off[current + 1] - fwd_off[current];
+            if (deg == 0) break;  /* dead end */
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            int64_t pick = (int64_t)(rng % (uint64_t)deg);
+            current = fwd_tgt[fwd_off[current] + pick];
+        }
+    }
+
+    step_vec->len = count;
+    node_vec->len = count;
+
+    td_t* result = td_table_new(2);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(step_vec); td_release(node_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    result = td_table_add_col(result, td_sym_intern("_step", 5), step_vec);
+    td_release(step_vec);
+    result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    return result;
+}
+
+/* exec_astar: A* shortest path with Euclidean coordinate heuristic */
+static td_t* exec_astar(td_graph_t* g, td_op_t* op,
+                         td_t* src_val, td_t* dst_val) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
+    if (!rel->fwd.props) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    td_t* np = (td_t*)ext->graph.node_props;
+    if (!np) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    int64_t m = rel->fwd.n_edges;
+    int64_t src_id = src_val->i64;
+    int64_t dst_id = dst_val->i64;
+
+    if (src_id < 0 || src_id >= n) return TD_ERR_PTR(TD_ERR_RANGE);
+    if (dst_id < 0 || dst_id >= n) return TD_ERR_PTR(TD_ERR_RANGE);
+
+    /* Resolve weight column from edge properties */
+    int64_t weight_sym = ext->graph.weight_col_sym;
+    td_t* weight_vec = td_table_get_col(rel->fwd.props, weight_sym);
+    if (!weight_vec || TD_IS_ERR(weight_vec)) return TD_ERR_PTR(TD_ERR_SCHEMA);
+    double* weights_arr = (double*)td_data(weight_vec);
+
+    /* Resolve coordinate columns from node properties */
+    td_t* lat_vec = td_table_get_col(np, ext->graph.coord_col_syms[0]);
+    td_t* lon_vec = td_table_get_col(np, ext->graph.coord_col_syms[1]);
+    if (!lat_vec || !lon_vec) return TD_ERR_PTR(TD_ERR_SCHEMA);
+    double* lat = (double*)td_data(lat_vec);
+    double* lon = (double*)td_data(lon_vec);
+
+    int64_t heap_cap = (m > n ? m : n) + 1;
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    double*  dist_a    = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    bool*    visited = (bool*)td_scratch_arena_push(&arena, (size_t)n * sizeof(bool));
+    int64_t* depth_a   = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    dijk_entry_t* heap = (dijk_entry_t*)td_scratch_arena_push(&arena,
+                              (size_t)heap_cap * sizeof(dijk_entry_t));
+    if (!dist_a || !visited || !depth_a || !heap) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    memset(visited, 0, (size_t)n * sizeof(bool));
+    memset(depth_a, 0, (size_t)n * sizeof(int64_t));
+
+    for (int64_t i = 0; i < n; i++) dist_a[i] = 1e308;
+    dist_a[src_id] = 0.0;
+
+    /* A* uses f = g + h; heap stores f-cost for priority ordering */
+    double dx = lat[src_id] - lat[dst_id];
+    double dy = lon[src_id] - lon[dst_id];
+    double h0 = sqrt(dx * dx + dy * dy);
+    int64_t heap_size = 0;
+    dijk_heap_push(heap, &heap_size, h0, src_id);
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* fwd_row = (int64_t*)td_data(rel->fwd.rowmap);
+
+    while (heap_size > 0) {
+        dijk_entry_t top = dijk_heap_pop(heap, &heap_size);
+        int64_t u = top.node;
+        if (visited[u]) continue;
+        visited[u] = true;
+
+        if (u == dst_id) break;
+
+        for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
+            int64_t v = fwd_tgt[j];
+            int64_t edge_row = fwd_row[j];
+            double w = weights_arr[edge_row];
+            double new_dist = dist_a[u] + w;
+            if (new_dist < dist_a[v]) {
+                dist_a[v] = new_dist;
+                depth_a[v] = depth_a[u] + 1;
+                /* f = g + h (Euclidean heuristic) */
+                double hdx = lat[v] - lat[dst_id];
+                double hdy = lon[v] - lon[dst_id];
+                double hv = sqrt(hdx * hdx + hdy * hdy);
+                dijk_heap_push(heap, &heap_size, new_dist + hv, v);
+            }
+        }
+    }
+
+    /* Collect reachable nodes */
+    int64_t acount = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (dist_a[i] < 1e308) acount++;
+    }
+
+    td_t* node_vec  = td_vec_new(TD_I64, acount);
+    td_t* dist_vec  = td_vec_new(TD_F64, acount);
+    td_t* depth_vec = td_vec_new(TD_I64, acount);
+    if (!node_vec || TD_IS_ERR(node_vec) ||
+        !dist_vec || TD_IS_ERR(dist_vec) ||
+        !depth_vec || TD_IS_ERR(depth_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        if (dist_vec && !TD_IS_ERR(dist_vec)) td_release(dist_vec);
+        if (depth_vec && !TD_IS_ERR(depth_vec)) td_release(depth_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t* ndata_a = (int64_t*)td_data(node_vec);
+    double*  ddata_a = (double*)td_data(dist_vec);
+    int64_t* hdata_a = (int64_t*)td_data(depth_vec);
+    int64_t idx = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (dist_a[i] < 1e308) {
+            ndata_a[idx] = i;
+            ddata_a[idx] = dist_a[i];
+            hdata_a[idx] = depth_a[i];
+            idx++;
+        }
+    }
+    node_vec->len = acount;
+    dist_vec->len = acount;
+    depth_vec->len = acount;
+
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(3);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(node_vec);
+        td_release(dist_vec);
+        td_release(depth_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    result = td_table_add_col(result, td_sym_intern("_dist", 5), dist_vec);
+    td_release(dist_vec);
+    result = td_table_add_col(result, td_sym_intern("_depth", 6), depth_vec);
+    td_release(depth_vec);
+
+    return result;
+}
+
+/* exec_k_shortest: Yen's k-shortest paths via iterative masked Dijkstra */
+static td_t* exec_k_shortest(td_graph_t* g, td_op_t* op,
+                               td_t* src_val, td_t* dst_val) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel || !rel->fwd.props) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    int64_t m = rel->fwd.n_edges;
+    int64_t src_id = src_val->i64;
+    int64_t dst_id = dst_val->i64;
+    uint16_t K = ext->graph.max_iter;
+
+    if (src_id < 0 || src_id >= n || dst_id < 0 || dst_id >= n)
+        return TD_ERR_PTR(TD_ERR_RANGE);
+
+    int64_t weight_sym = ext->graph.weight_col_sym;
+    td_t* weight_vec = td_table_get_col(rel->fwd.props, weight_sym);
+    if (!weight_vec || TD_IS_ERR(weight_vec)) return TD_ERR_PTR(TD_ERR_SCHEMA);
+    double* weights_k = (double*)td_data(weight_vec);
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* fwd_row = (int64_t*)td_data(rel->fwd.rowmap);
+
+    int64_t heap_cap = (m > n ? m : n) + 1;
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    /* Dijkstra working arrays */
+    double*       dist_arr  = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    int64_t*      parent    = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    bool*         vis       = (bool*)td_scratch_arena_push(&arena, (size_t)n * sizeof(bool));
+    dijk_entry_t* heap      = (dijk_entry_t*)td_scratch_arena_push(&arena,
+                                    (size_t)heap_cap * sizeof(dijk_entry_t));
+    bool*         node_mask = (bool*)td_scratch_arena_push(&arena, (size_t)n * sizeof(bool));
+    bool*         edge_mask = (bool*)td_scratch_arena_push(&arena, (size_t)m * sizeof(bool));
+
+    /* Path storage: K paths, each up to n nodes */
+    int64_t* paths_data = (int64_t*)td_scratch_arena_push(&arena, (size_t)K * (size_t)n * sizeof(int64_t));
+    int64_t* path_lens  = (int64_t*)td_scratch_arena_push(&arena, (size_t)K * sizeof(int64_t));
+    double*  path_costs = (double*)td_scratch_arena_push(&arena, (size_t)K * sizeof(double));
+
+    /* Candidate storage */
+    int64_t max_cand = (int64_t)K * n;
+    if (max_cand > 4096) max_cand = 4096;
+    int64_t* cand_data  = (int64_t*)td_scratch_arena_push(&arena, (size_t)max_cand * (size_t)n * sizeof(int64_t));
+    int64_t* cand_lens  = (int64_t*)td_scratch_arena_push(&arena, (size_t)max_cand * sizeof(int64_t));
+    double*  cand_costs = (double*)td_scratch_arena_push(&arena, (size_t)max_cand * sizeof(double));
+
+    /* Temp buffer for path reconstruction */
+    int64_t* tmp_path = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+
+    if (!dist_arr || !parent || !vis || !heap || !node_mask || !edge_mask ||
+        !paths_data || !path_lens || !path_costs ||
+        !cand_data || !cand_lens || !cand_costs || !tmp_path) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t num_found = 0;
+    int64_t num_cand  = 0;
+
+    /* Step 1: Find shortest path P[0] */
+    double d = dijkstra_masked(fwd_off, fwd_tgt, fwd_row, weights_k, n,
+                                src_id, dst_id, NULL, NULL,
+                                dist_arr, parent, heap, vis);
+
+    if (d >= 1e308) {
+        td_scratch_arena_reset(&arena);
+        td_t* nv = td_vec_new(TD_I64, 0); nv->len = 0;
+        td_t* dv = td_vec_new(TD_F64, 0); dv->len = 0;
+        td_t* pv = td_vec_new(TD_I64, 0); pv->len = 0;
+        td_t* result = td_table_new(3);
+        result = td_table_add_col(result, td_sym_intern("_path_id", 8), pv); td_release(pv);
+        result = td_table_add_col(result, td_sym_intern("_node", 5), nv); td_release(nv);
+        result = td_table_add_col(result, td_sym_intern("_dist", 5), dv); td_release(dv);
+        return result;
+    }
+
+    /* Reconstruct P[0] from parent array (reverse then flip) */
+    int64_t plen = 0;
+    for (int64_t v = dst_id; v != -1; v = parent[v]) {
+        tmp_path[plen++] = v;
+        if (plen > n) break;  /* safety: avoid infinite loop on corrupt parent */
+    }
+    for (int64_t i = 0; i < plen / 2; i++) {
+        int64_t tmp = tmp_path[i];
+        tmp_path[i] = tmp_path[plen - 1 - i];
+        tmp_path[plen - 1 - i] = tmp;
+    }
+
+    memcpy(&paths_data[0], tmp_path, (size_t)plen * sizeof(int64_t));
+    path_lens[0] = plen;
+    path_costs[0] = d;
+    num_found = 1;
+
+    /* Step 2: Iteratively find paths P[1]..P[K-1] */
+    for (uint16_t k = 1; k < K; k++) {
+        int64_t* prev_path = &paths_data[(int64_t)(k - 1) * n];
+        int64_t prev_len = path_lens[k - 1];
+
+        for (int64_t i = 0; i < prev_len - 1; i++) {
+            int64_t spur_node = prev_path[i];
+
+            /* Compute root path cost */
+            double root_cost = 0.0;
+            for (int64_t r = 0; r < i; r++) {
+                int64_t from = prev_path[r];
+                int64_t to   = prev_path[r + 1];
+                for (int64_t e = fwd_off[from]; e < fwd_off[from + 1]; e++) {
+                    if (fwd_tgt[e] == to) {
+                        root_cost += weights_k[fwd_row[e]];
+                        break;
+                    }
+                }
+            }
+
+            /* Mask edges used by found paths sharing the root prefix */
+            memset(edge_mask, 0, (size_t)m * sizeof(bool));
+            memset(node_mask, 0, (size_t)n * sizeof(bool));
+
+            for (int64_t j = 0; j < num_found; j++) {
+                int64_t* pj = &paths_data[j * n];
+                int64_t pj_len = path_lens[j];
+                if (pj_len <= i) continue;
+
+                bool same_prefix = true;
+                for (int64_t r = 0; r <= i; r++) {
+                    if (pj[r] != prev_path[r]) { same_prefix = false; break; }
+                }
+                if (!same_prefix) continue;
+
+                int64_t from = pj[i];
+                int64_t to   = pj[i + 1];
+                for (int64_t e = fwd_off[from]; e < fwd_off[from + 1]; e++) {
+                    if (fwd_tgt[e] == to) { edge_mask[e] = true; break; }
+                }
+            }
+
+            /* Mask root path nodes except spur node */
+            for (int64_t r = 0; r < i; r++) {
+                node_mask[prev_path[r]] = true;
+            }
+
+            /* Dijkstra from spur to dst with masks */
+            double spur_dist = dijkstra_masked(fwd_off, fwd_tgt, fwd_row, weights_k, n,
+                                                spur_node, dst_id, node_mask, edge_mask,
+                                                dist_arr, parent, heap, vis);
+            if (spur_dist >= 1e308) continue;
+
+            /* Reconstruct spur path */
+            int64_t spur_len = 0;
+            for (int64_t v = dst_id; v != -1; v = parent[v]) {
+                tmp_path[spur_len++] = v;
+                if (spur_len > n) break;
+            }
+            for (int64_t a = 0; a < spur_len / 2; a++) {
+                int64_t tmp = tmp_path[a];
+                tmp_path[a] = tmp_path[spur_len - 1 - a];
+                tmp_path[spur_len - 1 - a] = tmp;
+            }
+
+            double total_cost = root_cost + spur_dist;
+            int64_t total_len = i + spur_len;
+            if (total_len > n || num_cand >= max_cand) continue;
+
+            /* Check for duplicate candidates */
+            bool dup = false;
+            for (int64_t c = 0; c < num_cand && !dup; c++) {
+                if (cand_lens[c] != total_len) continue;
+                bool same = true;
+                int64_t* cp = &cand_data[c * n];
+                for (int64_t r = 0; r < i && same; r++) {
+                    if (cp[r] != prev_path[r]) same = false;
+                }
+                for (int64_t r = 0; r < spur_len && same; r++) {
+                    if (cp[i + r] != tmp_path[r]) same = false;
+                }
+                if (same) dup = true;
+            }
+            /* Check against already-found paths */
+            for (int64_t f = 0; f < num_found && !dup; f++) {
+                if (path_lens[f] != total_len) continue;
+                bool same = true;
+                int64_t* fp = &paths_data[f * n];
+                for (int64_t r = 0; r < i && same; r++) {
+                    if (fp[r] != prev_path[r]) same = false;
+                }
+                for (int64_t r = 0; r < spur_len && same; r++) {
+                    if (fp[i + r] != tmp_path[r]) same = false;
+                }
+                if (same) dup = true;
+            }
+            if (dup) continue;
+
+            /* Store candidate: root_path[0..i-1] + spur_path */
+            int64_t* cp = &cand_data[num_cand * n];
+            memcpy(cp, prev_path, (size_t)i * sizeof(int64_t));
+            memcpy(cp + i, tmp_path, (size_t)spur_len * sizeof(int64_t));
+            cand_lens[num_cand] = total_len;
+            cand_costs[num_cand] = total_cost;
+            num_cand++;
+        }
+
+        if (num_cand == 0) break;
+
+        /* Pick cheapest candidate */
+        int64_t best = 0;
+        for (int64_t c = 1; c < num_cand; c++) {
+            if (cand_costs[c] < cand_costs[best]) best = c;
+        }
+
+        memcpy(&paths_data[(int64_t)k * n], &cand_data[best * n],
+               (size_t)cand_lens[best] * sizeof(int64_t));
+        path_lens[k] = cand_lens[best];
+        path_costs[k] = cand_costs[best];
+        num_found++;
+
+        /* Remove used candidate (swap with last) */
+        if (best < num_cand - 1) {
+            memcpy(&cand_data[best * n], &cand_data[(num_cand - 1) * n],
+                   (size_t)cand_lens[num_cand - 1] * sizeof(int64_t));
+            cand_lens[best] = cand_lens[num_cand - 1];
+            cand_costs[best] = cand_costs[num_cand - 1];
+        }
+        num_cand--;
+    }
+
+    /* Build output: _path_id, _node, _dist (running dist along each path) */
+    int64_t total_rows = 0;
+    for (int64_t k = 0; k < num_found; k++) total_rows += path_lens[k];
+
+    td_t* pid_vec  = td_vec_new(TD_I64, total_rows);
+    td_t* node_vec = td_vec_new(TD_I64, total_rows);
+    td_t* dist_vec = td_vec_new(TD_F64, total_rows);
+    if (!pid_vec  || TD_IS_ERR(pid_vec) ||
+        !node_vec || TD_IS_ERR(node_vec) ||
+        !dist_vec || TD_IS_ERR(dist_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (pid_vec  && !TD_IS_ERR(pid_vec))  td_release(pid_vec);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        if (dist_vec && !TD_IS_ERR(dist_vec)) td_release(dist_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t* pids  = (int64_t*)td_data(pid_vec);
+    int64_t* nodes_k = (int64_t*)td_data(node_vec);
+    double*  dists = (double*)td_data(dist_vec);
+
+    int64_t row = 0;
+    for (int64_t k = 0; k < num_found; k++) {
+        int64_t* path = &paths_data[k * n];
+        int64_t pk_len = path_lens[k];
+        double running = 0.0;
+        for (int64_t j = 0; j < pk_len; j++) {
+            pids[row]  = k;
+            nodes_k[row] = path[j];
+            if (j > 0) {
+                int64_t from = path[j - 1];
+                int64_t to   = path[j];
+                for (int64_t e = fwd_off[from]; e < fwd_off[from + 1]; e++) {
+                    if (fwd_tgt[e] == to) {
+                        running += weights_k[fwd_row[e]];
+                        break;
+                    }
+                }
+            }
+            dists[row] = running;
+            row++;
+        }
+    }
+
+    pid_vec->len  = total_rows;
+    node_vec->len = total_rows;
+    dist_vec->len = total_rows;
+
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(3);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(pid_vec); td_release(node_vec); td_release(dist_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    result = td_table_add_col(result, td_sym_intern("_path_id", 8), pid_vec);
+    td_release(pid_vec);
+    result = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    result = td_table_add_col(result, td_sym_intern("_dist", 5), dist_vec);
+    td_release(dist_vec);
     return result;
 }
 
@@ -14695,8 +15251,36 @@ static td_t* exec_node(td_graph_t* g, td_op_t* op) {
             return exec_louvain(g, op);
         }
 
-        case OP_LOCAL_CLUSTERING_COEFF: {
-            return exec_local_clustering_coeff(g, op);
+        case OP_CLUSTER_COEFF: {
+            return exec_cluster_coeff(g, op);
+        }
+
+        case OP_RANDOM_WALK: {
+            td_t* src = exec_node(g, op->inputs[0]);
+            if (!src || TD_IS_ERR(src)) return src;
+            td_t* result = exec_random_walk(g, op, src);
+            td_release(src);
+            return result;
+        }
+
+        case OP_ASTAR: {
+            td_t* src = exec_node(g, op->inputs[0]);
+            if (!src || TD_IS_ERR(src)) return src;
+            td_t* dst = exec_node(g, op->inputs[1]);
+            if (!dst || TD_IS_ERR(dst)) { td_release(src); return dst; }
+            td_t* result = exec_astar(g, op, src, dst);
+            td_release(src); td_release(dst);
+            return result;
+        }
+
+        case OP_K_SHORTEST: {
+            td_t* src = exec_node(g, op->inputs[0]);
+            if (!src || TD_IS_ERR(src)) return src;
+            td_t* dst = exec_node(g, op->inputs[1]);
+            if (!dst || TD_IS_ERR(dst)) { td_release(src); return dst; }
+            td_t* result = exec_k_shortest(g, op, src, dst);
+            td_release(src); td_release(dst);
+            return result;
         }
 
         case OP_COSINE_SIM: {

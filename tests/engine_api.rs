@@ -1390,6 +1390,125 @@ fn graph_clustering_coefficient_dag() {
     }
 }
 
+#[test]
+fn graph_random_walk() {
+    let _guard = lock();
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let src = g.const_i64(0).unwrap();
+    let rw = g.random_walk(src, &rel, 10).unwrap();
+    let result = g.execute(rw).unwrap();
+
+    // Should have up to 11 rows (start + 10 steps)
+    assert!(result.nrows() > 0, "should produce walk steps");
+    assert!(result.nrows() <= 11, "should not exceed walk_length + 1");
+
+    // First node should be source (0)
+    let first_node = result.get_i64(1, 0).unwrap();
+    assert_eq!(first_node, 0, "walk should start at source node");
+
+    // All nodes should be valid (0..4)
+    for i in 0..result.nrows() as usize {
+        let node = result.get_i64(1, i).unwrap();
+        assert!(node >= 0 && node < 5, "node {node} out of range");
+    }
+}
+
+#[test]
+fn graph_astar() {
+    let _guard = lock();
+    // Weighted edges with node coordinates
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst,weight").unwrap();
+    writeln!(f, "0,1,1.0").unwrap();
+    writeln!(f, "0,2,4.0").unwrap();
+    writeln!(f, "1,3,2.0").unwrap();
+    writeln!(f, "2,3,1.0").unwrap();
+    writeln!(f, "3,4,3.0").unwrap();
+    writeln!(f, "1,4,10.0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+    rel.set_props(&edges);
+
+    // Node properties with lat/lon
+    let mut np_file = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(np_file, "node,lat,lon").unwrap();
+    writeln!(np_file, "0,0.0,0.0").unwrap();
+    writeln!(np_file, "1,1.0,0.0").unwrap();
+    writeln!(np_file, "2,0.0,2.0").unwrap();
+    writeln!(np_file, "3,2.0,1.0").unwrap();
+    writeln!(np_file, "4,3.0,0.0").unwrap();
+    np_file.flush().unwrap();
+    let np_path = np_file.path().to_str().unwrap().to_string();
+    let node_props = ctx.read_csv(&np_path).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let src = g.const_i64(0).unwrap();
+    let dst = g.const_i64(4).unwrap();
+    let as_op = g.astar(src, dst, &rel, "weight", "lat", "lon", Some(&node_props), 255).unwrap();
+    let result = g.execute(as_op).unwrap();
+
+    assert!(result.nrows() > 0, "should find a path");
+
+    // Should find path 0->1->3->4 with distance 6.0
+    let nrows = result.nrows() as usize;
+    let mut found_dst = false;
+    for i in 0..nrows {
+        let node = result.get_i64(0, i).unwrap();
+        if node == 4 {
+            let dist = result.get_f64(1, i).unwrap();
+            assert!(
+                (dist - 6.0).abs() < 0.001,
+                "shortest distance to 4 should be 6.0, got {dist}"
+            );
+            found_dst = true;
+        }
+    }
+    assert!(found_dst, "destination node 4 should be in results");
+}
+
+#[test]
+fn graph_k_shortest() {
+    let _guard = lock();
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst,weight").unwrap();
+    writeln!(f, "0,1,1.0").unwrap();
+    writeln!(f, "0,2,4.0").unwrap();
+    writeln!(f, "1,3,2.0").unwrap();
+    writeln!(f, "2,3,1.0").unwrap();
+    writeln!(f, "3,4,3.0").unwrap();
+    writeln!(f, "1,4,10.0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+    rel.set_props(&edges);
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let src = g.const_i64(0).unwrap();
+    let dst = g.const_i64(4).unwrap();
+    let ks = g.k_shortest(src, dst, &rel, "weight", 3).unwrap();
+    let result = g.execute(ks).unwrap();
+
+    assert!(result.nrows() > 0, "should find at least one path");
+
+    // Check _path_id column exists (column 0 is _path_id)
+    // First row should have path_id 0 and dist 0.0 (source)
+    let first_pid = result.get_i64(0, 0).unwrap();
+    assert_eq!(first_pid, 0, "first path should have path_id 0");
+}
+
 // ---------------------------------------------------------------------------
 // Vector Similarity Tests
 // ---------------------------------------------------------------------------

@@ -5142,7 +5142,7 @@ fn unescape_sql_string(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Known graph algorithm function names.
-const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra", "clustering_coefficient", "local_clustering_coeff", "clustering_coeff"];
+const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra", "clustering_coefficient", "local_clustering_coeff", "clustering_coeff", "random_walk", "astar", "k_shortest"];
 
 /// Parse a COLUMNS expression to check if it's a graph algorithm function call.
 /// Returns `Some((func_name, args))` if the expression matches `FUNC(arg1, arg2, ...)`.
@@ -5319,7 +5319,10 @@ fn plan_algorithm_query(
                 "component" | "connected_component" => "_component",
                 "community" | "louvain" => "_community",
                 "shortest_distance" | "dijkstra" => "_dist",
-                "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => "_clustering_coeff",
+                "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => "_coefficient",
+                "random_walk" => "_node",
+                "astar" => "_dist",
+                "k_shortest" => "_dist",
                 _ => return Err(SqlError::Plan(format!("Unknown algorithm: {func_name}"))),
             };
             let default_alias = result_col_name.trim_start_matches('_');
@@ -5437,6 +5440,12 @@ fn execute_graph_algorithm(
                     .into(),
             ));
         }
+        "random_walk" | "astar" | "k_shortest" => {
+            return Err(SqlError::Plan(format!(
+                "{func_name}() requires source/destination arguments and is not supported in COLUMNS. \
+                 Use the Rust API (Graph::{func_name}) or the standalone table function."
+            )));
+        }
         _ => return Err(SqlError::Plan(format!(
             "Unknown graph algorithm: {func_name}"
         ))),
@@ -5471,6 +5480,11 @@ pub(crate) fn execute_standalone_algorithm(
         "connected_component" => g.connected_comp(&stored_rel.rel)?,
         "louvain" => g.louvain(&stored_rel.rel, 100)?,
         "clustering_coefficient" => g.clustering_coeff(&stored_rel.rel)?,
+        "random_walk" | "astar" | "k_shortest" => {
+            return Err(SqlError::Plan(format!(
+                "{algo_name}() requires source/destination arguments. Use the Rust API (Graph::{algo_name}) directly."
+            )));
+        }
         _ => return Err(SqlError::Plan(format!(
             "Unknown standalone graph algorithm: {algo_name}"
         ))),
@@ -5486,6 +5500,9 @@ pub(crate) fn execute_standalone_algorithm(
         "connected_component" => "_component",
         "louvain" => "_community",
         "clustering_coefficient" => "_coefficient",
+        "random_walk" => "_node",
+        "astar" => "_dist",
+        "k_shortest" => "_dist",
         _ => "_value",
     };
 

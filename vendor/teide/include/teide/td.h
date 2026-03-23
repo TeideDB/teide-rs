@@ -485,7 +485,15 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
 #define OP_KNN             90   /* brute-force K nearest neighbors        */
 #define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
-#define OP_LOCAL_CLUSTERING_COEFF 92 /* local clustering coefficient per node */
+#define OP_DEGREE_CENT     92   /* degree centrality                  */
+#define OP_TOPSORT         93   /* topological sort (Kahn's)          */
+#define OP_DFS             94   /* depth-first search traversal       */
+
+/* Opcodes — Graph algorithms (batch 2) */
+#define OP_ASTAR           95   /* A* shortest path (coordinate heuristic) */
+#define OP_K_SHORTEST      96   /* Yen's k-shortest paths                 */
+#define OP_CLUSTER_COEFF   97   /* clustering coefficients                */
+#define OP_RANDOM_WALK     98   /* random walk traversal                  */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -591,7 +599,9 @@ typedef struct td_op_ext {
             uint8_t   factorized;     /* 1 = emit factorized output (fvec) */
             uint16_t  max_iter;       /* PageRank/Louvain iterations  */
             double    damping;        /* PageRank damping factor      */
-            int64_t   weight_col_sym; /* Dijkstra weight column name  */
+            int64_t   weight_col_sym; /* Dijkstra/Astar/Yen weight column   */
+            int64_t   coord_col_syms[2]; /* A*: lat/lon property column names */
+            void*     node_props;       /* td_t* node property table (A*: coords) */
         } graph;
         struct {  /* OP_WCO_JOIN */
             void**    rels;           /* td_rel_t** array */
@@ -1006,6 +1016,18 @@ td_op_t* td_dijkstra(td_graph_t* g, td_op_t* src, td_op_t* dst,
                       uint8_t max_depth);
 td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel,
                      uint16_t max_iter);
+td_op_t* td_degree_cent(td_graph_t* g, td_rel_t* rel);
+td_op_t* td_topsort(td_graph_t* g, td_rel_t* rel);
+td_op_t* td_dfs(td_graph_t* g, td_op_t* src, td_rel_t* rel, uint8_t max_depth);
+td_op_t* td_astar(td_graph_t* g, td_op_t* src, td_op_t* dst,
+                  td_rel_t* rel, const char* weight_col,
+                  const char* lat_col, const char* lon_col,
+                  td_t* node_props, uint8_t max_depth);
+td_op_t* td_k_shortest(td_graph_t* g, td_op_t* src, td_op_t* dst,
+                       td_rel_t* rel, const char* weight_col, uint16_t k);
+td_op_t* td_cluster_coeff(td_graph_t* g, td_rel_t* rel);
+td_op_t* td_random_walk(td_graph_t* g, td_op_t* src, td_rel_t* rel,
+                        uint16_t walk_length);
 
 /* Vector similarity ops */
 td_op_t* td_cosine_sim(td_graph_t* g, td_op_t* emb_col,

@@ -961,9 +961,34 @@ extern "C" {
         rel: *mut td_rel_t,
         max_iter: u16,
     ) -> *mut td_op_t;
-    pub fn td_local_clustering_coeff(
+    pub fn td_cluster_coeff(
         g: *mut td_graph_t,
         rel: *mut td_rel_t,
+    ) -> *mut td_op_t;
+    pub fn td_random_walk(
+        g: *mut td_graph_t,
+        src: *mut td_op_t,
+        rel: *mut td_rel_t,
+        walk_length: u16,
+    ) -> *mut td_op_t;
+    pub fn td_astar(
+        g: *mut td_graph_t,
+        src: *mut td_op_t,
+        dst: *mut td_op_t,
+        rel: *mut td_rel_t,
+        weight_col: *const c_char,
+        lat_col: *const c_char,
+        lon_col: *const c_char,
+        node_props: *mut td_t,
+        max_depth: u8,
+    ) -> *mut td_op_t;
+    pub fn td_k_shortest(
+        g: *mut td_graph_t,
+        src: *mut td_op_t,
+        dst: *mut td_op_t,
+        rel: *mut td_rel_t,
+        weight_col: *const c_char,
+        k: u16,
     ) -> *mut td_op_t;
 
     // --- CSR / Relationship API ---

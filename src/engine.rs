@@ -2060,10 +2060,49 @@ impl<'a> Graph<'a> {
     }
 
     /// Local clustering coefficient per node.
-    /// Returns a table with `_node` (I64) and `_clustering_coeff` (F64) columns.
+    /// Returns a table with `_node` (I64) and `_coefficient` (F64) columns.
     pub fn clustering_coeff(&self, rel: &'a Rel) -> Result<Column> {
         Self::check_op(unsafe {
-            ffi::td_local_clustering_coeff(self.raw, rel.ptr)
+            ffi::td_cluster_coeff(self.raw, rel.ptr)
+        })
+    }
+
+    /// Random walk from a source node.
+    /// Returns a table with `_step` (I64) and `_node` (I64) columns.
+    pub fn random_walk(&self, src: Column, rel: &'a Rel, walk_length: u16) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_random_walk(self.raw, src.raw, rel.ptr, walk_length)
+        })
+    }
+
+    /// A* shortest path with Euclidean coordinate heuristic.
+    /// `node_props` is a table with lat/lon columns indexed by node ID.
+    /// Returns a table with `_node` (I64) and `_dist` (F64) columns.
+    pub fn astar(
+        &self, src: Column, dst: Column, rel: &'a Rel,
+        weight_col: &str, lat_col: &str, lon_col: &str,
+        node_props: Option<&Table>, max_depth: u8,
+    ) -> Result<Column> {
+        let c_w = CString::new(weight_col).map_err(|_| Error::InvalidInput)?;
+        let c_lat = CString::new(lat_col).map_err(|_| Error::InvalidInput)?;
+        let c_lon = CString::new(lon_col).map_err(|_| Error::InvalidInput)?;
+        let np_ptr = node_props.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+        Self::check_op(unsafe {
+            ffi::td_astar(self.raw, src.raw, dst.raw, rel.ptr,
+                         c_w.as_ptr(), c_lat.as_ptr(), c_lon.as_ptr(),
+                         np_ptr, max_depth)
+        })
+    }
+
+    /// Yen's k-shortest paths between two nodes.
+    /// Returns a table with `_path_id` (I64), `_node` (I64), `_dist` (F64) columns.
+    pub fn k_shortest(
+        &self, src: Column, dst: Column, rel: &'a Rel,
+        weight_col: &str, k: u16,
+    ) -> Result<Column> {
+        let c_col = CString::new(weight_col).map_err(|_| Error::InvalidInput)?;
+        Self::check_op(unsafe {
+            ffi::td_k_shortest(self.raw, src.raw, dst.raw, rel.ptr, c_col.as_ptr(), k)
         })
     }
 

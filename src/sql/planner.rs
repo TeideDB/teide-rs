@@ -2418,7 +2418,8 @@ fn resolve_table_function(
                 SqlError::Plan(format!("read_parted('{db_root}', '{table_name}'): {e}"))
             })
         }
-        "pagerank" | "connected_component" | "louvain" | "clustering_coefficient" => {
+        "pagerank" | "connected_component" | "louvain" | "clustering_coefficient"
+        | "random_walk" | "astar" | "k_shortest" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(SqlError::Plan(format!(
                     "{name}() requires 1-2 arguments: {name}('graph_name' [, 'edge_label'])"
@@ -2451,7 +2452,7 @@ fn resolve_table_function(
             Ok(result)
         }
         _ => Err(SqlError::Plan(format!(
-            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted(), pagerank(), connected_component(), louvain(), clustering_coefficient()"
+            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted(), pagerank(), connected_component(), louvain(), clustering_coefficient(), random_walk(), astar(), k_shortest()"
         ))),
     }
 }

@@ -1234,18 +1234,91 @@ td_op_t* td_louvain(td_graph_t* g, td_rel_t* rel, uint16_t max_iter) {
     return &g->nodes[ext->base.id];
 }
 
-td_op_t* td_local_clustering_coeff(td_graph_t* g, td_rel_t* rel) {
+td_op_t* td_cluster_coeff(td_graph_t* g, td_rel_t* rel) {
     if (!g || !rel) return NULL;
-
     td_op_ext_t* ext = graph_alloc_ext_node(g);
     if (!ext) return NULL;
-
-    ext->base.opcode   = OP_LOCAL_CLUSTERING_COEFF;
+    ext->base.opcode   = OP_CLUSTER_COEFF;
     ext->base.arity    = 0;
     ext->base.out_type = TD_TABLE;
     ext->base.est_rows = (uint32_t)rel->fwd.n_nodes;
     ext->graph.rel     = rel;
-    ext->graph.direction = 2;  /* both directions for undirected */
+    ext->graph.direction = 2;
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+td_op_t* td_random_walk(td_graph_t* g, td_op_t* src, td_rel_t* rel,
+                        uint16_t walk_length) {
+    if (!g || !src || !rel) return NULL;
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    uint32_t src_id = src->id;
+    src = &g->nodes[src_id];
+    ext->base.opcode    = OP_RANDOM_WALK;
+    ext->base.arity     = 1;
+    ext->base.inputs[0] = src;
+    ext->base.out_type  = TD_TABLE;
+    ext->base.est_rows  = walk_length + 1;
+    ext->graph.rel      = rel;
+    ext->graph.max_iter = walk_length;
+    ext->graph.direction = 0;
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+td_op_t* td_astar(td_graph_t* g, td_op_t* src, td_op_t* dst,
+                  td_rel_t* rel, const char* weight_col,
+                  const char* lat_col, const char* lon_col,
+                  td_t* node_props, uint8_t max_depth) {
+    if (!g || !src || !dst || !rel || !weight_col || !lat_col || !lon_col || !node_props)
+        return NULL;
+
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+
+    src = &g->nodes[src->id];
+    dst = &g->nodes[dst->id];
+
+    ext->base.opcode    = OP_ASTAR;
+    ext->base.arity     = 2;
+    ext->base.inputs[0] = src;
+    ext->base.inputs[1] = dst;
+    ext->base.out_type  = TD_TABLE;
+    ext->base.est_rows  = (uint32_t)rel->fwd.n_nodes;
+    ext->graph.rel       = rel;
+    ext->graph.direction = 0;
+    ext->graph.max_depth = max_depth;
+    ext->graph.weight_col_sym = td_sym_intern(weight_col, (int64_t)strlen(weight_col));
+    ext->graph.coord_col_syms[0] = td_sym_intern(lat_col, (int64_t)strlen(lat_col));
+    ext->graph.coord_col_syms[1] = td_sym_intern(lon_col, (int64_t)strlen(lon_col));
+    ext->graph.node_props = node_props;
+    td_retain(node_props);
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+td_op_t* td_k_shortest(td_graph_t* g, td_op_t* src, td_op_t* dst,
+                       td_rel_t* rel, const char* weight_col, uint16_t k) {
+    if (!g || !src || !dst || !rel || !weight_col || k == 0) return NULL;
+
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+
+    src = &g->nodes[src->id];
+    dst = &g->nodes[dst->id];
+
+    ext->base.opcode    = OP_K_SHORTEST;
+    ext->base.arity     = 2;
+    ext->base.inputs[0] = src;
+    ext->base.inputs[1] = dst;
+    ext->base.out_type  = TD_TABLE;
+    ext->base.est_rows  = (uint32_t)(k * rel->fwd.n_nodes);
+    ext->graph.rel       = rel;
+    ext->graph.direction = 0;
+    ext->graph.max_iter  = k;
+    ext->graph.weight_col_sym = td_sym_intern(weight_col, (int64_t)strlen(weight_col));
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
