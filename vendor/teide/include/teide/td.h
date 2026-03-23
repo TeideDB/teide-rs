@@ -485,6 +485,7 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
 #define OP_KNN             90   /* brute-force K nearest neighbors        */
 #define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
+#define OP_LOCAL_CLUSTERING_COEFF 92 /* local clustering coefficient per node */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70

@@ -1332,7 +1332,6 @@ fn graph_louvain() {
 }
 
 #[test]
-#[ignore = "td_local_clustering_coeff not yet implemented in upstream C engine"]
 fn graph_clustering_coefficient() {
     let _guard = lock();
     // Build a complete triangle (K3) with mutual edges: 0↔1, 1↔2, 0↔2
@@ -1367,7 +1366,6 @@ fn graph_clustering_coefficient() {
 }
 
 #[test]
-#[ignore = "td_local_clustering_coeff not yet implemented in upstream C engine"]
 fn graph_clustering_coefficient_dag() {
     let _guard = lock();
     // DAG with no triangles: 0→1, 0→2, 1→3, 2→3, 3→4
@@ -2083,7 +2081,6 @@ fn order_by_similarity_without_index() {
 }
 
 #[test]
-#[ignore = "td_rel_neighbors not yet implemented in upstream C engine"]
 fn test_rel_neighbors() {
     let _guard = lock();
     let ctx = Context::new().unwrap();

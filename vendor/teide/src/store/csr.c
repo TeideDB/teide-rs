@@ -499,3 +499,18 @@ td_rel_t* td_rel_load(const char* dir) {
 td_rel_t* td_rel_mmap(const char* dir) {
     return rel_load_impl(dir, true);
 }
+
+/* --- Public CSR neighbor access ------------------------------------------- */
+
+const int64_t* td_rel_neighbors(td_rel_t* rel, int64_t node,
+                                 uint8_t direction, int64_t* out_count) {
+    if (!rel) { if (out_count) *out_count = 0; return NULL; }
+    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
+    return td_csr_neighbors(csr, node, out_count);
+}
+
+int64_t td_rel_n_nodes(td_rel_t* rel, uint8_t direction) {
+    if (!rel) return 0;
+    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
+    return csr->n_nodes;
+}

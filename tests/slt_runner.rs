@@ -401,3 +401,4 @@ fn slt_guide_graph_queries() {
 fn slt_str() {
     run_slt("tests/slt/str.slt");
 }
+

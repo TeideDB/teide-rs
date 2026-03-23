@@ -4127,7 +4127,7 @@ fn parse_list_text(text: &str) -> Vec<ListAtom> {
         .collect()
 }
 
-/// Convert text columns (TD_SYM with "[...]" values) to real TD_LIST columns.
+/// Convert text columns (TD_SYM/TD_STR with "[...]" values) to real TD_LIST columns.
 ///
 /// Called after the wrapper SQL has executed, so sort/filter operations
 /// work on the text representation; only the final result gets real LIST columns.

@@ -105,8 +105,7 @@ pub fn format_cell(table: &crate::Table, col: usize, row: usize, emb_dim: i32) -
                 Some(s.to_string())
             }
         }
-        ffi::TD_STR => table.get_str(col, row),
-        ffi::TD_SYM => table.get_str(col, row),
+        ffi::TD_STR | ffi::TD_SYM => table.get_str(col, row),
         _ => Some("<unsupported>".to_string()),
     }
 }

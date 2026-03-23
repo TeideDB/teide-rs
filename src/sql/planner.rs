@@ -4016,24 +4016,9 @@ fn replicate_column(
         // The engine supports W8/W16/W32/W64 symbol storage; we must not assume W32.
         let (sym_id, src_width): (i64, u8) = if col_type < 0 {
             // Atom: symbol ID is in val.i64_
-            let id = if col_type == crate::ffi::TD_ATOM_STR {
-                let ptr = unsafe { crate::ffi::td_str_ptr(col) };
-                let slen = unsafe { crate::ffi::td_str_len(col) };
-                let s = if ptr.is_null() || slen == 0 {
-                    ""
-                } else {
-                    unsafe {
-                        std::str::from_utf8(std::slice::from_raw_parts(
-                            ptr as *const u8,
-                            slen,
-                        ))
-                        .unwrap_or("")
-                    }
-                };
-                crate::sym_intern(s)?
-            } else {
-                unsafe { (*col).val.i64_ }
-            };
+            // (TD_ATOM_STR is handled by the is_str branch above, so only
+            //  TD_SYM atoms reach here.)
+            let id = unsafe { (*col).val.i64_ };
             // Choose minimum width that fits the symbol ID.
             let w = sym_width_for_id(id);
             (id, w)
@@ -4575,16 +4560,24 @@ where
     if vec.is_null() || crate::ffi_is_err(vec) {
         return Err(SqlError::Engine(crate::Error::Oom));
     }
-    for (_out_row, src_row) in rows {
-        let mut out_len: usize = 0;
-        let ptr =
-            unsafe { crate::ffi::td_str_vec_get(src as *mut crate::td_t, src_row as i64, &mut out_len) };
+    for (out_row, src_row) in rows {
+        let is_null = unsafe { crate::ffi::td_vec_is_null(src as *mut crate::td_t, src_row as i64) };
+        let (ptr, out_len) = if is_null {
+            (std::ptr::null(), 0usize)
+        } else {
+            let mut len: usize = 0;
+            let p = unsafe { crate::ffi::td_str_vec_get(src as *mut crate::td_t, src_row as i64, &mut len) };
+            (p, len)
+        };
         let next = unsafe { crate::ffi::td_str_vec_append(vec, ptr, out_len) };
         if next.is_null() || crate::ffi_is_err(next) {
             unsafe { crate::ffi_release(vec) };
             return Err(SqlError::Engine(crate::Error::Oom));
         }
         vec = next;
+        if is_null {
+            unsafe { crate::ffi::td_vec_set_null(vec, out_row as i64, true) };
+        }
     }
     Ok(vec)
 }
@@ -4651,21 +4644,21 @@ fn convert_str_keys_to_sym(
                 unsafe { crate::ffi_release(new_tbl) };
                 return Err(SqlError::Engine(crate::Error::Oom));
             }
+            // Always append to maintain positional alignment, then mark nulls.
             for (row, &id) in sym_ids.iter().enumerate() {
+                let appended = unsafe {
+                    crate::ffi::td_vec_append(
+                        sym_vec,
+                        &id as *const i64 as *const std::ffi::c_void,
+                    )
+                };
+                if appended.is_null() || crate::ffi_is_err(appended) {
+                    unsafe { crate::ffi_release(sym_vec) };
+                    unsafe { crate::ffi_release(new_tbl) };
+                    return Err(SqlError::Engine(crate::Error::Oom));
+                }
                 if unsafe { crate::ffi::td_vec_is_null(col, row as i64) } {
                     unsafe { crate::ffi::td_vec_set_null(sym_vec, row as i64, true) };
-                } else {
-                    let appended = unsafe {
-                        crate::ffi::td_vec_append(
-                            sym_vec,
-                            &id as *const i64 as *const std::ffi::c_void,
-                        )
-                    };
-                    if appended.is_null() || crate::ffi_is_err(appended) {
-                        unsafe { crate::ffi_release(sym_vec) };
-                        unsafe { crate::ffi_release(new_tbl) };
-                        return Err(SqlError::Engine(crate::Error::Oom));
-                    }
                 }
             }
             sym_vec
