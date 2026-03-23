@@ -1097,12 +1097,12 @@ impl Table {
     unsafe fn read_str_from_vec(vec: *mut ffi::td_t, t: i8, row: usize) -> Option<String> {
         match t {
             ffi::TD_STR => {
+                if unsafe { ffi::td_vec_is_null(vec, row as i64) } {
+                    return None;
+                }
                 let mut out_len: usize = 0;
                 let ptr = unsafe { ffi::td_str_vec_get(vec, row as i64, &mut out_len) };
                 if ptr.is_null() || out_len == 0 {
-                    if unsafe { ffi::td_vec_is_null(vec, row as i64) } {
-                        return None;
-                    }
                     return Some(String::new());
                 }
                 unsafe {

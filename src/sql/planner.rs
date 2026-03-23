@@ -4778,7 +4778,7 @@ fn exec_cross_join(
         let new_col = if col_type == crate::ffi::TD_STR {
             copy_str_vec_rows(
                 col,
-                (0..l_nrows).flat_map(|lr| (0..r_nrows).map(move |_rr| (0usize, lr))),
+                (0..l_nrows).flat_map(|lr| (0..r_nrows).enumerate().map(move |(i, _)| (lr * r_nrows + i, lr))),
             )?
         } else {
             let esz = col_elem_size(col);
@@ -4821,7 +4821,7 @@ fn exec_cross_join(
         let new_col = if col_type == crate::ffi::TD_STR {
             copy_str_vec_rows(
                 col,
-                (0..l_nrows).flat_map(|_| (0..r_nrows).map(|rr| (0usize, rr))),
+                (0..l_nrows).enumerate().flat_map(|(li, _)| (0..r_nrows).map(move |rr| (li * r_nrows + rr, rr))),
             )?
         } else {
             let esz = col_elem_size(col);
@@ -5067,6 +5067,13 @@ unsafe fn setop_str_bytes(col: &SetOpCol, row: usize) -> &[u8] {
         row,
         col.len
     );
+    // Check null first to distinguish NULL from empty string
+    if unsafe { crate::ffi::td_vec_is_null(col.vec_ptr as *mut crate::td_t, row as i64) } {
+        // Use a sentinel byte that cannot appear in valid UTF-8 string bytes
+        // to distinguish NULL from empty string in hashing/comparison
+        static NULL_SENTINEL: [u8; 1] = [0xFF];
+        return &NULL_SENTINEL;
+    }
     let mut out_len: usize = 0;
     let ptr = unsafe {
         crate::ffi::td_str_vec_get(col.vec_ptr as *mut crate::td_t, row as i64, &mut out_len)
