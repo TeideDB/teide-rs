@@ -5142,7 +5142,7 @@ fn unescape_sql_string(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Known graph algorithm function names.
-const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra", "clustering_coefficient", "local_clustering_coeff", "clustering_coeff", "random_walk", "astar", "k_shortest"];
+const ALGO_FUNCTIONS: &[&str] = &["pagerank", "component", "connected_component", "community", "louvain", "shortest_distance", "dijkstra", "clustering_coefficient", "local_clustering_coeff", "clustering_coeff", "random_walk", "astar", "k_shortest", "betweenness", "closeness", "mst"];
 
 /// Parse a COLUMNS expression to check if it's a graph algorithm function call.
 /// Returns `Some((func_name, args))` if the expression matches `FUNC(arg1, arg2, ...)`.
@@ -5323,6 +5323,8 @@ fn plan_algorithm_query(
                 "random_walk" => "_node",
                 "astar" => "_dist",
                 "k_shortest" => "_dist",
+                "betweenness" | "closeness" => "_centrality",
+                "mst" => "_weight",
                 _ => return Err(SqlError::Plan(format!("Unknown algorithm: {func_name}"))),
             };
             let default_alias = result_col_name.trim_start_matches('_');
@@ -5433,6 +5435,15 @@ fn execute_graph_algorithm(
         "clustering_coefficient" | "local_clustering_coeff" | "clustering_coeff" => {
             g.clustering_coeff(&stored_rel.rel)?
         }
+        "betweenness" => g.betweenness(&stored_rel.rel, 0)?,
+        "closeness" => g.closeness(&stored_rel.rel, 0)?,
+        "mst" => {
+            return Err(SqlError::Plan(
+                "mst() returns edges (_src, _dst, _weight), not per-node values. \
+                 Use the standalone table function mst('graph') instead."
+                    .into(),
+            ));
+        }
         "shortest_distance" | "dijkstra" => {
             return Err(SqlError::Plan(
                 "SHORTEST_DISTANCE() is not supported as a COLUMNS function in node-only MATCH patterns. \
@@ -5480,6 +5491,9 @@ pub(crate) fn execute_standalone_algorithm(
         "connected_component" => g.connected_comp(&stored_rel.rel)?,
         "louvain" => g.louvain(&stored_rel.rel, 100)?,
         "clustering_coefficient" => g.clustering_coeff(&stored_rel.rel)?,
+        "betweenness" => g.betweenness(&stored_rel.rel, 0)?,
+        "closeness" => g.closeness(&stored_rel.rel, 0)?,
+        "mst" => g.mst(&stored_rel.rel, "weight")?,
         "random_walk" | "astar" | "k_shortest" => {
             return Err(SqlError::Plan(format!(
                 "{algo_name}() requires source/destination arguments. Use the Rust API (Graph::{algo_name}) directly."
@@ -5492,44 +5506,58 @@ pub(crate) fn execute_standalone_algorithm(
 
     let result = g.execute(result_col)?;
 
-    // The result table from the C engine has one column of computed values.
-    // Build a CSV with _node (0-based row index) + _value column.
     let nrows = result.nrows() as usize;
-    let value_col_name = match algo_name {
-        "pagerank" => "_rank",
-        "connected_component" => "_component",
-        "louvain" => "_community",
-        "clustering_coefficient" => "_coefficient",
-        "random_walk" => "_node",
-        "astar" => "_dist",
-        "k_shortest" => "_dist",
-        _ => "_value",
-    };
 
-    let mut csv = format!("_node,{value_col_name}\n");
-    let result_type = result.col_type(0);
-    for row in 0..nrows {
-        csv.push_str(&row.to_string());
-        csv.push(',');
-        match result_type {
-            7 => { // TD_F64
-                if let Some(v) = result.get_f64(0, row) {
-                    csv.push_str(&format!("{v}"));
-                } else {
-                    csv.push_str("NULL");
-                }
-            }
-            4..=6 => { // TD_I16..TD_I64
-                if let Some(v) = result.get_i64(0, row) {
-                    csv.push_str(&format!("{v}"));
-                } else {
-                    csv.push_str("NULL");
-                }
-            }
-            _ => csv.push_str("NULL"),
+    // MST returns a 3-column table (_src, _dst, _weight) — handle specially.
+    let csv = if algo_name == "mst" {
+        let mut csv = String::from("_src,_dst,_weight\n");
+        for row in 0..nrows {
+            let src = result.get_i64(0, row).unwrap_or(0);
+            let dst = result.get_i64(1, row).unwrap_or(0);
+            let w = result.get_f64(2, row).unwrap_or(0.0);
+            csv.push_str(&format!("{src},{dst},{w}\n"));
         }
-        csv.push('\n');
-    }
+        csv
+    } else {
+        // Per-node result: _node (0-based row index) + algorithm-specific value column.
+        let value_col_name = match algo_name {
+            "pagerank" => "_rank",
+            "connected_component" => "_component",
+            "louvain" => "_community",
+            "clustering_coefficient" => "_coefficient",
+            "betweenness" | "closeness" => "_centrality",
+            "random_walk" => "_node",
+            "astar" => "_dist",
+            "k_shortest" => "_dist",
+            _ => "_value",
+        };
+
+        let mut csv = format!("_node,{value_col_name}\n");
+        let result_type = result.col_type(0);
+        for row in 0..nrows {
+            csv.push_str(&row.to_string());
+            csv.push(',');
+            match result_type {
+                7 => { // TD_F64
+                    if let Some(v) = result.get_f64(0, row) {
+                        csv.push_str(&format!("{v}"));
+                    } else {
+                        csv.push_str("NULL");
+                    }
+                }
+                4..=6 => { // TD_I16..TD_I64
+                    if let Some(v) = result.get_i64(0, row) {
+                        csv.push_str(&format!("{v}"));
+                    } else {
+                        csv.push_str("NULL");
+                    }
+                }
+                _ => csv.push_str("NULL"),
+            }
+            csv.push('\n');
+        }
+        csv
+    };
 
     // Write CSV to temp file, read back as Table
     let tmp_path = std::env::temp_dir().join(format!(

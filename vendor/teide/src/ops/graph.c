@@ -1415,6 +1415,51 @@ td_op_t* td_knn(td_graph_t* g, td_op_t* emb_col,
     return &g->nodes[ext->base.id];
 }
 
+td_op_t* td_betweenness(td_graph_t* g, td_rel_t* rel, uint16_t sample_size) {
+    if (!g || !rel) return NULL;
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    ext->base.opcode   = OP_BETWEENNESS;
+    ext->base.arity    = 0;
+    ext->base.out_type = TD_TABLE;
+    ext->base.est_rows = (uint32_t)rel->fwd.n_nodes;
+    ext->graph.rel       = rel;
+    ext->graph.direction = 2;  /* undirected BFS */
+    ext->graph.max_iter  = sample_size;  /* 0 = exact */
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+td_op_t* td_closeness(td_graph_t* g, td_rel_t* rel, uint16_t sample_size) {
+    if (!g || !rel) return NULL;
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    ext->base.opcode   = OP_CLOSENESS;
+    ext->base.arity    = 0;
+    ext->base.out_type = TD_TABLE;
+    ext->base.est_rows = (uint32_t)rel->fwd.n_nodes;
+    ext->graph.rel       = rel;
+    ext->graph.direction = 2;  /* undirected BFS */
+    ext->graph.max_iter  = sample_size;  /* 0 = exact */
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+td_op_t* td_mst(td_graph_t* g, td_rel_t* rel, const char* weight_col) {
+    if (!g || !rel || !weight_col) return NULL;
+    td_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    ext->base.opcode   = OP_MST;
+    ext->base.arity    = 0;
+    ext->base.out_type = TD_TABLE;
+    ext->base.est_rows = (uint32_t)(rel->fwd.n_nodes > 0 ? rel->fwd.n_nodes - 1 : 0);
+    ext->graph.rel     = rel;
+    ext->graph.direction = 2;
+    ext->graph.weight_col_sym = td_sym_intern(weight_col, (int64_t)strlen(weight_col));
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 td_op_t* td_hnsw_knn(td_graph_t* g, td_hnsw_t* idx,
                        const float* query_vec, int32_t dim,
                        int64_t k, int32_t ef_search) {

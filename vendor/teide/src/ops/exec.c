@@ -31,6 +31,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <float.h>
 #include <ctype.h>
 
@@ -13723,6 +13724,401 @@ static td_t* exec_cluster_coeff(td_graph_t* g, td_op_t* op) {
 }
 
 /* --------------------------------------------------------------------------
+ * exec_betweenness: Brandes' algorithm for betweenness centrality.
+ * BFS from each source, accumulate dependency scores backward.
+ * O(n*m) exact, O(sample*m) approximate when sample_size > 0.
+ * -------------------------------------------------------------------------- */
+static td_t* exec_betweenness(td_graph_t* g, td_op_t* op) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
+    uint16_t sample = ext->graph.max_iter;
+    int64_t n_sources = (sample > 0 && (int64_t)sample < n) ? (int64_t)sample : n;
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* rev_off = (int64_t*)td_data(rel->rev.offsets);
+    int64_t* rev_tgt = (int64_t*)td_data(rel->rev.targets);
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    double*  cb      = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    double*  sigma   = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    double*  delta   = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    int64_t* dist    = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    int64_t* queue   = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    int64_t* stack   = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+
+    /* Predecessor storage: flat array sized to total edges, with per-node counts */
+    int64_t m_total = rel->fwd.n_edges + rel->rev.n_edges;
+    if (m_total == 0) m_total = 1;
+    int64_t* pred_data  = (int64_t*)td_scratch_arena_push(&arena, (size_t)m_total * sizeof(int64_t));
+    int64_t* pred_off   = (int64_t*)td_scratch_arena_push(&arena, (size_t)(n + 1) * sizeof(int64_t));
+
+    if (!cb || !sigma || !delta || !dist || !queue || !stack ||
+        !pred_data || !pred_off) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    memset(cb, 0, (size_t)n * sizeof(double));
+
+    int64_t stride = (sample > 0 && (int64_t)sample < n) ? (n / n_sources) : 1;
+
+    for (int64_t si = 0; si < n_sources; si++) {
+        int64_t s = (si * stride) % n;
+
+        /* Initialize */
+        for (int64_t i = 0; i < n; i++) {
+            sigma[i] = 0.0;
+            delta[i] = 0.0;
+            dist[i]  = -1;
+        }
+        sigma[s] = 1.0;
+        dist[s]  = 0;
+        int64_t pred_total = 0;
+        memset(pred_off, 0, (size_t)(n + 1) * sizeof(int64_t));
+
+        /* BFS from s */
+        int64_t q_head = 0, q_tail = 0;
+        int64_t stack_top = 0;
+        queue[q_tail++] = s;
+
+        while (q_head < q_tail) {
+            int64_t v = queue[q_head++];
+            stack[stack_top++] = v;
+
+            /* Forward neighbors */
+            for (int64_t j = fwd_off[v]; j < fwd_off[v + 1]; j++) {
+                int64_t w = fwd_tgt[j];
+                if (dist[w] < 0) {
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+                if (dist[w] == dist[v] + 1) {
+                    sigma[w] += sigma[v];
+                    if (pred_total < m_total) {
+                        pred_data[pred_total++] = v;
+                        pred_off[w + 1]++;
+                    }
+                }
+            }
+            /* Reverse neighbors (undirected) */
+            for (int64_t j = rev_off[v]; j < rev_off[v + 1]; j++) {
+                int64_t w = rev_tgt[j];
+                if (dist[w] < 0) {
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+                if (dist[w] == dist[v] + 1) {
+                    sigma[w] += sigma[v];
+                    if (pred_total < m_total) {
+                        pred_data[pred_total++] = v;
+                        pred_off[w + 1]++;
+                    }
+                }
+            }
+        }
+
+        /* Convert pred_off counts to cumulative offsets */
+        for (int64_t i = 1; i <= n; i++)
+            pred_off[i] += pred_off[i - 1];
+
+        /* Back-propagation of dependencies */
+        while (stack_top > 0) {
+            int64_t w = stack[--stack_top];
+            for (int64_t pi = pred_off[w]; pi < pred_off[w + 1]; pi++) {
+                int64_t v = pred_data[pi];
+                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+            }
+            if (w != s) cb[w] += delta[w];
+        }
+    }
+
+    /* Normalize if sampled */
+    if (sample > 0 && (int64_t)sample < n) {
+        double scale = (double)n / (double)sample;
+        for (int64_t i = 0; i < n; i++) cb[i] *= scale;
+    }
+
+    /* Build result table */
+    td_t* node_vec = td_vec_new(TD_I64, n);
+    td_t* cent_vec = td_vec_new(TD_F64, n);
+    if (!node_vec || TD_IS_ERR(node_vec) || !cent_vec || TD_IS_ERR(cent_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        if (cent_vec && !TD_IS_ERR(cent_vec)) td_release(cent_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    int64_t* ndata = (int64_t*)td_data(node_vec);
+    double*  cdata = (double*)td_data(cent_vec);
+    for (int64_t i = 0; i < n; i++) { ndata[i] = i; cdata[i] = cb[i]; }
+    node_vec->len = n;
+    cent_vec->len = n;
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(2);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(node_vec); td_release(cent_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    td_t* tmp = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    if (!tmp || TD_IS_ERR(tmp)) { td_release(result); td_release(cent_vec); return TD_ERR_PTR(TD_ERR_OOM); }
+    result = tmp;
+    tmp = td_table_add_col(result, td_sym_intern("_centrality", 11), cent_vec);
+    td_release(cent_vec);
+    if (!tmp || TD_IS_ERR(tmp)) { td_release(result); return TD_ERR_PTR(TD_ERR_OOM); }
+    result = tmp;
+    return result;
+}
+
+/* --------------------------------------------------------------------------
+ * exec_closeness: closeness centrality via BFS distance sums.
+ * closeness[v] = (reachable - 1) / sum_dist[v]. O(n*m) exact,
+ * O(sample*m) approximate when sample_size > 0.
+ * -------------------------------------------------------------------------- */
+static td_t* exec_closeness(td_graph_t* g, td_op_t* op) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
+    uint16_t sample = ext->graph.max_iter;
+    int64_t n_sources = (sample > 0 && (int64_t)sample < n) ? (int64_t)sample : n;
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* rev_off = (int64_t*)td_data(rel->rev.offsets);
+    int64_t* rev_tgt = (int64_t*)td_data(rel->rev.targets);
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    double*  closeness = (double*)td_scratch_arena_push(&arena, (size_t)n * sizeof(double));
+    int64_t* dist      = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    int64_t* queue     = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+
+    if (!closeness || !dist || !queue) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    memset(closeness, 0, (size_t)n * sizeof(double));
+
+    int64_t stride = (sample > 0 && (int64_t)sample < n) ? (n / n_sources) : 1;
+
+    for (int64_t si = 0; si < n_sources; si++) {
+        int64_t s = (si * stride) % n;
+
+        /* Initialize distances */
+        for (int64_t i = 0; i < n; i++) dist[i] = -1;
+        dist[s] = 0;
+
+        /* BFS from s */
+        int64_t q_head = 0, q_tail = 0;
+        queue[q_tail++] = s;
+
+        while (q_head < q_tail) {
+            int64_t v = queue[q_head++];
+
+            /* Forward neighbors */
+            for (int64_t j = fwd_off[v]; j < fwd_off[v + 1]; j++) {
+                int64_t w = fwd_tgt[j];
+                if (dist[w] < 0) {
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+            }
+            /* Reverse neighbors (undirected) */
+            for (int64_t j = rev_off[v]; j < rev_off[v + 1]; j++) {
+                int64_t w = rev_tgt[j];
+                if (dist[w] < 0) {
+                    dist[w] = dist[v] + 1;
+                    queue[q_tail++] = w;
+                }
+            }
+        }
+
+        /* Sum distances and count reachable nodes */
+        int64_t sum_dist = 0;
+        int64_t reachable = 0;
+        for (int64_t i = 0; i < n; i++) {
+            if (dist[i] > 0) {
+                sum_dist += dist[i];
+                reachable++;
+            }
+        }
+
+        if (reachable > 0 && sum_dist > 0) {
+            closeness[s] = (double)reachable / (double)sum_dist;
+        }
+    }
+
+    /* Build result table */
+    td_t* node_vec = td_vec_new(TD_I64, n);
+    td_t* cent_vec = td_vec_new(TD_F64, n);
+    if (!node_vec || TD_IS_ERR(node_vec) || !cent_vec || TD_IS_ERR(cent_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (node_vec && !TD_IS_ERR(node_vec)) td_release(node_vec);
+        if (cent_vec && !TD_IS_ERR(cent_vec)) td_release(cent_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    int64_t* ndata = (int64_t*)td_data(node_vec);
+    double*  cdata = (double*)td_data(cent_vec);
+    for (int64_t i = 0; i < n; i++) { ndata[i] = i; cdata[i] = closeness[i]; }
+    node_vec->len = n;
+    cent_vec->len = n;
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(2);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(node_vec); td_release(cent_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    td_t* tmp = td_table_add_col(result, td_sym_intern("_node", 5), node_vec);
+    td_release(node_vec);
+    if (!tmp || TD_IS_ERR(tmp)) { td_release(result); td_release(cent_vec); return TD_ERR_PTR(TD_ERR_OOM); }
+    result = tmp;
+    tmp = td_table_add_col(result, td_sym_intern("_centrality", 11), cent_vec);
+    td_release(cent_vec);
+    if (!tmp || TD_IS_ERR(tmp)) { td_release(result); return TD_ERR_PTR(TD_ERR_OOM); }
+    result = tmp;
+    return result;
+}
+
+/* --------------------------------------------------------------------------
+ * exec_mst: Minimum Spanning Tree / Forest via Kruskal's algorithm.
+ * Collects weighted edges from forward CSR, sorts by weight, builds MST
+ * using union-find with path compression and union by rank.
+ * -------------------------------------------------------------------------- */
+typedef struct { double w; int64_t src; int64_t dst; } mst_edge_t;
+
+static int mst_edge_cmp(const void* a, const void* b) {
+    double da = ((const mst_edge_t*)a)->w;
+    double db = ((const mst_edge_t*)b)->w;
+    return (da > db) - (da < db);
+}
+
+static int64_t uf_find(int64_t* parent, int64_t x) {
+    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+}
+
+static bool uf_union(int64_t* parent, int64_t* rank_arr, int64_t a, int64_t b) {
+    a = uf_find(parent, a); b = uf_find(parent, b);
+    if (a == b) return false;
+    if (rank_arr[a] < rank_arr[b]) { int64_t tmp = a; a = b; b = tmp; }
+    parent[b] = a;
+    if (rank_arr[a] == rank_arr[b]) rank_arr[a]++;
+    return true;
+}
+
+static td_t* exec_mst(td_graph_t* g, td_op_t* op) {
+    td_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return TD_ERR_PTR(TD_ERR_NYI);
+    td_rel_t* rel = (td_rel_t*)ext->graph.rel;
+    if (!rel || !rel->fwd.props) return TD_ERR_PTR(TD_ERR_SCHEMA);
+
+    int64_t n = rel->fwd.n_nodes;
+    int64_t m = rel->fwd.n_edges;
+    if (n <= 0) return TD_ERR_PTR(TD_ERR_LENGTH);
+
+    int64_t weight_sym = ext->graph.weight_col_sym;
+    td_t* weight_vec = td_table_get_col(rel->fwd.props, weight_sym);
+    if (!weight_vec || weight_vec->type != TD_F64) return TD_ERR_PTR(TD_ERR_SCHEMA);
+    double* weights = (double*)td_data(weight_vec);
+
+    int64_t* fwd_off = (int64_t*)td_data(rel->fwd.offsets);
+    int64_t* fwd_tgt = (int64_t*)td_data(rel->fwd.targets);
+    int64_t* fwd_row = (int64_t*)td_data(rel->fwd.rowmap);
+
+    td_scratch_arena_t arena;
+    td_scratch_arena_init(&arena);
+
+    mst_edge_t* edges_arr = (mst_edge_t*)td_scratch_arena_push(&arena,
+                                (size_t)m * sizeof(mst_edge_t));
+    int64_t* uf_parent = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    int64_t* uf_rank   = (int64_t*)td_scratch_arena_push(&arena, (size_t)n * sizeof(int64_t));
+    if (!edges_arr || !uf_parent || !uf_rank) {
+        td_scratch_arena_reset(&arena);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    /* Fill edge array from forward CSR */
+    int64_t ei = 0;
+    for (int64_t u = 0; u < n; u++) {
+        for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
+            edges_arr[ei].src = u;
+            edges_arr[ei].dst = fwd_tgt[j];
+            edges_arr[ei].w   = weights[fwd_row[j]];
+            ei++;
+        }
+    }
+
+    /* Sort edges by weight */
+    qsort(edges_arr, (size_t)ei, sizeof(mst_edge_t), mst_edge_cmp);
+
+    /* Initialize union-find */
+    for (int64_t i = 0; i < n; i++) { uf_parent[i] = i; uf_rank[i] = 0; }
+
+    /* Build MST */
+    int64_t max_mst = n - 1;
+    int64_t mst_count = 0;
+    td_t* src_vec = td_vec_new(TD_I64, max_mst);
+    td_t* dst_vec = td_vec_new(TD_I64, max_mst);
+    td_t* wt_vec  = td_vec_new(TD_F64, max_mst);
+    if (!src_vec || TD_IS_ERR(src_vec) ||
+        !dst_vec || TD_IS_ERR(dst_vec) ||
+        !wt_vec  || TD_IS_ERR(wt_vec)) {
+        td_scratch_arena_reset(&arena);
+        if (src_vec && !TD_IS_ERR(src_vec)) td_release(src_vec);
+        if (dst_vec && !TD_IS_ERR(dst_vec)) td_release(dst_vec);
+        if (wt_vec  && !TD_IS_ERR(wt_vec))  td_release(wt_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+
+    int64_t* sdata = (int64_t*)td_data(src_vec);
+    int64_t* ddata = (int64_t*)td_data(dst_vec);
+    double*  wdata = (double*)td_data(wt_vec);
+
+    for (int64_t i = 0; i < ei && mst_count < max_mst; i++) {
+        if (uf_union(uf_parent, uf_rank, edges_arr[i].src, edges_arr[i].dst)) {
+            sdata[mst_count] = edges_arr[i].src;
+            ddata[mst_count] = edges_arr[i].dst;
+            wdata[mst_count] = edges_arr[i].w;
+            mst_count++;
+        }
+    }
+
+    src_vec->len = mst_count;
+    dst_vec->len = mst_count;
+    wt_vec->len  = mst_count;
+
+    td_scratch_arena_reset(&arena);
+
+    td_t* result = td_table_new(3);
+    if (!result || TD_IS_ERR(result)) {
+        td_release(src_vec); td_release(dst_vec); td_release(wt_vec);
+        return TD_ERR_PTR(TD_ERR_OOM);
+    }
+    result = td_table_add_col(result, td_sym_intern("_src", 4), src_vec);
+    td_release(src_vec);
+    result = td_table_add_col(result, td_sym_intern("_dst", 4), dst_vec);
+    td_release(dst_vec);
+    result = td_table_add_col(result, td_sym_intern("_weight", 7), wt_vec);
+    td_release(wt_vec);
+    return result;
+}
+
+/* --------------------------------------------------------------------------
  * exec_random_walk: random walk from source node using xorshift64 PRNG.
  * -------------------------------------------------------------------------- */
 static td_t* exec_random_walk(td_graph_t* g, td_op_t* op, td_t* src_val) {
@@ -15253,6 +15649,18 @@ static td_t* exec_node(td_graph_t* g, td_op_t* op) {
 
         case OP_CLUSTER_COEFF: {
             return exec_cluster_coeff(g, op);
+        }
+
+        case OP_BETWEENNESS: {
+            return exec_betweenness(g, op);
+        }
+
+        case OP_CLOSENESS: {
+            return exec_closeness(g, op);
+        }
+
+        case OP_MST: {
+            return exec_mst(g, op);
         }
 
         case OP_RANDOM_WALK: {

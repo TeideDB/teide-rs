@@ -990,6 +990,21 @@ extern "C" {
         weight_col: *const c_char,
         k: u16,
     ) -> *mut td_op_t;
+    pub fn td_betweenness(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+        sample_size: u16,
+    ) -> *mut td_op_t;
+    pub fn td_closeness(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+        sample_size: u16,
+    ) -> *mut td_op_t;
+    pub fn td_mst(
+        g: *mut td_graph_t,
+        rel: *mut td_rel_t,
+        weight_col: *const c_char,
+    ) -> *mut td_op_t;
 
     // --- CSR / Relationship API ---
     pub fn td_rel_build(

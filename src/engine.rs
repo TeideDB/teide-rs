@@ -2106,6 +2106,33 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Betweenness centrality via Brandes' algorithm.
+    /// Returns a table with `_node` (I64) and `_centrality` (F64) columns.
+    /// `sample_size = 0` for exact computation, `> 0` for approximate sampling.
+    pub fn betweenness(&self, rel: &'a Rel, sample_size: u16) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_betweenness(self.raw, rel.ptr, sample_size)
+        })
+    }
+
+    /// Closeness centrality via BFS distance sums.
+    /// Returns a table with `_node` (I64) and `_centrality` (F64) columns.
+    /// `sample_size = 0` for exact computation, `> 0` for approximate sampling.
+    pub fn closeness(&self, rel: &'a Rel, sample_size: u16) -> Result<Column> {
+        Self::check_op(unsafe {
+            ffi::td_closeness(self.raw, rel.ptr, sample_size)
+        })
+    }
+
+    /// Minimum spanning tree/forest via Kruskal's algorithm.
+    /// Returns a table with `_src` (I64), `_dst` (I64), `_weight` (F64) columns.
+    pub fn mst(&self, rel: &'a Rel, weight_col: &str) -> Result<Column> {
+        let c_col = CString::new(weight_col).map_err(|_| Error::InvalidInput)?;
+        Self::check_op(unsafe {
+            ffi::td_mst(self.raw, rel.ptr, c_col.as_ptr())
+        })
+    }
+
     // --- Vector similarity helpers ---
 
     /// Validate a query vector: convert length to i32, reject empty, check

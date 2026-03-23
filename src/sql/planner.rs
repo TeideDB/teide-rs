@@ -2419,6 +2419,7 @@ fn resolve_table_function(
             })
         }
         "pagerank" | "connected_component" | "louvain" | "clustering_coefficient"
+        | "betweenness" | "closeness" | "mst"
         | "random_walk" | "astar" | "k_shortest" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(SqlError::Plan(format!(
@@ -2452,7 +2453,7 @@ fn resolve_table_function(
             Ok(result)
         }
         _ => Err(SqlError::Plan(format!(
-            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted(), pagerank(), connected_component(), louvain(), clustering_coefficient(), random_walk(), astar(), k_shortest()"
+            "Unknown table function '{name}'. Supported: read_csv(), read_splayed(), read_parted(), pagerank(), connected_component(), louvain(), clustering_coefficient(), betweenness(), closeness(), mst(), random_walk(), astar(), k_shortest()"
         ))),
     }
 }

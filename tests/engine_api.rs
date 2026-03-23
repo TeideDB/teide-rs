@@ -1510,6 +1510,123 @@ fn graph_k_shortest() {
 }
 
 // ---------------------------------------------------------------------------
+// Betweenness / Closeness / MST Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graph_betweenness() {
+    let _guard = lock();
+    // DAG: 0→1, 0→2, 1→3, 2→3 — nodes 1,2 are intermediaries
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let bc = g.betweenness(&rel, 0).unwrap(); // exact
+    let result = g.execute(bc).unwrap();
+
+    assert_eq!(result.nrows(), 5);
+    // All betweenness values should be >= 0
+    for i in 0..5 {
+        let v = result.get_f64(1, i).unwrap();
+        assert!(v >= 0.0, "node {i} betweenness should be >= 0, got {v}");
+    }
+}
+
+#[test]
+fn graph_betweenness_sampled() {
+    let _guard = lock();
+    let (_file, path) = create_edge_csv();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let bc = g.betweenness(&rel, 2).unwrap(); // sample 2 sources
+    let result = g.execute(bc).unwrap();
+
+    assert_eq!(result.nrows(), 5);
+    for i in 0..5 {
+        let v = result.get_f64(1, i).unwrap();
+        assert!(v >= 0.0, "node {i} sampled betweenness should be >= 0, got {v}");
+    }
+}
+
+#[test]
+fn graph_closeness() {
+    let _guard = lock();
+    // Use a connected graph: mutual edges for full connectivity
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst").unwrap();
+    writeln!(f, "0,1").unwrap();
+    writeln!(f, "1,0").unwrap();
+    writeln!(f, "1,2").unwrap();
+    writeln!(f, "2,1").unwrap();
+    writeln!(f, "0,2").unwrap();
+    writeln!(f, "2,0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 3, 3, true).unwrap();
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let cc = g.closeness(&rel, 0).unwrap(); // exact
+    let result = g.execute(cc).unwrap();
+
+    assert_eq!(result.nrows(), 3);
+    // All nodes in a connected graph should have positive closeness
+    for i in 0..3 {
+        let v = result.get_f64(1, i).unwrap();
+        assert!(v > 0.0, "node {i} closeness should be > 0, got {v}");
+        assert!(v <= 1.0, "node {i} closeness should be <= 1.0, got {v}");
+    }
+}
+
+#[test]
+fn graph_mst() {
+    let _guard = lock();
+    // Weighted edges: same graph as A* test
+    let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+    writeln!(f, "src,dst,weight").unwrap();
+    writeln!(f, "0,1,1.0").unwrap();
+    writeln!(f, "0,2,4.0").unwrap();
+    writeln!(f, "1,3,2.0").unwrap();
+    writeln!(f, "2,3,1.0").unwrap();
+    writeln!(f, "3,4,3.0").unwrap();
+    writeln!(f, "1,4,10.0").unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+    let ctx = Context::new().unwrap();
+    let edges = ctx.read_csv(&path).unwrap();
+
+    let rel = Rel::from_edges(&edges, "src", "dst", 5, 5, true).unwrap();
+    rel.set_props(&edges);
+
+    let mut g = ctx.graph(&edges).unwrap();
+    let mst_op = g.mst(&rel, "weight").unwrap();
+    let result = g.execute(mst_op).unwrap();
+
+    // MST of 5 nodes has 4 edges
+    assert_eq!(result.nrows(), 4);
+
+    // Total weight should be 7.0 (edges: 0-1(1), 2-3(1), 1-3(2), 3-4(3))
+    let mut total = 0.0;
+    for i in 0..4 {
+        let w = result.get_f64(2, i).unwrap();
+        total += w;
+    }
+    assert!(
+        (total - 7.0).abs() < 0.01,
+        "MST total weight should be 7.0, got {total}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Vector Similarity Tests
 // ---------------------------------------------------------------------------
 

@@ -494,6 +494,9 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_K_SHORTEST      96   /* Yen's k-shortest paths                 */
 #define OP_CLUSTER_COEFF   97   /* clustering coefficients                */
 #define OP_RANDOM_WALK     98   /* random walk traversal                  */
+#define OP_BETWEENNESS     99   /* betweenness centrality (Brandes)       */
+#define OP_CLOSENESS      100   /* closeness centrality                   */
+#define OP_MST            101   /* minimum spanning forest (Kruskal)      */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -1028,6 +1031,9 @@ td_op_t* td_k_shortest(td_graph_t* g, td_op_t* src, td_op_t* dst,
 td_op_t* td_cluster_coeff(td_graph_t* g, td_rel_t* rel);
 td_op_t* td_random_walk(td_graph_t* g, td_op_t* src, td_rel_t* rel,
                         uint16_t walk_length);
+td_op_t* td_betweenness(td_graph_t* g, td_rel_t* rel, uint16_t sample_size);
+td_op_t* td_closeness(td_graph_t* g, td_rel_t* rel, uint16_t sample_size);
+td_op_t* td_mst(td_graph_t* g, td_rel_t* rel, const char* weight_col);
 
 /* Vector similarity ops */
 td_op_t* td_cosine_sim(td_graph_t* g, td_op_t* emb_col,
