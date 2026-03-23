@@ -9893,6 +9893,20 @@ join_gather:;
         }
     }
 
+    /* Propagate TD_STR string pools from source to gathered columns */
+    {
+        int64_t si = 0;
+        for (int64_t c = 0; c < left_ncols && si < l_out_count; c++) {
+            td_t* col = td_table_get_col_idx(left_table, c);
+            if (!col) continue;
+            col_propagate_str_pool(l_out_cols[si], col);
+            si++;
+        }
+    }
+    for (int64_t i = 0; i < r_out_count; i++) {
+        col_propagate_str_pool(r_out_cols[i], r_src_cols[i]);
+    }
+
     /* Add columns to result */
     for (int64_t i = 0; i < l_out_count; i++) {
         result = td_table_add_col(result, l_out_names[i], l_out_cols[i]);

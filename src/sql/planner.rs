@@ -4562,14 +4562,14 @@ where
     }
     for (out_row, src_row) in rows {
         let is_null = unsafe { crate::ffi::td_vec_is_null(src as *mut crate::td_t, src_row as i64) };
-        let (ptr, out_len) = if is_null {
-            (std::ptr::null(), 0usize)
+        let next = if is_null {
+            // Append a zero-length empty placeholder for null rows instead of a null pointer
+            unsafe { crate::ffi::td_str_vec_append(vec, b"\0".as_ptr() as *const std::ffi::c_char, 0) }
         } else {
             let mut len: usize = 0;
             let p = unsafe { crate::ffi::td_str_vec_get(src as *mut crate::td_t, src_row as i64, &mut len) };
-            (p, len)
+            unsafe { crate::ffi::td_str_vec_append(vec, p, len) }
         };
-        let next = unsafe { crate::ffi::td_str_vec_append(vec, ptr, out_len) };
         if next.is_null() || crate::ffi_is_err(next) {
             unsafe { crate::ffi_release(vec) };
             return Err(SqlError::Engine(crate::Error::Oom));
@@ -4599,7 +4599,10 @@ fn convert_str_keys_to_sym(
     let ncols = table.ncols();
     let nrows = table.nrows();
 
-    // Check if any column is TD_STR
+    // Check if any column is TD_STR.
+    // We convert ALL TD_STR columns (not just named keys) because GROUP BY
+    // key names may be auto-generated aliases (e.g. `_gb_0` for `p.category`)
+    // that don't match physical column names.
     let mut has_str = false;
     for i in 0..ncols {
         if let Some(col) = table.get_col_idx(i) {
@@ -4628,18 +4631,18 @@ fn convert_str_keys_to_sym(
             let mut max_id: i64 = 0;
             let mut sym_ids: Vec<i64> = Vec::with_capacity(nrows as usize);
             for row in 0..nrows {
-                let mut out_len: usize = 0;
-                let ptr = unsafe { crate::ffi::td_str_vec_get(col, row, &mut out_len) };
                 if unsafe { crate::ffi::td_vec_is_null(col, row) } {
                     sym_ids.push(0); // null placeholder
                 } else {
+                    let mut out_len: usize = 0;
+                    let ptr = unsafe { crate::ffi::td_str_vec_get(col, row, &mut out_len) };
                     let id = unsafe { crate::ffi::td_sym_intern(ptr, out_len) };
                     if id > max_id { max_id = id; }
                     sym_ids.push(id);
                 }
             }
             let w = sym_width_for_id(max_id);
-            let sym_vec = unsafe { crate::ffi::td_sym_vec_new(w, nrows) };
+            let mut sym_vec = unsafe { crate::ffi::td_sym_vec_new(w, nrows) };
             if sym_vec.is_null() || crate::ffi_is_err(sym_vec) {
                 unsafe { crate::ffi_release(new_tbl) };
                 return Err(SqlError::Engine(crate::Error::Oom));
@@ -4657,6 +4660,7 @@ fn convert_str_keys_to_sym(
                     unsafe { crate::ffi_release(new_tbl) };
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
+                sym_vec = appended;
                 if unsafe { crate::ffi::td_vec_is_null(col, row as i64) } {
                     unsafe { crate::ffi::td_vec_set_null(sym_vec, row as i64, true) };
                 }
