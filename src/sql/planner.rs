@@ -969,7 +969,11 @@ fn plan_delete(session: &mut Session, delete: &Delete) -> Result<ExecResult, Sql
     };
 
     let new_nrows = new_table.nrows();
-    let deleted = old_nrows - new_nrows;
+    let deleted = if new_nrows >= 0 && new_nrows <= old_nrows {
+        old_nrows - new_nrows
+    } else {
+        0  /* defensive: avoid underflow if C engine returns unexpected value */
+    };
 
     let new_table = new_table.with_column_names(&columns)?;
 

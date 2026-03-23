@@ -669,7 +669,10 @@ impl Table {
                     ffi::td_release(new_raw);
                     return Err(err);
                 }
-                let name_id = sym_intern(name)?;
+                let name_id = match sym_intern(name) {
+                    Ok(id) => id,
+                    Err(e) => { ffi::td_release(new_raw); return Err(e); }
+                };
                 ffi::td_retain(col);
                 let next_raw = ffi::td_table_add_col(new_raw, name_id, col);
                 if next_raw.is_null() {
@@ -698,7 +701,10 @@ impl Table {
                 return Err(Error::Oom);
             }
             for &name in names {
-                let name_id = sym_intern(name)?;
+                let name_id = match sym_intern(name) {
+                    Ok(id) => id,
+                    Err(e) => { ffi::td_release(tbl); return Err(e); }
+                };
                 let col = ffi::td_table_get_col(self.raw, name_id);
                 if col.is_null() || ffi::td_is_err(col) {
                     ffi::td_release(tbl);
