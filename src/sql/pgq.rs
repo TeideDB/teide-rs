@@ -1831,7 +1831,7 @@ fn read_key_value(
             })?;
             Ok(KeyValue::Int(v))
         }
-        ffi::TD_SYM => {
+        ffi::TD_STR | ffi::TD_SYM => {
             let s = table.get_str(col_idx, row).ok_or_else(|| {
                 SqlError::Plan(format!(
                     "NULL value at row {row} in column '{col_name}' of '{table_name}'"
@@ -1938,7 +1938,7 @@ pub(super) fn remap_and_build_rel(
 fn get_cell_string(table: &Table, col: usize, row: usize) -> Result<String, SqlError> {
     let typ = table.col_type(col);
     match typ {
-        ffi::TD_SYM => {
+        ffi::TD_STR | ffi::TD_SYM => {
             if let Some(s) = table.get_str(col, row) {
                 return Ok(csv_quote(&s));
             }
@@ -2215,7 +2215,7 @@ fn read_scalar_from_table(
             Some(v) => Ok(ScalarValue::Float(v)),
             None => Ok(ScalarValue::Null),
         },
-        ffi::TD_SYM => match table.get_str(col_idx, row) {
+        ffi::TD_STR | ffi::TD_SYM => match table.get_str(col_idx, row) {
             Some(s) => Ok(ScalarValue::Str(s)),
             None => Ok(ScalarValue::Null),
         },
