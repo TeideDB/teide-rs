@@ -387,33 +387,43 @@ fn try_hnsw_knn(session: &Session, query: &Query) -> Result<Option<SqlResult>, S
                 if attrs & crate::ffi::TD_ATTR_HAS_NULLS != 0 {
                     return Ok(None);
                 }
-                let new_vec = col_vec_new(src_col, n_results as i64);
-                if new_vec.is_null() || crate::ffi_is_err(new_vec) {
-                    return Err(SqlError::Engine(crate::Error::Oom));
-                }
-                // Copy values at HNSW row IDs.
-                let elem_size = col_elem_size(src_col);
                 let src_nrows =
                     unsafe { crate::ffi::td_len(src_col as *const crate::ffi::td_t) } as i64;
-                let src_data = unsafe { crate::ffi::td_data(src_col) as *const u8 };
-                let dst_data = unsafe { crate::ffi::td_data(new_vec) as *mut u8 };
-                for (out_row, &(row_id, _)) in results.iter().enumerate() {
+                // Validate row IDs before copying.
+                for &(row_id, _) in results.iter() {
                     if row_id < 0 || row_id >= src_nrows {
-                        unsafe { crate::ffi_release(new_vec) };
                         return Err(SqlError::Plan(format!(
                             "KNN returned row_id {} out of range (table has {} rows)",
                             row_id, src_nrows
                         )));
                     }
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src_data.add(row_id as usize * elem_size),
-                            dst_data.add(out_row * elem_size),
-                            elem_size,
-                        );
-                    }
                 }
-                unsafe { (*new_vec).val.len = n_results as i64 };
+                let col_type = unsafe { (*src_col).type_ };
+                let new_vec = if col_type == crate::ffi::TD_STR {
+                    copy_str_vec_rows(
+                        src_col,
+                        results.iter().enumerate().map(|(o, &(r, _))| (o, r as usize)),
+                    )?
+                } else {
+                    let new_vec = col_vec_new(src_col, n_results as i64);
+                    if new_vec.is_null() || crate::ffi_is_err(new_vec) {
+                        return Err(SqlError::Engine(crate::Error::Oom));
+                    }
+                    let elem_size = col_elem_size(src_col);
+                    let src_data = unsafe { crate::ffi::td_data(src_col) as *const u8 };
+                    let dst_data = unsafe { crate::ffi::td_data(new_vec) as *mut u8 };
+                    for (out_row, &(row_id, _)) in results.iter().enumerate() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src_data.add(row_id as usize * elem_size),
+                                dst_data.add(out_row * elem_size),
+                                elem_size,
+                            );
+                        }
+                    }
+                    unsafe { (*new_vec).val.len = n_results as i64 };
+                    new_vec
+                };
                 let name_id = match crate::sym_intern(name) {
                     Ok(id) => id,
                     Err(e) => {
@@ -4525,10 +4535,36 @@ fn col_elem_size(col: *const crate::td_t) -> usize {
             crate::ffi::TD_SYM_W32 => 4,
             _ => 8,
         }
+    } else if col_type == crate::ffi::TD_STR {
+        16 // sizeof(td_str_t)
     } else {
         let sizes = unsafe { &crate::raw::td_type_sizes };
         sizes.get(col_type as usize).copied().unwrap_or(0) as usize
     }
+}
+
+/// Copy selected rows from a TD_STR vector into a new vector using the
+/// string vector API (pool-safe).  `row_iter` yields `(out_row, src_row)`.
+fn copy_str_vec_rows<I>(src: *const crate::td_t, rows: I) -> Result<*mut crate::td_t, SqlError>
+where
+    I: Iterator<Item = (usize, usize)>,
+{
+    let mut vec = unsafe { crate::raw::td_vec_new(crate::ffi::TD_STR, 0) };
+    if vec.is_null() || crate::ffi_is_err(vec) {
+        return Err(SqlError::Engine(crate::Error::Oom));
+    }
+    for (_out_row, src_row) in rows {
+        let mut out_len: usize = 0;
+        let ptr =
+            unsafe { crate::ffi::td_str_vec_get(src as *mut crate::td_t, src_row as i64, &mut out_len) };
+        let next = unsafe { crate::ffi::td_str_vec_append(vec, ptr, out_len) };
+        if next.is_null() || crate::ffi_is_err(next) {
+            unsafe { crate::ffi_release(vec) };
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        vec = next;
+    }
+    Ok(vec)
 }
 
 // ---------------------------------------------------------------------------
@@ -4622,25 +4658,38 @@ fn exec_cross_join(
             .get_col_idx(c)
             .ok_or_else(|| SqlError::Plan("CROSS JOIN: left column missing".into()))?;
         let name_id = left.col_name(c);
-        let esz = col_elem_size(col);
-        let new_col = col_vec_new(col, out_nrows as i64);
-        if new_col.is_null() {
-            return Err(SqlError::Engine(crate::Error::Oom));
-        }
-        if crate::ffi_is_err(new_col) {
-            return Err(engine_err_from_raw(new_col));
-        }
-        unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
-        let src = unsafe { crate::raw::td_data(col) };
-        let dst = unsafe { crate::raw::td_data(new_col) };
-        for lr in 0..l_nrows {
-            for rr in 0..r_nrows {
-                let out_row = lr * r_nrows + rr;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(lr * esz), dst.add(out_row * esz), esz);
+        let col_type = unsafe { (*col).type_ };
+        let new_col = if col_type == crate::ffi::TD_STR {
+            copy_str_vec_rows(
+                col,
+                (0..l_nrows).flat_map(|lr| (0..r_nrows).map(move |_rr| (0usize, lr))),
+            )?
+        } else {
+            let esz = col_elem_size(col);
+            let new_col = col_vec_new(col, out_nrows as i64);
+            if new_col.is_null() {
+                return Err(SqlError::Engine(crate::Error::Oom));
+            }
+            if crate::ffi_is_err(new_col) {
+                return Err(engine_err_from_raw(new_col));
+            }
+            unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
+            let src = unsafe { crate::raw::td_data(col) };
+            let dst = unsafe { crate::raw::td_data(new_col) };
+            for lr in 0..l_nrows {
+                for rr in 0..r_nrows {
+                    let out_row = lr * r_nrows + rr;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(lr * esz),
+                            dst.add(out_row * esz),
+                            esz,
+                        );
+                    }
                 }
             }
-        }
+            new_col
+        };
         let add_res = result.add_col(name_id, new_col);
         unsafe { crate::ffi_release(new_col) };
         add_res?;
@@ -4652,22 +4701,35 @@ fn exec_cross_join(
             .get_col_idx(c)
             .ok_or_else(|| SqlError::Plan("CROSS JOIN: right column missing".into()))?;
         let name_id = right.col_name(c);
-        let esz = col_elem_size(col);
-        let new_col = col_vec_new(col, out_nrows as i64);
-        if new_col.is_null() {
-            return Err(SqlError::Engine(crate::Error::Oom));
-        }
-        if crate::ffi_is_err(new_col) {
-            return Err(engine_err_from_raw(new_col));
-        }
-        unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
-        let src = unsafe { crate::raw::td_data(col) };
-        let dst = unsafe { crate::raw::td_data(new_col) };
-        for lr in 0..l_nrows {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.add(lr * r_nrows * esz), r_nrows * esz);
+        let col_type = unsafe { (*col).type_ };
+        let new_col = if col_type == crate::ffi::TD_STR {
+            copy_str_vec_rows(
+                col,
+                (0..l_nrows).flat_map(|_| (0..r_nrows).map(|rr| (0usize, rr))),
+            )?
+        } else {
+            let esz = col_elem_size(col);
+            let new_col = col_vec_new(col, out_nrows as i64);
+            if new_col.is_null() {
+                return Err(SqlError::Engine(crate::Error::Oom));
             }
-        }
+            if crate::ffi_is_err(new_col) {
+                return Err(engine_err_from_raw(new_col));
+            }
+            unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
+            let src = unsafe { crate::raw::td_data(col) };
+            let dst = unsafe { crate::raw::td_data(new_col) };
+            for lr in 0..l_nrows {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src,
+                        dst.add(lr * r_nrows * esz),
+                        r_nrows * esz,
+                    );
+                }
+            }
+            new_col
+        };
         let add_res = result.add_col(name_id, new_col);
         unsafe { crate::ffi_release(new_col) };
         add_res?;
@@ -4755,22 +4817,35 @@ fn exec_set_operation(
             .get_col_idx(c)
             .ok_or_else(|| SqlError::Plan("SET operation: column missing".into()))?;
         let name_id = left.col_name(c);
-        let esz = col_elem_size(col);
-        let new_col = col_vec_new(col, out_nrows as i64);
-        if new_col.is_null() {
-            return Err(SqlError::Engine(crate::Error::Oom));
-        }
-        if crate::ffi_is_err(new_col) {
-            return Err(engine_err_from_raw(new_col));
-        }
-        unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
-        let src = unsafe { crate::raw::td_data(col) };
-        let dst = unsafe { crate::raw::td_data(new_col) };
-        for (out_row, &in_row) in keep_indices.iter().enumerate() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.add(in_row * esz), dst.add(out_row * esz), esz);
+        let col_type = unsafe { (*col).type_ };
+        let new_col = if col_type == crate::ffi::TD_STR {
+            copy_str_vec_rows(
+                col,
+                keep_indices.iter().enumerate().map(|(o, &i)| (o, i)),
+            )?
+        } else {
+            let esz = col_elem_size(col);
+            let new_col = col_vec_new(col, out_nrows as i64);
+            if new_col.is_null() {
+                return Err(SqlError::Engine(crate::Error::Oom));
             }
-        }
+            if crate::ffi_is_err(new_col) {
+                return Err(engine_err_from_raw(new_col));
+            }
+            unsafe { crate::raw::td_set_len(new_col, out_nrows as i64) };
+            let src = unsafe { crate::raw::td_data(col) };
+            let dst = unsafe { crate::raw::td_data(new_col) };
+            for (out_row, &in_row) in keep_indices.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(in_row * esz),
+                        dst.add(out_row * esz),
+                        esz,
+                    );
+                }
+            }
+            new_col
+        };
         let add_res = result.add_col(name_id, new_col);
         unsafe { crate::ffi_release(new_col) };
         add_res?;
@@ -4786,6 +4861,8 @@ struct SetOpCol {
     elem_size: usize,
     len: usize,
     data: *const u8,
+    /// Raw vector pointer, needed for TD_STR to resolve pooled strings.
+    vec_ptr: *const crate::td_t,
 }
 
 fn collect_setop_columns(table: &Table, ncols: i64) -> Result<Vec<SetOpCol>, SqlError> {
@@ -4803,6 +4880,7 @@ fn collect_setop_columns(table: &Table, ncols: i64) -> Result<Vec<SetOpCol>, Sql
             elem_size,
             len,
             data,
+            vec_ptr: col,
         });
     }
     Ok(cols)
@@ -4814,7 +4892,11 @@ fn hash_setop_row(cols: &[SetOpCol], row: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for col in cols {
         col.col_type.hash(&mut hasher);
-        unsafe { setop_cell_bytes(col, row) }.hash(&mut hasher);
+        if col.col_type == crate::ffi::TD_STR {
+            unsafe { setop_str_bytes(col, row) }.hash(&mut hasher);
+        } else {
+            unsafe { setop_cell_bytes(col, row) }.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -4826,9 +4908,15 @@ fn setop_rows_equal(
     right_row: usize,
 ) -> bool {
     left_cols.iter().zip(right_cols.iter()).all(|(l, r)| {
-        l.col_type == r.col_type
-            && l.elem_size == r.elem_size
-            && unsafe { setop_cell_bytes(l, left_row) == setop_cell_bytes(r, right_row) }
+        if l.col_type != r.col_type {
+            return false;
+        }
+        if l.col_type == crate::ffi::TD_STR {
+            unsafe { setop_str_bytes(l, left_row) == setop_str_bytes(r, right_row) }
+        } else {
+            l.elem_size == r.elem_size
+                && unsafe { setop_cell_bytes(l, left_row) == setop_cell_bytes(r, right_row) }
+        }
     })
 }
 
@@ -4849,6 +4937,28 @@ unsafe fn setop_cell_bytes(col: &SetOpCol, row: usize) -> &[u8] {
     );
     let byte_offset = row * col.elem_size;
     unsafe { std::slice::from_raw_parts(col.data.add(byte_offset), col.elem_size) }
+}
+
+/// Return one TD_STR cell as resolved string bytes for comparison/hashing.
+///
+/// # Safety
+/// `col.vec_ptr` must point to a valid TD_STR vector with at least `row+1`
+/// elements.
+unsafe fn setop_str_bytes(col: &SetOpCol, row: usize) -> &[u8] {
+    assert!(
+        row < col.len,
+        "setop_str_bytes: row {} out of bounds (len {})",
+        row,
+        col.len
+    );
+    let mut out_len: usize = 0;
+    let ptr = unsafe {
+        crate::ffi::td_str_vec_get(col.vec_ptr as *mut crate::td_t, row as i64, &mut out_len)
+    };
+    if ptr.is_null() || out_len == 0 {
+        return &[];
+    }
+    unsafe { std::slice::from_raw_parts(ptr as *const u8, out_len) }
 }
 
 /// Apply ORDER BY and LIMIT from the outer query to a result.
