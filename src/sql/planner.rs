@@ -3835,7 +3835,7 @@ fn broadcast_short_columns(
             // Determine the vector type for the empty column.
             let vec_type = if col_type < 0 {
                 if col_type == crate::ffi::TD_ATOM_STR {
-                    crate::ffi::TD_SYM
+                    crate::ffi::TD_STR
                 } else {
                     -col_type
                 }
@@ -3937,7 +3937,7 @@ fn replicate_column(
     // Determine vector type and element size.
     let (vec_type, is_sym) = if col_type < 0 {
         if col_type == crate::ffi::TD_ATOM_STR {
-            (crate::ffi::TD_SYM, true)
+            (crate::ffi::TD_STR, false)
         } else {
             (-col_type, -col_type == crate::ffi::TD_SYM)
         }
@@ -3948,11 +3948,38 @@ fn replicate_column(
     // Read the single value to replicate.
     // For atoms: value is in the val union.  For 1-element vectors: value is at td_data offset.
     let elem_size = unsafe { crate::ffi::td_elem_size(vec_type) } as usize;
-    if elem_size == 0 && !is_sym {
+    let is_str = vec_type == crate::ffi::TD_STR;
+    if elem_size == 0 && !is_sym && !is_str {
         return Err(SqlError::Plan("cannot broadcast list-type column".into()));
     }
 
-    let new_vec = if is_sym {
+    let new_vec = if is_str {
+        // TD_STR broadcast: read source string, append N times
+        let (src_ptr, src_len) = if col_type < 0 {
+            // Atom: read SSO string
+            let ptr = unsafe { crate::ffi::td_str_ptr(col) };
+            let slen = unsafe { crate::ffi::td_str_len(col) };
+            (ptr, slen)
+        } else {
+            // 1-element vector: read via td_str_vec_get
+            let mut out_len: usize = 0;
+            let ptr = unsafe { crate::ffi::td_str_vec_get(col, 0, &mut out_len) };
+            (ptr, out_len)
+        };
+        let mut vec = unsafe { crate::ffi::td_vec_new(crate::ffi::TD_STR, 0) };
+        if vec.is_null() || crate::ffi_is_err(vec) {
+            return Err(SqlError::Engine(crate::Error::Oom));
+        }
+        for _ in 0..target_len {
+            let next = unsafe { crate::ffi::td_str_vec_append(vec, src_ptr, src_len) };
+            if next.is_null() || crate::ffi_is_err(next) {
+                unsafe { crate::ffi_release(vec) };
+                return Err(SqlError::Engine(crate::Error::Oom));
+            }
+            vec = next;
+        }
+        vec
+    } else if is_sym {
         // SYM columns: read the symbol ID and fill, preserving the source width.
         // The engine supports W8/W16/W32/W64 symbol storage; we must not assume W32.
         let (sym_id, src_width): (i64, u8) = if col_type < 0 {
@@ -4109,46 +4136,26 @@ fn scalar_table_to_vector_table(table: &Table) -> Result<Table, SqlError> {
             // Scalar atom: create a 1-element vector and copy the value.
             // For atoms, the value lives in the `val` union (bytes 24-31),
             // not at td_data() offset 32 which is for vector payloads.
-            // Special case: TD_ATOM_STR (-8) maps to TD_SYM (20), not TD_F32.
+            // Special case: TD_ATOM_STR (-21) maps to TD_STR (21).
             let vec_type = if col_type == crate::ffi::TD_ATOM_STR {
-                crate::ffi::TD_SYM
+                crate::ffi::TD_STR
             } else {
                 -col_type
             };
             let vec = if col_type == crate::ffi::TD_ATOM_STR {
-                // String atoms store inline string data, not symbol IDs.
-                // Read the string, intern it, and create a SYM vector with
-                // the minimum width that fits the interned ID.
+                // String atom: read the inline string, create a 1-element TD_STR vector.
                 let ptr = unsafe { crate::ffi::td_str_ptr(col) };
                 let slen = unsafe { crate::ffi::td_str_len(col) };
-                let s = if ptr.is_null() || slen == 0 {
-                    ""
-                } else {
-                    unsafe {
-                        std::str::from_utf8(std::slice::from_raw_parts(
-                            ptr as *const u8,
-                            slen,
-                        ))
-                        .unwrap_or("")
-                    }
-                };
-                let sym_id = crate::sym_intern(s)?;
-                let w = sym_width_for_id(sym_id);
-                let orig = unsafe { crate::ffi::td_sym_vec_new(w, 1) };
-                if orig.is_null() || crate::ffi_is_err(orig) {
+                let v = unsafe { crate::ffi::td_vec_new(crate::ffi::TD_STR, 0) };
+                if v.is_null() || crate::ffi_is_err(v) {
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
-                let appended = unsafe {
-                    crate::ffi::td_vec_append(
-                        orig,
-                        &sym_id as *const i64 as *const std::ffi::c_void,
-                    )
-                };
-                if appended.is_null() || crate::ffi_is_err(appended) {
-                    unsafe { crate::ffi_release(orig) };
+                let next = unsafe { crate::ffi::td_str_vec_append(v, ptr, slen) };
+                if next.is_null() || crate::ffi_is_err(next) {
+                    unsafe { crate::ffi_release(v) };
                     return Err(SqlError::Engine(crate::Error::Oom));
                 }
-                appended
+                next
             } else if vec_type == crate::ffi::TD_SYM {
                 // SYM atoms store the symbol ID as i64 in val.
                 let sym_id = unsafe { (*col).val.i64_ };
