@@ -32,7 +32,7 @@
 
 /* Build a 5-row table: id=[1,1,2,2,3], val=[10,20,30,40,50] */
 static td_t* make_audit_table(void) {
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t id_data[]  = {1, 1, 2, 2, 3};
     int64_t val_data[] = {10, 20, 30, 40, 50};
@@ -54,7 +54,7 @@ static td_t* make_audit_table(void) {
 
 /* Build a 10-row table: id=[1,1,2,2,3,3,1,2,3,1], val=[10..100 step 10] */
 static td_t* make_audit_table_10(void) {
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t id_data[]  = {1, 1, 2, 2, 3, 3, 1, 2, 3, 1};
     int64_t val_data[] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
@@ -476,7 +476,7 @@ static MunitResult test_sel_window(const void* params, void* data) {
 static MunitResult test_sel_asof_join(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build left table: time(I64), val(F64) */
     int64_t ltime_data[] = {100, 200, 300, 400, 500};
@@ -1021,7 +1021,7 @@ static MunitResult test_filter_eager(const void* params, void* data) {
 static MunitResult test_group_empty_table(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* id_vec  = td_vec_new(TD_I64, 0);
     td_t* val_vec = td_vec_new(TD_I64, 0);
@@ -1058,7 +1058,7 @@ static MunitResult test_group_empty_table(const void* params, void* data) {
 static MunitResult test_sort_empty_table(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* val_vec = td_vec_new(TD_I64, 0);
     int64_t name_val = td_sym_intern("val", 3);
@@ -1157,7 +1157,7 @@ static MunitResult test_const_fold_div_zero(const void* params, void* data) {
 static MunitResult test_const_fold_int_overflow(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t big[] = { INT64_MIN };
     td_t* v = td_vec_from_raw(TD_I64, big, 1);

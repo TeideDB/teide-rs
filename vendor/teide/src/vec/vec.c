@@ -290,12 +290,16 @@ td_t* td_vec_concat(td_t* a, td_t* b) {
         if ((a->attrs & (TD_ATTR_HAS_NULLS | TD_ATTR_SLICE)) ||
             (b->attrs & (TD_ATTR_HAS_NULLS | TD_ATTR_SLICE))) {
             for (int64_t i = 0; i < a->len; i++) {
-                if (td_vec_is_null((td_t*)a, i))
-                    td_vec_set_null(result, i, true);
+                if (td_vec_is_null((td_t*)a, i)) {
+                    td_err_t err = td_vec_set_null_checked(result, i, true);
+                    if (err != TD_OK) { td_release(result); return TD_ERR_PTR(err); }
+                }
             }
             for (int64_t i = 0; i < b->len; i++) {
-                if (td_vec_is_null((td_t*)b, i))
-                    td_vec_set_null(result, a->len + i, true);
+                if (td_vec_is_null((td_t*)b, i)) {
+                    td_err_t err = td_vec_set_null_checked(result, a->len + i, true);
+                    if (err != TD_OK) { td_release(result); return TD_ERR_PTR(err); }
+                }
             }
         }
 
@@ -353,12 +357,16 @@ td_t* td_vec_concat(td_t* a, td_t* b) {
     if ((a->attrs & (TD_ATTR_HAS_NULLS | TD_ATTR_SLICE)) ||
         (b->attrs & (TD_ATTR_HAS_NULLS | TD_ATTR_SLICE))) {
         for (int64_t i = 0; i < a->len; i++) {
-            if (td_vec_is_null((td_t*)a, i))
-                td_vec_set_null(result, i, true);
+            if (td_vec_is_null((td_t*)a, i)) {
+                td_err_t err = td_vec_set_null_checked(result, i, true);
+                if (err != TD_OK) { td_release(result); return TD_ERR_PTR(err); }
+            }
         }
         for (int64_t i = 0; i < b->len; i++) {
-            if (td_vec_is_null((td_t*)b, i))
-                td_vec_set_null(result, a->len + i, true);
+            if (td_vec_is_null((td_t*)b, i)) {
+                td_err_t err = td_vec_set_null_checked(result, a->len + i, true);
+                if (err != TD_OK) { td_release(result); return TD_ERR_PTR(err); }
+            }
         }
     }
 
@@ -416,10 +424,10 @@ td_t* td_vec_from_raw(int8_t type, const void* data, int64_t count) {
  * External: for >128 elements, allocate a U8 vector bitmap via ext_nullmap.
  * -------------------------------------------------------------------------- */
 
-void td_vec_set_null(td_t* vec, int64_t idx, bool is_null) {
-    if (!vec || TD_IS_ERR(vec)) return;
-    if (vec->attrs & TD_ATTR_SLICE) return; /* cannot set null on slice — COW first */
-    if (idx < 0 || idx >= vec->len) return;
+td_err_t td_vec_set_null_checked(td_t* vec, int64_t idx, bool is_null) {
+    if (!vec || TD_IS_ERR(vec)) return TD_ERR_TYPE;
+    if (vec->attrs & TD_ATTR_SLICE) return TD_ERR_TYPE; /* cannot set null on slice — COW first */
+    if (idx < 0 || idx >= vec->len) return TD_ERR_RANGE;
 
     /* Mark HAS_NULLS if setting a null (defer for TD_STR until ext alloc succeeds) */
     if (is_null && vec->type != TD_STR) vec->attrs |= TD_ATTR_HAS_NULLS;
@@ -435,12 +443,12 @@ void td_vec_set_null(td_t* vec, int64_t idx, bool is_null) {
                 vec->nullmap[byte_idx] |= (uint8_t)(1u << bit_idx);
             else
                 vec->nullmap[byte_idx] &= (uint8_t)~(1u << bit_idx);
-            return;
+            return TD_OK;
         }
         /* Need to promote to external nullmap */
         int64_t bitmap_len = (vec->len + 7) / 8;
         td_t* ext = td_vec_new(TD_U8, bitmap_len);
-        if (!ext || TD_IS_ERR(ext)) return;
+        if (!ext || TD_IS_ERR(ext)) return TD_ERR_OOM;
         ext->len = bitmap_len;
         if (vec->type == TD_STR) {
             /* TD_STR: nullmap bytes contain str_ext_null/str_pool, not bits */
@@ -467,7 +475,7 @@ void td_vec_set_null(td_t* vec, int64_t idx, bool is_null) {
         size_t new_data_size = (size_t)new_len;
         int64_t old_len = ext->len;
         td_t* new_ext = td_scratch_realloc(ext, new_data_size);
-        if (!new_ext || TD_IS_ERR(new_ext)) return;
+        if (!new_ext || TD_IS_ERR(new_ext)) return TD_ERR_OOM;
         /* Zero new bytes */
         if (new_len > old_len)
             memset((char*)td_data(new_ext) + old_len, 0,
@@ -484,6 +492,11 @@ void td_vec_set_null(td_t* vec, int64_t idx, bool is_null) {
         bits[byte_idx] |= (uint8_t)(1u << bit_idx);
     else
         bits[byte_idx] &= (uint8_t)~(1u << bit_idx);
+    return TD_OK;
+}
+
+void td_vec_set_null(td_t* vec, int64_t idx, bool is_null) {
+    (void)td_vec_set_null_checked(vec, idx, is_null);
 }
 
 /* --------------------------------------------------------------------------

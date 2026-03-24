@@ -38,7 +38,7 @@ static const char* tmp_csv(void) {
 static MunitResult test_csv_roundtrip_i64(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t vals[] = {10, 20, 30};
     td_t* vec = td_vec_from_raw(TD_I64, vals, 3);
@@ -75,7 +75,7 @@ static MunitResult test_csv_roundtrip_i64(const void* params, void* data) {
 static MunitResult test_csv_roundtrip_f64(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     double vals[] = {1.5, 2.5, 3.5};
     td_t* vec = td_vec_from_raw(TD_F64, vals, 3);
@@ -112,7 +112,7 @@ static MunitResult test_csv_roundtrip_f64(const void* params, void* data) {
 static MunitResult test_csv_multi_column(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t ids[] = {1, 2, 3};
     double vals[] = {10.5, 20.5, 30.5};
@@ -159,7 +159,7 @@ static MunitResult test_csv_multi_column(const void* params, void* data) {
 static MunitResult test_csv_empty_table(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* tbl = td_table_new(0);
     td_err_t err = td_write_csv(tbl, TMP_CSV);
@@ -176,7 +176,7 @@ static MunitResult test_csv_empty_table(const void* params, void* data) {
 static MunitResult test_csv_null_i64(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "x\n10\n\n30\n");
@@ -205,7 +205,7 @@ static MunitResult test_csv_null_i64(const void* params, void* data) {
 static MunitResult test_csv_null_i64_unparseable(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "x\n10\nN/A\n30\n");
@@ -231,7 +231,7 @@ static MunitResult test_csv_null_i64_unparseable(const void* params, void* data)
 static MunitResult test_csv_null_f64(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "x\n1.5\n\n3.5\n");
@@ -257,7 +257,7 @@ static MunitResult test_csv_null_f64(const void* params, void* data) {
 static MunitResult test_csv_null_bool(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "flag\ntrue\n\nfalse\n");
@@ -283,7 +283,7 @@ static MunitResult test_csv_null_bool(const void* params, void* data) {
 static MunitResult test_csv_null_sym(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "name\nalice\n\nbob\n");
@@ -307,7 +307,7 @@ static MunitResult test_csv_null_sym(const void* params, void* data) {
 static MunitResult test_csv_no_nulls_no_nullmap(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "x\n10\n20\n30\n");
@@ -330,7 +330,7 @@ static MunitResult test_csv_no_nulls_no_nullmap(const void* params, void* data) 
 static MunitResult test_csv_null_mixed_columns(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     FILE* f = fopen(TMP_CSV, "w");
     fprintf(f, "id,val,name\n1,1.5,alice\n,2.5,\n3,,bob\n");

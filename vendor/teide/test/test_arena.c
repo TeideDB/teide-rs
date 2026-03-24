@@ -220,7 +220,7 @@ static MunitResult test_arena_cow_noop(const void* params, void* data) {
 static MunitResult test_arena_sym_intern(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Intern many strings — should use arena, not buddy allocator */
     for (int i = 0; i < 10000; i++) {

@@ -61,7 +61,7 @@ static td_t* make_edge_table(void) {
 static MunitResult test_csr_build(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     munit_assert_ptr_not_null(edges);
@@ -108,7 +108,7 @@ static MunitResult test_csr_build(const void* params, void* data) {
 static MunitResult test_csr_sorted(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, true);
@@ -137,7 +137,7 @@ static MunitResult test_csr_sorted(const void* params, void* data) {
 static MunitResult test_expand(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -178,7 +178,7 @@ static MunitResult test_expand(const void* params, void* data) {
 static MunitResult test_expand_reverse(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -213,7 +213,7 @@ static MunitResult test_expand_reverse(const void* params, void* data) {
 static MunitResult test_var_expand(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -253,7 +253,7 @@ static MunitResult test_var_expand(const void* params, void* data) {
 static MunitResult test_shortest_path(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -295,7 +295,7 @@ static MunitResult test_shortest_path(const void* params, void* data) {
 static MunitResult test_shortest_path_no_path(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build a graph with no path from 0 to 3: only 0->1 */
     int64_t src_data[] = {0};
@@ -335,7 +335,7 @@ static MunitResult test_shortest_path_no_path(const void* params, void* data) {
 static MunitResult test_wco_join_triangle(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Complete graph K3: 0<->1, 1<->2, 0<->2 */
     int64_t src_data[] = {0, 0, 1, 1, 2, 2};
@@ -386,7 +386,7 @@ static MunitResult test_wco_join_triangle(const void* params, void* data) {
 static MunitResult test_multi_table(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Table 1: persons */
     int64_t ages[] = {25, 30, 35, 40};
@@ -442,7 +442,7 @@ static MunitResult test_multi_table(const void* params, void* data) {
 static MunitResult test_wco_join_chain(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Graph: 0->1, 0->2, 1->2, 1->3, 2->3 (directed, no back edges) */
     int64_t src_data[] = {0, 0, 1, 1, 2};
@@ -496,7 +496,7 @@ static MunitResult test_wco_join_chain(const void* params, void* data) {
 static MunitResult test_expand_factorized(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -557,7 +557,7 @@ static MunitResult test_expand_factorized(const void* params, void* data) {
 static MunitResult test_sip_expand(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -612,7 +612,7 @@ static MunitResult test_sip_expand(const void* params, void* data) {
 static MunitResult test_sjoin_filter(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left table: id column with many rows, most not in right side */
     int64_t n_left = 100;
@@ -686,7 +686,7 @@ static MunitResult test_sjoin_filter(const void* params, void* data) {
 static MunitResult test_sip_auto_build(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -753,7 +753,7 @@ static MunitResult test_sip_auto_build(const void* params, void* data) {
 static MunitResult test_factorized_group(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     /* Graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0
@@ -820,7 +820,7 @@ static MunitResult test_factorized_group(const void* params, void* data) {
 static MunitResult test_asp_join(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left table: small factorized output with _src keys {2, 5, 8} */
     int64_t lids[] = {2, 5, 8};
@@ -894,7 +894,7 @@ static MunitResult test_asp_join(const void* params, void* data) {
 static MunitResult test_expand_both(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -933,7 +933,7 @@ static MunitResult test_expand_both(const void* params, void* data) {
 static MunitResult test_var_expand_reverse(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -971,7 +971,7 @@ static MunitResult test_var_expand_reverse(const void* params, void* data) {
 static MunitResult test_var_expand_both(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1009,7 +1009,7 @@ static MunitResult test_var_expand_both(const void* params, void* data) {
 static MunitResult test_shortest_path_reverse(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1051,7 +1051,7 @@ static MunitResult test_shortest_path_reverse(const void* params, void* data) {
 static MunitResult test_csr_save_load(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, true);
@@ -1102,7 +1102,7 @@ static MunitResult test_csr_save_load(const void* params, void* data) {
 static MunitResult test_csr_out_of_range(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Edges: 0->1, 0->99 (99 is out of range for n_nodes=4) */
     int64_t src_data[] = {0, 0};
@@ -1141,7 +1141,7 @@ static MunitResult test_csr_out_of_range(const void* params, void* data) {
 static MunitResult test_csr_empty(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* sv = td_vec_new(TD_I64, 1);
     sv->len = 0;
@@ -1191,7 +1191,7 @@ static MunitResult test_csr_empty(const void* params, void* data) {
 static MunitResult test_csr_type_validation(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build edge table with F64 columns (should be rejected) */
     double src_data[] = {0.0, 1.0};
@@ -1227,7 +1227,7 @@ static MunitResult test_csr_type_validation(const void* params, void* data) {
 static MunitResult test_self_loop(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Graph with self-loops: 0->0, 0->1, 1->1 */
     int64_t src_data[] = {0, 0, 1};
@@ -1273,7 +1273,7 @@ static MunitResult test_self_loop(const void* params, void* data) {
 static MunitResult test_expand_empty_src(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1305,7 +1305,7 @@ static MunitResult test_expand_empty_src(const void* params, void* data) {
 static MunitResult test_rel_build(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Table with FK column "ref" pointing to target nodes 0..2 */
     int64_t refs[] = {2, 0, 1, 2};
@@ -1351,7 +1351,7 @@ static MunitResult test_rel_build(const void* params, void* data) {
 static MunitResult test_shortest_path_both(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Graph where path 0->3 requires bidirectional traversal:
      * Fwd: 0->1  Rev: 3->2->1
@@ -1404,7 +1404,7 @@ static MunitResult test_shortest_path_both(const void* params, void* data) {
 static MunitResult test_var_expand_depth0(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1438,7 +1438,7 @@ static MunitResult test_var_expand_depth0(const void* params, void* data) {
 static MunitResult test_wco_unsorted(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build with sorted=false */
     td_t* edges = make_edge_table();
@@ -1468,7 +1468,7 @@ static MunitResult test_wco_unsorted(const void* params, void* data) {
 static MunitResult test_expand_oob_src(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1503,7 +1503,7 @@ static MunitResult test_expand_oob_src(const void* params, void* data) {
 static MunitResult test_triangle_exact(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Complete bidirectional graph K3: 0<->1, 1<->2, 0<->2 */
     int64_t src_data[] = {0, 0, 1, 1, 2, 2};
@@ -1557,7 +1557,7 @@ static MunitResult test_triangle_exact(const void* params, void* data) {
 static MunitResult test_wco_chain4(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Graph: 0->1, 0->2, 1->2, 1->3, 2->3 */
     int64_t src_data[] = {0, 0, 1, 1, 2};
@@ -1608,7 +1608,7 @@ static MunitResult test_wco_chain4(const void* params, void* data) {
 static MunitResult test_shortest_path_self(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1648,7 +1648,7 @@ static MunitResult test_shortest_path_self(const void* params, void* data) {
 static MunitResult test_save_load_rev(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, true);
@@ -1686,7 +1686,7 @@ static MunitResult test_save_load_rev(const void* params, void* data) {
 static MunitResult test_wco_4clique(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Complete graph K5: 5 nodes, all pairs connected (10 directed edges).
      * 4-cliques in K5: C(5,4) = 5 */
@@ -1741,7 +1741,7 @@ static MunitResult test_wco_4clique(const void* params, void* data) {
 static MunitResult test_fvec_materialize(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Create ftable with 2 columns: one flat, one unflat */
     td_ftable_t* ft = td_ftable_new(2);
@@ -1797,7 +1797,7 @@ static MunitResult test_fvec_materialize(const void* params, void* data) {
 static MunitResult test_fvec_empty(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* 0 columns → error */
     td_t* err = td_ftable_materialize(NULL);
@@ -1826,7 +1826,7 @@ static MunitResult test_fvec_empty(const void* params, void* data) {
 static MunitResult test_fvec_semijoin(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_ftable_t* ft = td_ftable_new(1);
     munit_assert_ptr_not_null(ft);
@@ -1862,7 +1862,7 @@ static MunitResult test_fvec_semijoin(const void* params, void* data) {
 static MunitResult test_factorized_reverse(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1922,7 +1922,7 @@ static MunitResult test_factorized_reverse(const void* params, void* data) {
 static MunitResult test_wco_empty_result(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Graph with no triangles: 0->1, 2->3 (two disconnected edges) */
     int64_t src_d[] = {0, 2};
@@ -1966,7 +1966,7 @@ static MunitResult test_wco_empty_result(const void* params, void* data) {
 static MunitResult test_var_expand_bad_range(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* edges = make_edge_table();
     td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
@@ -1991,6 +1991,809 @@ static MunitResult test_var_expand_bad_range(const void* params, void* data) {
     td_release(start_vec);
     td_rel_free(rel);
     td_release(edges);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * test_degree_cent: in/out/total degree from CSR offsets
+ * -------------------------------------------------------------------------- */
+static MunitResult test_degree_cent(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* dc = td_degree_cent(g, rel);
+    munit_assert_ptr_not_null(dc);
+
+    td_t* result = td_execute(g, dc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* Graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0
+     * Node 0: out=2, in=1, total=3
+     * Node 1: out=2, in=1, total=3
+     * Node 2: out=1, in=2, total=3
+     * Node 3: out=1, in=2, total=3 */
+    int64_t out_sym = td_sym_intern("_out_degree", 11);
+    int64_t in_sym  = td_sym_intern("_in_degree", 10);
+    int64_t deg_sym = td_sym_intern("_degree", 7);
+
+    td_t* out_col = td_table_get_col(result, out_sym);
+    td_t* in_col  = td_table_get_col(result, in_sym);
+    td_t* deg_col = td_table_get_col(result, deg_sym);
+
+    munit_assert_ptr_not_null(out_col);
+    munit_assert_ptr_not_null(in_col);
+    munit_assert_ptr_not_null(deg_col);
+
+    int64_t* out_d = (int64_t*)td_data(out_col);
+    int64_t* in_d  = (int64_t*)td_data(in_col);
+    int64_t* deg_d = (int64_t*)td_data(deg_col);
+
+    /* Node 0: out=2, in=1, total=3 */
+    munit_assert_int(out_d[0], ==, 2);
+    munit_assert_int(in_d[0],  ==, 1);
+    munit_assert_int(deg_d[0], ==, 3);
+    /* Node 1: out=2, in=1, total=3 */
+    munit_assert_int(out_d[1], ==, 2);
+    munit_assert_int(in_d[1],  ==, 1);
+    munit_assert_int(deg_d[1], ==, 3);
+    /* Node 2: out=1, in=2, total=3 */
+    munit_assert_int(out_d[2], ==, 1);
+    munit_assert_int(in_d[2],  ==, 2);
+    munit_assert_int(deg_d[2], ==, 3);
+    /* Node 3: out=1, in=2, total=3 */
+    munit_assert_int(out_d[3], ==, 1);
+    munit_assert_int(in_d[3],  ==, 2);
+    munit_assert_int(deg_d[3], ==, 3);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* DAG: 0→1, 0→2, 1→3, 2→3 (4 nodes, 4 edges, no cycles) */
+static td_t* make_dag_edge_table(void) {
+    int64_t src_data[] = {0, 0, 1, 2};
+    int64_t dst_data[] = {1, 2, 3, 3};
+    int64_t n = 4;
+
+    td_t* src_vec = td_vec_from_raw(TD_I64, src_data, n);
+    td_t* dst_vec = td_vec_from_raw(TD_I64, dst_data, n);
+
+    int64_t src_sym = td_sym_intern("src", 3);
+    int64_t dst_sym = td_sym_intern("dst", 3);
+
+    td_t* tbl = td_table_new(2);
+    tbl = td_table_add_col(tbl, src_sym, src_vec);
+    td_release(src_vec);
+    tbl = td_table_add_col(tbl, dst_sym, dst_vec);
+    td_release(dst_vec);
+    return tbl;
+}
+
+static MunitResult test_topsort(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_dag_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* ts = td_topsort(g, rel);
+    munit_assert_ptr_not_null(ts);
+
+    td_t* result = td_execute(g, ts);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* DAG: 0→1, 0→2, 1→3, 2→3
+     * Valid orderings: 0 must come before 1,2; 1,2 before 3 */
+    int64_t order_sym = td_sym_intern("_order", 6);
+    td_t* order_col = td_table_get_col(result, order_sym);
+    munit_assert_ptr_not_null(order_col);
+    int64_t* ord = (int64_t*)td_data(order_col);
+
+    /* Order values must be a valid permutation of [0..3] */
+    uint8_t seen[4] = {0};
+    for (int i = 0; i < 4; i++) {
+        munit_assert_true(ord[i] >= 0 && ord[i] < 4);
+        munit_assert_false(seen[ord[i]]);
+        seen[ord[i]] = 1;
+    }
+    /* Node 0 must come before 1,2; node 3 must come after 1,2 */
+    munit_assert_true(ord[0] < ord[1]);
+    munit_assert_true(ord[0] < ord[2]);
+    munit_assert_true(ord[3] > ord[1]);
+    munit_assert_true(ord[3] > ord[2]);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_topsort_cycle(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    /* Cyclic graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0 */
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* ts = td_topsort(g, rel);
+    td_t* result = td_execute(g, ts);
+
+    /* Cycle detected — should return error */
+    munit_assert_true(TD_IS_ERR(result));
+
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_dfs(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    /* Build a table with source node = 0 */
+    td_t* src_tbl = td_table_new(1);
+    td_t* src_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    src_tbl = td_table_add_col(src_tbl, td_sym_intern("src", 3), src_vec);
+    td_release(src_vec);
+
+    td_graph_t* g = td_graph_new(src_tbl);
+    td_op_t* src_op = td_scan(g, "src");
+    td_op_t* dfs = td_dfs(g, src_op, rel, 255);
+    munit_assert_ptr_not_null(dfs);
+
+    td_t* result = td_execute(g, dfs);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* All 4 nodes should be reachable from node 0 */
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* Node 0 should have depth 0 and parent -1 */
+    int64_t node_sym   = td_sym_intern("_node", 5);
+    int64_t depth_sym  = td_sym_intern("_depth", 6);
+    int64_t parent_sym = td_sym_intern("_parent", 7);
+
+    td_t* node_col   = td_table_get_col(result, node_sym);
+    td_t* depth_col  = td_table_get_col(result, depth_sym);
+    td_t* parent_col = td_table_get_col(result, parent_sym);
+    munit_assert_ptr_not_null(node_col);
+    munit_assert_ptr_not_null(depth_col);
+    munit_assert_ptr_not_null(parent_col);
+
+    int64_t* nodes   = (int64_t*)td_data(node_col);
+    int64_t* depths  = (int64_t*)td_data(depth_col);
+    int64_t* parents = (int64_t*)td_data(parent_col);
+
+    /* First node in DFS order should be source (node 0) */
+    munit_assert_int(nodes[0], ==, 0);
+    munit_assert_int(depths[0], ==, 0);
+    munit_assert_int(parents[0], ==, -1);
+
+    /* All 4 nodes must be distinct and valid */
+    uint8_t node_seen[4] = {0};
+    for (int64_t i = 0; i < 4; i++) {
+        munit_assert_true(nodes[i] >= 0 && nodes[i] < 4);
+        munit_assert_false(node_seen[nodes[i]]);
+        node_seen[nodes[i]] = 1;
+        munit_assert_int(depths[i], >=, 0);
+        /* Non-root nodes must have a valid parent */
+        if (i > 0) {
+            munit_assert_true(parents[i] >= 0 && parents[i] < 4);
+        }
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(src_tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_dfs_max_depth(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_dag_edge_table();  /* 0→1, 0→2, 1→3, 2→3 */
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* src_tbl = td_table_new(1);
+    td_t* src_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    src_tbl = td_table_add_col(src_tbl, td_sym_intern("src", 3), src_vec);
+    td_release(src_vec);
+
+    td_graph_t* g = td_graph_new(src_tbl);
+    td_op_t* src_op = td_scan(g, "src");
+    td_op_t* dfs = td_dfs(g, src_op, rel, 1);  /* max depth = 1 */
+
+    td_t* result = td_execute(g, dfs);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* With max_depth=1 from node 0: nodes 0, 1, 2 (not 3) */
+    munit_assert_int(td_table_nrows(result), ==, 3);
+
+    /* Verify correct nodes and depths */
+    int64_t node_sym   = td_sym_intern("_node", 5);
+    int64_t depth_sym  = td_sym_intern("_depth", 6);
+    td_t* node_col  = td_table_get_col(result, node_sym);
+    td_t* depth_col = td_table_get_col(result, depth_sym);
+    int64_t* ns = (int64_t*)td_data(node_col);
+    int64_t* ds = (int64_t*)td_data(depth_col);
+    uint8_t found[4] = {0};
+    for (int64_t i = 0; i < 3; i++) {
+        munit_assert_true(ds[i] <= 1);
+        munit_assert_true(ns[i] >= 0 && ns[i] < 4);
+        found[ns[i]] = 1;
+    }
+    /* Node 3 should not be reached at depth 1 */
+    munit_assert_true(found[0] && found[1] && found[2]);
+    munit_assert_false(found[3]);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(src_tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * test_cluster_coeff: clustering coefficient via triangle counting
+ * -------------------------------------------------------------------------- */
+static MunitResult test_cluster_coeff(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    /* Graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0
+     * Treat as undirected: node 0 neighbors={1,2,3}, node 1 neighbors={0,2,3}, etc.
+     * All 4 nodes form a near-clique. */
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* cc = td_cluster_coeff(g, rel);
+    munit_assert_ptr_not_null(cc);
+
+    td_t* result = td_execute(g, cc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* Verify exact clustering coefficients.
+     * Graph edges: 0->1, 0->2, 1->2, 1->3, 2->3, 3->0 (directed).
+     * Undirected neighbors: 0={1,2,3}, 1={0,2,3}, 2={0,1,3}, 3={0,1,2}.
+     * Formula: directed_fwd_edges_between_neighbors / (deg * (deg-1)).
+     * Node 0 (deg=3, pairs=6): fwd edges among {1,2,3}: 1->2,1->3,2->3 = 3; coeff=3/6=0.5
+     * Node 1 (deg=3, pairs=6): fwd edges among {0,2,3}: 0->2,2->3,3->0 = 3; coeff=3/6=0.5
+     * Node 2 (deg=3, pairs=6): fwd edges among {0,1,3}: 0->1,1->3,3->0 = 3; coeff=3/6=0.5
+     * Node 3 (deg=3, pairs=6): fwd edges among {0,1,2}: 0->1,0->2,1->2 = 3; coeff=3/6=0.5 */
+    int64_t coeff_sym = td_sym_intern("_coefficient", 12);
+    td_t* coeff_col = td_table_get_col(result, coeff_sym);
+    munit_assert_ptr_not_null(coeff_col);
+    double* coeffs = (double*)td_data(coeff_col);
+    for (int i = 0; i < 4; i++) {
+        munit_assert_double(coeffs[i], >=, 0.49);
+        munit_assert_double(coeffs[i], <=, 0.51);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Test: Random walk
+ * -------------------------------------------------------------------------- */
+
+static MunitResult test_random_walk(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* src_tbl = td_table_new(1);
+    td_t* src_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    src_tbl = td_table_add_col(src_tbl, td_sym_intern("src", 3), src_vec);
+    td_release(src_vec);
+
+    td_graph_t* g = td_graph_new(src_tbl);
+    td_op_t* src_op = td_scan(g, "src");
+    td_op_t* rw = td_random_walk(g, src_op, rel, 10);
+    munit_assert_ptr_not_null(rw);
+
+    td_t* result = td_execute(g, rw);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* Should have 11 rows (start + 10 steps) */
+    munit_assert_int(td_table_nrows(result), ==, 11);
+
+    /* First node should be source (0) */
+    int64_t node_sym = td_sym_intern("_node", 5);
+    td_t* node_col = td_table_get_col(result, node_sym);
+    int64_t* nodes = (int64_t*)td_data(node_col);
+    munit_assert_int(nodes[0], ==, 0);
+
+    /* All nodes should be valid (0..3) and consecutive pairs must be edges.
+     * Graph edges: 0->1, 0->2, 1->2, 1->3, 2->3, 3->0 */
+    int edges_src[] = {0, 0, 1, 1, 2, 3};
+    int edges_dst[] = {1, 2, 2, 3, 3, 0};
+    int n_edges = 6;
+    for (int i = 0; i < 11; i++) {
+        munit_assert(nodes[i] >= 0);
+        munit_assert(nodes[i] < 4);
+        if (i > 0) {
+            bool valid_edge = false;
+            for (int e = 0; e < n_edges; e++) {
+                if (edges_src[e] == nodes[i-1] && edges_dst[e] == nodes[i]) {
+                    valid_edge = true;
+                    break;
+                }
+            }
+            munit_assert_true(valid_edge);
+        }
+    }
+
+    /* Step column should be 0..10 */
+    int64_t step_sym = td_sym_intern("_step", 5);
+    td_t* step_col = td_table_get_col(result, step_sym);
+    int64_t* steps = (int64_t*)td_data(step_col);
+    for (int i = 0; i < 11; i++) {
+        munit_assert_int(steps[i], ==, i);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(src_tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Test: A* shortest path
+ * -------------------------------------------------------------------------- */
+
+/* Weighted graph with lat/lon node properties:
+ * 5 nodes, 6 edges:
+ *   0->1 (w=1.0), 0->2 (w=4.0), 1->3 (w=2.0), 2->3 (w=1.0), 3->4 (w=3.0), 1->4 (w=10.0)
+ * Node coordinates: 0=(0,0), 1=(1,0), 2=(0,2), 3=(2,1), 4=(3,0) */
+static void make_astar_graph(td_t** out_edges, td_rel_t** out_rel,
+                             td_t** out_node_props) {
+    int64_t src[] = {0, 0, 1, 2, 3, 1};
+    int64_t dst[] = {1, 2, 3, 3, 4, 4};
+    double  wts[] = {1.0, 4.0, 2.0, 1.0, 3.0, 10.0};
+    int64_t ne = 6;
+
+    td_t* sv = td_vec_from_raw(TD_I64, src, ne);
+    td_t* dv = td_vec_from_raw(TD_I64, dst, ne);
+    td_t* wv = td_vec_new(TD_F64, ne);
+    memcpy(td_data(wv), wts, sizeof(wts));
+    wv->len = ne;
+
+    td_t* edges = td_table_new(3);
+    edges = td_table_add_col(edges, td_sym_intern("src", 3), sv); td_release(sv);
+    edges = td_table_add_col(edges, td_sym_intern("dst", 3), dv); td_release(dv);
+    edges = td_table_add_col(edges, td_sym_intern("weight", 6), wv); td_release(wv);
+
+    *out_rel = td_rel_from_edges(edges, "src", "dst", 5, 5, false);
+    td_rel_set_props(*out_rel, edges);
+    *out_edges = edges;
+
+    /* Node property table with lat/lon */
+    double lat_arr[] = {0.0, 1.0, 0.0, 2.0, 3.0};
+    double lon_arr[] = {0.0, 0.0, 2.0, 1.0, 0.0};
+    td_t* nv = td_vec_from_raw(TD_I64, (int64_t[]){0,1,2,3,4}, 5);
+    td_t* latv = td_vec_new(TD_F64, 5);
+    memcpy(td_data(latv), lat_arr, sizeof(lat_arr));
+    latv->len = 5;
+    td_t* lonv = td_vec_new(TD_F64, 5);
+    memcpy(td_data(lonv), lon_arr, sizeof(lon_arr));
+    lonv->len = 5;
+
+    td_t* np = td_table_new(3);
+    np = td_table_add_col(np, td_sym_intern("_node", 5), nv); td_release(nv);
+    np = td_table_add_col(np, td_sym_intern("lat", 3), latv); td_release(latv);
+    np = td_table_add_col(np, td_sym_intern("lon", 3), lonv); td_release(lonv);
+    *out_node_props = np;
+}
+
+static MunitResult test_astar(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges; td_rel_t* rel; td_t* node_props;
+    make_astar_graph(&edges, &rel, &node_props);
+
+    td_graph_t* g = td_graph_new(edges);
+    td_op_t* src = td_const_i64(g, 0);
+    td_op_t* dst = td_const_i64(g, 4);
+    td_op_t* as = td_astar(g, src, dst, rel, "weight", "lat", "lon", node_props, 255);
+    munit_assert_ptr_not_null(as);
+
+    td_t* result = td_execute(g, as);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* Should find path to node 4 with dist=6.0 (0->1->3->4: 1+2+3) */
+    int64_t nrows = td_table_nrows(result);
+    munit_assert_int(nrows, >, 0);
+
+    int64_t node_sym = td_sym_intern("_node", 5);
+    int64_t dist_sym = td_sym_intern("_dist", 5);
+    td_t* node_col = td_table_get_col(result, node_sym);
+    td_t* dist_col = td_table_get_col(result, dist_sym);
+    int64_t* nodes = (int64_t*)td_data(node_col);
+    double* dists = (double*)td_data(dist_col);
+
+    bool found = false;
+    for (int64_t i = 0; i < nrows; i++) {
+        if (nodes[i] == 4) {
+            munit_assert_double(dists[i], >=, 5.99);
+            munit_assert_double(dists[i], <=, 6.01);
+            found = true;
+        }
+    }
+    munit_assert_true(found);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(node_props);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_k_shortest(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges; td_rel_t* rel; td_t* node_props;
+    make_astar_graph(&edges, &rel, &node_props);
+
+    td_graph_t* g = td_graph_new(edges);
+    td_op_t* src = td_const_i64(g, 0);
+    td_op_t* dst = td_const_i64(g, 4);
+    td_op_t* ks = td_k_shortest(g, src, dst, rel, "weight", 3);
+    munit_assert_ptr_not_null(ks);
+
+    td_t* result = td_execute(g, ks);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* Should find at least 2 paths: 0->1->3->4 (6.0) and 0->2->3->4 (8.0) */
+    int64_t nrows = td_table_nrows(result);
+    munit_assert_int(nrows, >=, 2);
+
+    /* Check path_id column exists */
+    int64_t pid_sym = td_sym_intern("_path_id", 8);
+    td_t* pid_col = td_table_get_col(result, pid_sym);
+    munit_assert_ptr_not_null(pid_col);
+
+    /* First path should have lowest total distance */
+    int64_t dist_sym = td_sym_intern("_dist", 5);
+    td_t* dist_col = td_table_get_col(result, dist_sym);
+    double* dists = (double*)td_data(dist_col);
+    /* First row of path 0 should be source with dist 0 */
+    munit_assert_double(dists[0], >=, -0.01);
+    munit_assert_double(dists[0], <=, 0.01);
+
+    /* Verify path_id 0 exists and ends at dst with dist ~6.0 */
+    int64_t node_sym = td_sym_intern("_node", 5);
+    td_t* node_col = td_table_get_col(result, node_sym);
+    int64_t* nodes_arr = (int64_t*)td_data(node_col);
+    int64_t* pids = (int64_t*)td_data(pid_col);
+
+    /* Find last row of path 0 */
+    int64_t last_p0 = 0;
+    for (int64_t i = 0; i < nrows; i++) {
+        if (pids[i] == 0) last_p0 = i;
+    }
+    munit_assert_int(nodes_arr[last_p0], ==, 4);
+    munit_assert_double(dists[last_p0], >=, 5.99);
+    munit_assert_double(dists[last_p0], <=, 6.01);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(node_props);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Test: betweenness centrality (Brandes, exact)
+ * -------------------------------------------------------------------------- */
+
+static MunitResult test_betweenness(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    /* DAG: 0->1, 0->2, 1->3, 2->3
+     * Nodes 1 and 2 are bridges -- should have nonzero betweenness. */
+    td_t* edges = make_dag_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* bc = td_betweenness(g, rel, 0);  /* exact */
+    munit_assert_ptr_not_null(bc);
+
+    td_t* result = td_execute(g, bc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    int64_t cent_sym = td_sym_intern("_centrality", 11);
+    td_t* cent_col = td_table_get_col(result, cent_sym);
+    munit_assert_ptr_not_null(cent_col);
+    double* cents = (double*)td_data(cent_col);
+
+    /* Undirected K_{2,2} (0-1, 0-2, 1-3, 2-3): each node is the sole
+     * intermediary for exactly one pair (e.g., node 0 mediates {1,2} via
+     * 1-0-2, but sigma_{1,2}=2 since 1-3-2 also exists), giving C_B = 0.5.
+     * By symmetry all four nodes have equal betweenness. */
+    for (int i = 0; i < 4; i++) {
+        munit_assert_double(cents[i] - 0.5, >=, -1e-9);
+        munit_assert_double(cents[i] - 0.5, <=, 1e-9);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Test: betweenness centrality (Brandes, sampled)
+ * -------------------------------------------------------------------------- */
+
+static MunitResult test_betweenness_sampled(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* bc = td_betweenness(g, rel, 2);  /* sample 2 sources */
+    td_t* result = td_execute(g, bc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* Verify centrality values are non-negative */
+    int64_t cent_sym = td_sym_intern("_centrality", 11);
+    td_t* cent_col = td_table_get_col(result, cent_sym);
+    munit_assert_ptr_not_null(cent_col);
+    double* cents = (double*)td_data(cent_col);
+    for (int i = 0; i < 4; i++) {
+        munit_assert_double(cents[i], >=, 0.0);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_closeness(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();  /* 4-node cycle */
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* cc = td_closeness(g, rel, 0);  /* exact */
+    td_t* result = td_execute(g, cc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    int64_t cent_sym = td_sym_intern("_centrality", 11);
+    td_t* cent_col = td_table_get_col(result, cent_sym);
+    double* cents = (double*)td_data(cent_col);
+
+    /* All nodes should have positive closeness in a connected graph */
+    for (int i = 0; i < 4; i++) {
+        munit_assert_double(cents[i], >, 0.0);
+        munit_assert_double(cents[i], <=, 1.0);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_closeness_sampled(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges = make_edge_table();  /* 4-node cycle */
+    td_rel_t* rel = td_rel_from_edges(edges, "src", "dst", 4, 4, false);
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* cc = td_closeness(g, rel, 2);  /* sample 2 sources */
+    td_t* result = td_execute(g, cc);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+    munit_assert_int(td_table_nrows(result), ==, 2);
+
+    /* Verify centrality values are positive */
+    int64_t cent_sym = td_sym_intern("_centrality", 11);
+    td_t* cent_col = td_table_get_col(result, cent_sym);
+    munit_assert_ptr_not_null(cent_col);
+    double* cents = (double*)td_data(cent_col);
+    for (int i = 0; i < 2; i++) {
+        munit_assert_double(cents[i], >, 0.0);
+    }
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(tbl);
+    td_sym_destroy();
+    td_heap_destroy();
+    return MUNIT_OK;
+}
+
+static MunitResult test_mst(const void* params, void* data) {
+    (void)params; (void)data;
+    td_heap_init();
+    (void)td_sym_init();
+
+    td_t* edges; td_rel_t* rel; td_t* node_props;
+    make_astar_graph(&edges, &rel, &node_props);
+    /* 5 nodes, 6 edges: 0->1(1), 0->2(4), 1->3(2), 2->3(1), 3->4(3), 1->4(10)
+     * MST (undirected) should pick: 0-1(1), 2-3(1), 1-3(2), 3-4(3) = total 7
+     * (skip 0-2(4) and 1-4(10)) */
+
+    td_t* tbl = td_table_new(1);
+    td_t* dummy_vec = td_vec_from_raw(TD_I64, (int64_t[]){0}, 1);
+    tbl = td_table_add_col(tbl, td_sym_intern("_dummy", 6), dummy_vec);
+    td_release(dummy_vec);
+    td_graph_t* g = td_graph_new(tbl);
+
+    td_op_t* mst = td_mst(g, rel, "weight");
+    munit_assert_ptr_not_null(mst);
+
+    td_t* result = td_execute(g, mst);
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(TD_IS_ERR(result));
+
+    /* MST of 5 nodes has 4 edges */
+    munit_assert_int(td_table_nrows(result), ==, 4);
+
+    /* Total weight should be 7.0 */
+    int64_t w_sym = td_sym_intern("_weight", 7);
+    td_t* w_col = td_table_get_col(result, w_sym);
+    munit_assert_ptr_not_null(w_col);
+    double* ws = (double*)td_data(w_col);
+    double total = 0.0;
+    for (int i = 0; i < 4; i++) total += ws[i];
+    munit_assert_double(total, >=, 6.99);
+    munit_assert_double(total, <=, 7.01);
+
+    td_release(result);
+    td_graph_free(g);
+    td_rel_free(rel);
+    td_release(edges);
+    td_release(node_props);
+    td_release(tbl);
     td_sym_destroy();
     td_heap_destroy();
     return MUNIT_OK;
@@ -2043,6 +2846,20 @@ static MunitTest csr_tests[] = {
     { "/fact_rev",         test_factorized_reverse,    NULL, NULL, 0, NULL },
     { "/wco_empty",        test_wco_empty_result,      NULL, NULL, 0, NULL },
     { "/var_bad_range",    test_var_expand_bad_range,   NULL, NULL, 0, NULL },
+    { "/degree_cent",     test_degree_cent,            NULL, NULL, 0, NULL },
+    { "/topsort",         test_topsort,                NULL, NULL, 0, NULL },
+    { "/topsort_cycle",   test_topsort_cycle,          NULL, NULL, 0, NULL },
+    { "/dfs",             test_dfs,                    NULL, NULL, 0, NULL },
+    { "/dfs_max_depth",   test_dfs_max_depth,          NULL, NULL, 0, NULL },
+    { "/cluster_coeff",  test_cluster_coeff,          NULL, NULL, 0, NULL },
+    { "/random_walk",   test_random_walk,            NULL, NULL, 0, NULL },
+    { "/astar",         test_astar,                  NULL, NULL, 0, NULL },
+    { "/k_shortest",   test_k_shortest,             NULL, NULL, 0, NULL },
+    { "/betweenness",  test_betweenness,            NULL, NULL, 0, NULL },
+    { "/betweenness_s", test_betweenness_sampled,   NULL, NULL, 0, NULL },
+    { "/closeness",    test_closeness,             NULL, NULL, 0, NULL },
+    { "/closeness_s",  test_closeness_sampled,     NULL, NULL, 0, NULL },
+    { "/mst",          test_mst,                   NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },  /* terminator */
 };
 

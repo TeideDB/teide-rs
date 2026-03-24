@@ -31,7 +31,7 @@
  * -------------------------------------------------------------------------- */
 
 static td_t* make_test_table(void) {
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 10;
     int64_t id1_data[] = {1, 1, 2, 2, 3, 3, 1, 2, 3, 1};
@@ -232,7 +232,7 @@ static MunitResult test_graph_lifecycle(const void* params, void* data) {
 static MunitResult test_optimizer_constant_fold(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_graph_t* g = td_graph_new(NULL);
     munit_assert_ptr_not_null(g);
@@ -286,7 +286,7 @@ static MunitResult test_optimizer_constant_fold(const void* params, void* data) 
 static MunitResult test_optimizer_filter_const_predicate(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* tbl = make_test_table();
     munit_assert_ptr_not_null(tbl);
@@ -336,7 +336,7 @@ static MunitResult test_optimizer_filter_const_predicate(const void* params, voi
 static MunitResult test_group_affine_agg_input(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* tbl = make_test_table();
     munit_assert_ptr_not_null(tbl);

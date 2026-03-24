@@ -29,7 +29,7 @@
 
 /* Helper: create table with id1(I64), v1(I64), v3(F64) — 10 rows */
 static td_t* make_exec_table(void) {
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 10;
     int64_t id1_data[] = {1, 1, 2, 2, 3, 3, 1, 2, 3, 1};
@@ -156,7 +156,7 @@ static MunitResult test_exec_not(const void* params, void* data) {
 static MunitResult test_exec_isnull(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Create vector with no nulls */
     int64_t raw[] = {10, 20, 30, 40, 50};
@@ -188,7 +188,7 @@ static MunitResult test_exec_isnull(const void* params, void* data) {
 static MunitResult test_exec_math_ops(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     double raw[] = {1.0, 4.0, 9.0, 16.0, 25.0};
     td_t* vec = td_vec_from_raw(TD_F64, raw, 5);
@@ -230,7 +230,7 @@ static MunitResult test_exec_math_ops(const void* params, void* data) {
 static MunitResult test_exec_ceil_floor(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     double raw[] = {1.1, 2.5, 3.9, -1.1, -2.9};
     td_t* vec = td_vec_from_raw(TD_F64, raw, 5);
@@ -691,7 +691,7 @@ static MunitResult test_exec_head_tail(const void* params, void* data) {
 static MunitResult test_exec_join(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left table: id(I64), val(I64) */
     int64_t lid[] = {1, 2, 3};
@@ -747,7 +747,7 @@ static MunitResult test_exec_join(const void* params, void* data) {
 static MunitResult test_exec_join_large(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Create left table: 100K rows, id = i % 50000, val = i
      * Each key appears exactly twice on the left side. */
@@ -834,7 +834,7 @@ static MunitResult test_exec_join_large(const void* params, void* data) {
 static MunitResult test_exec_join_fallback(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left table: 100 rows (small), id = i, val = i * 7
      * Right table: 100K rows (large, triggers radix path), id = i % 100
@@ -917,7 +917,7 @@ static MunitResult test_exec_join_fallback(const void* params, void* data) {
 static MunitResult test_exec_join_empty(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n_id = td_sym_intern("id", 2);
     int64_t n_val = td_sym_intern("val", 3);
@@ -1028,7 +1028,7 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
 static MunitResult test_exec_join_left_large(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left: 100K rows, id = i (unique keys) */
     int64_t n_left = 100000;
@@ -1101,7 +1101,7 @@ static MunitResult test_exec_join_left_large(const void* params, void* data) {
 static MunitResult test_exec_join_full_large(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left: 80K rows, id = i (0..79999) */
     int64_t n_left = 80000;
@@ -1154,7 +1154,7 @@ static MunitResult test_exec_join_full_large(const void* params, void* data) {
 static MunitResult test_exec_join_skewed(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left: 100K rows, all id = 42.
      * Right: 100K rows, id = 0..99999 (unique keys, triggers radix path).
@@ -1231,7 +1231,7 @@ static MunitResult test_exec_join_skewed(const void* params, void* data) {
 static MunitResult test_exec_join_boundary(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Right side = 65537 rows (just above TD_PARALLEL_THRESHOLD = 65536).
      * This triggers the radix path. Verify it produces the same result
@@ -1299,7 +1299,7 @@ static MunitResult test_exec_join_boundary(const void* params, void* data) {
 static MunitResult test_exec_join_multikey(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left: 5 rows, join on (k1: I64, k2: F64) — exercises mixed-type key path */
     int64_t lk1[] = {1, 1, 2, 2, 3};
@@ -1372,7 +1372,7 @@ static MunitResult test_exec_join_multikey(const void* params, void* data) {
 static MunitResult test_exec_window(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 6;
     int64_t grp_data[] = {1, 1, 1, 2, 2, 2};
@@ -1460,7 +1460,7 @@ static MunitResult test_exec_select(const void* params, void* data) {
 static MunitResult test_exec_stddev(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     double vals[] = {2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0};
     td_t* vec = td_vec_from_raw(TD_F64, vals, 8);
@@ -1541,7 +1541,7 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     td_graph_free(g);
 
     /* F64 column: {1.5, 2.5, 1.5, 2.5, 3.5} → 3 distinct */
-    td_sym_init();
+    (void)td_sym_init();
     double fvals[] = {1.5, 2.5, 1.5, 2.5, 3.5};
     td_t* fvec = td_vec_from_raw(TD_F64, fvals, 5);
     int64_t fname = td_sym_intern("f", 1);
@@ -1587,7 +1587,7 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
 static MunitResult test_exec_asof_join(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left: trades — time(I64), sym(I64), price(F64) */
     int64_t ltime[]  = {100, 200, 300, 400, 500};
@@ -1672,7 +1672,7 @@ static MunitResult test_exec_asof_join(const void* params, void* data) {
 static MunitResult test_exec_asof_left_join(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Left has a row with time=50 that's before any right row */
     int64_t ltime[] = {50, 100, 200};
@@ -1729,7 +1729,7 @@ static MunitResult test_exec_asof_left_join(const void* params, void* data) {
 static MunitResult test_exec_asof_empty(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t ltime[] = {100, 200};
     double  lval[]  = {1.0, 2.0};
@@ -1772,7 +1772,7 @@ static MunitResult test_exec_asof_empty(const void* params, void* data) {
 
 /* ---- STRING HELPER ---- */
 static td_t* make_sym_table(void) {
-    td_sym_init();
+    (void)td_sym_init();
     int64_t s0 = td_sym_intern("hello", 5);
     int64_t s1 = td_sym_intern("WORLD", 5);
     int64_t s2 = td_sym_intern("  foo  ", 7);
@@ -1924,7 +1924,7 @@ static MunitResult test_exec_like(const void* params, void* data) {
 static MunitResult test_exec_concat(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build table with 3 SYM columns: a="hello", b=" ", c="world" */
     int64_t s_hello = td_sym_intern("hello", 5);
@@ -1980,7 +1980,7 @@ static MunitResult test_exec_concat(const void* params, void* data) {
 static MunitResult test_exec_extract(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* 2024-06-15 12:30:45 UTC as microseconds since 2000-01-01 */
     int64_t ts = 771769845000000LL;
@@ -2034,7 +2034,7 @@ static MunitResult test_exec_extract(const void* params, void* data) {
 static MunitResult test_exec_date_trunc(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t ts = 771769845000000LL;
     td_t* ts_vec = td_vec_from_raw(TD_TIMESTAMP, &ts, 1);
@@ -2105,7 +2105,7 @@ static td_t* make_str_table(void) {
 static MunitResult test_exec_str_eq(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2137,7 +2137,7 @@ static MunitResult test_exec_str_eq(const void* params, void* data) {
 static MunitResult test_exec_str_ne(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2169,7 +2169,7 @@ static MunitResult test_exec_str_ne(const void* params, void* data) {
 static MunitResult test_exec_str_lt(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2203,7 +2203,7 @@ static MunitResult test_exec_str_lt(const void* params, void* data) {
 static MunitResult test_exec_str_le(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2234,7 +2234,7 @@ static MunitResult test_exec_str_le(const void* params, void* data) {
 static MunitResult test_exec_str_gt(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2265,7 +2265,7 @@ static MunitResult test_exec_str_gt(const void* params, void* data) {
 static MunitResult test_exec_str_ge(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2296,7 +2296,7 @@ static MunitResult test_exec_str_ge(const void* params, void* data) {
 static MunitResult test_exec_str_strlen(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2351,7 +2351,7 @@ static MunitResult test_graph_dump(const void* params, void* data) {
 static MunitResult test_exec_str_upper(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2388,7 +2388,7 @@ static MunitResult test_exec_str_upper(const void* params, void* data) {
 static MunitResult test_exec_str_lower(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2433,7 +2433,7 @@ static MunitResult test_exec_str_lower(const void* params, void* data) {
 static MunitResult test_exec_str_trim(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2473,7 +2473,7 @@ static MunitResult test_exec_str_trim(const void* params, void* data) {
 static MunitResult test_exec_str_substr(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2520,7 +2520,7 @@ static MunitResult test_exec_str_substr(const void* params, void* data) {
 static MunitResult test_exec_str_replace(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2566,7 +2566,7 @@ static MunitResult test_exec_str_replace(const void* params, void* data) {
 static MunitResult test_exec_str_concat(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Table with two TD_STR columns */
     td_t* c0 = td_vec_new(TD_STR, 3);
@@ -2623,7 +2623,7 @@ static MunitResult test_exec_str_concat(const void* params, void* data) {
 static MunitResult test_exec_str_if(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2668,7 +2668,7 @@ static MunitResult test_exec_str_if(const void* params, void* data) {
 static MunitResult test_exec_str_if_scalar(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     td_t* tbl = make_str_table();
     td_graph_t* g = td_graph_new(tbl);
 
@@ -2711,7 +2711,7 @@ static MunitResult test_exec_str_if_scalar(const void* params, void* data) {
 static MunitResult test_exec_str_eq_len1_broadcast(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Build table: name(3 rows), tag(1 row — should broadcast) */
     td_t* c0 = td_vec_new(TD_STR, 3);
@@ -2756,7 +2756,7 @@ static MunitResult test_exec_str_eq_len1_broadcast(const void* params, void* dat
 static MunitResult test_exec_str_eq_empty_vec_scalar(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Table: name(3 rows), empty(0 rows — empty TD_STR vector as scalar) */
     td_t* c0 = td_vec_new(TD_STR, 3);
@@ -2807,7 +2807,7 @@ static MunitResult test_exec_str_eq_empty_vec_scalar(const void* params, void* d
 static MunitResult test_exec_str_upper_null(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* col = td_vec_new(TD_STR, 3);
     col = td_str_vec_append(col, "hello", 5);
@@ -2855,7 +2855,7 @@ static MunitResult test_exec_str_upper_null(const void* params, void* data) {
 static MunitResult test_exec_str_strlen_null(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* col = td_vec_new(TD_STR, 3);
     col = td_str_vec_append(col, "hello", 5);
@@ -2892,7 +2892,7 @@ static MunitResult test_exec_str_strlen_null(const void* params, void* data) {
 static MunitResult test_exec_str_substr_null(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* col = td_vec_new(TD_STR, 3);
     col = td_str_vec_append(col, "hello", 5);
@@ -2939,7 +2939,7 @@ static MunitResult test_exec_str_substr_null(const void* params, void* data) {
 static MunitResult test_exec_str_replace_null(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* col = td_vec_new(TD_STR, 3);
     col = td_str_vec_append(col, "hello", 5);
@@ -2986,7 +2986,7 @@ static MunitResult test_exec_str_replace_null(const void* params, void* data) {
 static MunitResult test_exec_str_concat_null(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     td_t* c0 = td_vec_new(TD_STR, 3);
     c0 = td_str_vec_append(c0, "John", 4);

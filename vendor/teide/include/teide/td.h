@@ -480,11 +480,7 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_DIJKSTRA        86   /* weighted shortest path (Dijkstra)  */
 #define OP_LOUVAIN         87   /* community detection (Louvain)      */
 
-/* Opcodes — Vector similarity */
-#define OP_COSINE_SIM      88   /* cosine similarity between embeddings   */
-#define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
-#define OP_KNN             90   /* brute-force K nearest neighbors        */
-#define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
+/* Opcodes — Graph algorithms (batch 1) */
 #define OP_DEGREE_CENT     92   /* degree centrality                  */
 #define OP_TOPSORT         93   /* topological sort (Kahn's)          */
 #define OP_DFS             94   /* depth-first search traversal       */
@@ -497,6 +493,12 @@ static inline uint8_t td_sym_dict_width(int64_t dict_size) {
 #define OP_BETWEENNESS     99   /* betweenness centrality (Brandes)       */
 #define OP_CLOSENESS      100   /* closeness centrality                   */
 #define OP_MST            101   /* minimum spanning forest (Kruskal)      */
+
+/* Opcodes — Vector similarity */
+#define OP_COSINE_SIM      88   /* cosine similarity between embeddings   */
+#define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
+#define OP_KNN             90   /* brute-force K nearest neighbors        */
+#define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -834,8 +836,9 @@ td_t* td_vec_concat(td_t* a, td_t* b);
 td_t* td_vec_from_raw(int8_t type, const void* data, int64_t count);
 
 /* Null bitmap ops */
-void  td_vec_set_null(td_t* vec, int64_t idx, bool is_null);
-bool  td_vec_is_null(td_t* vec, int64_t idx);
+void     td_vec_set_null(td_t* vec, int64_t idx, bool is_null);
+td_err_t td_vec_set_null_checked(td_t* vec, int64_t idx, bool is_null);
+bool     td_vec_is_null(td_t* vec, int64_t idx);
 
 /* ===== String Vector API ===== */
 
@@ -859,7 +862,7 @@ td_t* td_list_set(td_t* list, int64_t idx, td_t* item);
 
 /* ===== Symbol Intern Table API ===== */
 
-void     td_sym_init(void);
+td_err_t td_sym_init(void);
 void     td_sym_destroy(void);
 int64_t  td_sym_intern(const char* str, size_t len);
 int64_t  td_sym_find(const char* str, size_t len);
@@ -1060,6 +1063,9 @@ td_rel_t* td_rel_load(const char* dir);
 td_rel_t* td_rel_mmap(const char* dir);
 void      td_rel_set_props(td_rel_t* rel, td_t* props);
 void      td_rel_free(td_rel_t* rel);
+const int64_t* td_rel_neighbors(td_rel_t* rel, int64_t node,
+                                uint8_t direction, int64_t* out_count);
+int64_t   td_rel_n_nodes(td_rel_t* rel, uint8_t direction);
 
 /* ===== Optimizer API ===== */
 

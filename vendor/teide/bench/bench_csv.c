@@ -31,7 +31,7 @@ static void generate_csv(const char* path, int64_t n_rows, int64_t n_unique) {
 static void bench_csv_load(const char* label, const char* path, int64_t n_rows) {
     /* Warm up */
     td_heap_init();
-    td_sym_init();
+    { td_err_t _e = td_sym_init(); (void)_e; };
     td_t* t = td_read_csv(path);
     if (t && !TD_IS_ERR(t)) td_release(t);
     td_sym_destroy();
@@ -39,7 +39,7 @@ static void bench_csv_load(const char* label, const char* path, int64_t n_rows) 
 
     /* Timed run */
     td_heap_init();
-    td_sym_init();
+    { td_err_t _e = td_sym_init(); (void)_e; };
 
     double start = now_ns();
     t = td_read_csv(path);

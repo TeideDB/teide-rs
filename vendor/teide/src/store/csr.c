@@ -192,6 +192,7 @@ td_rel_t* td_rel_from_edges(td_t* edge_table,
 
     int64_t src_sym = td_sym_intern(src_col, strlen(src_col));
     int64_t dst_sym = td_sym_intern(dst_col, strlen(dst_col));
+    if (src_sym < 0 || dst_sym < 0) return NULL;  /* sym intern OOM */
 
     td_t* src_vec = td_table_get_col(edge_table, src_sym);
     td_t* dst_vec = td_table_get_col(edge_table, dst_sym);
@@ -340,6 +341,21 @@ void td_rel_free(td_rel_t* rel) {
     td_sys_free(rel);
 }
 
+/* --- Public CSR neighbor access ------------------------------------------- */
+
+const int64_t* td_rel_neighbors(td_rel_t* rel, int64_t node,
+                                 uint8_t direction, int64_t* out_count) {
+    if (!rel) { if (out_count) *out_count = 0; return NULL; }
+    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
+    return td_csr_neighbors(csr, node, out_count);
+}
+
+int64_t td_rel_n_nodes(td_rel_t* rel, uint8_t direction) {
+    if (!rel) return 0;
+    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
+    return csr->n_nodes;
+}
+
 /* --------------------------------------------------------------------------
  * CSR persistence — save/load/mmap using existing column file format
  * -------------------------------------------------------------------------- */
@@ -414,6 +430,16 @@ static td_err_t csr_load_impl(td_csr_t* csr, const char* dir, const char* prefix
         td_release(csr->targets); csr->targets = NULL;
         if (csr->rowmap) { td_release(csr->rowmap); csr->rowmap = NULL; }
         return TD_ERR_IO;
+    }
+
+    /* Validate offset monotonicity: offsets[i] <= offsets[i+1] */
+    for (int64_t i = 0; i < csr->n_nodes; i++) {
+        if (off_data[i] < 0 || off_data[i] > off_data[i + 1]) {
+            td_release(csr->offsets); csr->offsets = NULL;
+            td_release(csr->targets); csr->targets = NULL;
+            if (csr->rowmap) { td_release(csr->rowmap); csr->rowmap = NULL; }
+            return TD_ERR_IO;  /* corrupt: non-monotonic offsets */
+        }
     }
 
     csr->sorted = false;  /* caller sets if known */
@@ -498,19 +524,4 @@ td_rel_t* td_rel_load(const char* dir) {
 
 td_rel_t* td_rel_mmap(const char* dir) {
     return rel_load_impl(dir, true);
-}
-
-/* --- Public CSR neighbor access ------------------------------------------- */
-
-const int64_t* td_rel_neighbors(td_rel_t* rel, int64_t node,
-                                 uint8_t direction, int64_t* out_count) {
-    if (!rel) { if (out_count) *out_count = 0; return NULL; }
-    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
-    return td_csr_neighbors(csr, node, out_count);
-}
-
-int64_t td_rel_n_nodes(td_rel_t* rel, uint8_t direction) {
-    if (!rel) return 0;
-    td_csr_t* csr = (direction == 1) ? &rel->rev : &rel->fwd;
-    return csr->n_nodes;
 }

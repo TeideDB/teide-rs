@@ -13,7 +13,7 @@
 
 int main(void) {
     td_heap_init();
-    td_sym_init();
+    assert(td_sym_init() == TD_OK);
 
     /* --- Build a 6-row table ------------------------------------------- */
 

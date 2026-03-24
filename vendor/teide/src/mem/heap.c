@@ -1056,13 +1056,18 @@ void td_heap_merge(td_heap_t* src) {
 
     src->avail = 0;
 
-    /* Update pool headers: set heap_id to dst, transfer pool entries */
+    /* Update pool headers: set heap_id to dst, transfer pool entries.
+     * Do NOT rewrite heap_id for pools that can't be tracked — that would
+     * make coalescing reference a pool not in dst's pool table. */
     for (uint32_t i = 0; i < src->pool_count; i++) {
-        td_pool_hdr_t* hdr = (td_pool_hdr_t*)src->pools[i].base;
-        hdr->heap_id = dst->id;
-
         if (dst->pool_count < TD_MAX_POOLS) {
+            td_pool_hdr_t* hdr = (td_pool_hdr_t*)src->pools[i].base;
+            hdr->heap_id = dst->id;
             dst->pools[dst->pool_count++] = src->pools[i];
+        } else {
+            /* Pool overflow: only triggers at TD_MAX_POOLS (512 pools = 16GB+).
+             * Assert in debug builds to catch unexpected growth. */
+            assert(0 && "td_heap_merge: pool overflow at TD_MAX_POOLS");
         }
     }
     src->pool_count = 0;
@@ -1076,7 +1081,7 @@ void* td_scratch_arena_push(td_scratch_arena_t* a, size_t nbytes) {
     /* 16-byte alignment */
     nbytes = (nbytes + 15) & ~(size_t)15;
 
-    if (TD_LIKELY(a->ptr + nbytes <= a->end))
+    if (TD_LIKELY(a->ptr != NULL && a->ptr + nbytes <= a->end))
         goto bump;
 
     /* Need a new backing block */

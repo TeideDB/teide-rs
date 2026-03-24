@@ -111,18 +111,18 @@ static td_t* sym_str_arena(td_arena_t* arena, const char* s, size_t len) {
  * td_sym_init
  * -------------------------------------------------------------------------- */
 
-void td_sym_init(void) {
+td_err_t td_sym_init(void) {
     bool expected = false;
     if (!atomic_compare_exchange_strong_explicit(&g_sym_inited, &expected, true,
             memory_order_acq_rel, memory_order_acquire))
-        return; /* already initialized by another thread */
+        return TD_OK; /* already initialized by another thread */
 
     g_sym.bucket_cap = SYM_INIT_CAP;
     /* td_sys_alloc uses mmap(MAP_ANONYMOUS) which zero-initializes. */
     g_sym.buckets = (uint64_t*)td_sys_alloc(g_sym.bucket_cap * sizeof(uint64_t));
     if (!g_sym.buckets) {
         atomic_store_explicit(&g_sym_inited, false, memory_order_release);
-        return;
+        return TD_ERR_OOM;
     }
 
     g_sym.str_cap = SYM_INIT_CAP;
@@ -132,7 +132,7 @@ void td_sym_init(void) {
         td_sys_free(g_sym.buckets);
         g_sym.buckets = NULL;
         atomic_store_explicit(&g_sym_inited, false, memory_order_release);
-        return;
+        return TD_ERR_OOM;
     }
 
     g_sym.arena = td_arena_new(1024 * 1024);  /* 1MB chunks */
@@ -142,9 +142,10 @@ void td_sym_init(void) {
         g_sym.strings = NULL;
         g_sym.buckets = NULL;
         atomic_store_explicit(&g_sym_inited, false, memory_order_release);
-        return;
+        return TD_ERR_OOM;
     }
     /* g_sym_inited already set to true by CAS above */
+    return TD_OK;
 }
 
 /* --------------------------------------------------------------------------

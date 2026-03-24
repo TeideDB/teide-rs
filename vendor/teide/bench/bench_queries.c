@@ -26,7 +26,7 @@ static void report(const char* name, int64_t nrows, double elapsed_ns) {
 /* Q1: scan + filter + group + sum (analytics) */
 static void bench_q1_analytics(int64_t n) {
     td_heap_init();
-    td_sym_init();
+    { td_err_t _e = td_sym_init(); (void)_e; };
 
     int64_t* region_data = td_sys_alloc((size_t)n * sizeof(int64_t));
     int64_t* amount_data = td_sys_alloc((size_t)n * sizeof(int64_t));
@@ -84,7 +84,7 @@ static void bench_q1_analytics(int64_t n) {
 /* Q2: join + count (relational) */
 static void bench_q2_relational(int64_t n) {
     td_heap_init();
-    td_sym_init();
+    { td_err_t _e = td_sym_init(); (void)_e; };
 
     int64_t* oid_data = td_sys_alloc((size_t)n * sizeof(int64_t));
     int64_t* cid_data = td_sys_alloc((size_t)n * sizeof(int64_t));

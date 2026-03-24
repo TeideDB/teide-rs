@@ -33,7 +33,7 @@
 static void* meta_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     return NULL;
 }
 

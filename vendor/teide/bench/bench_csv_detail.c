@@ -25,7 +25,7 @@ static void bench(const char* label, const char* path, int64_t n_rows, int reps)
     double best = 1e18;
     for (int r = 0; r < reps; r++) {
         td_heap_init();
-        td_sym_init();
+        { td_err_t _e = td_sym_init(); (void)_e; };
 
         double start = now_ns();
         td_t* t = td_read_csv(path);

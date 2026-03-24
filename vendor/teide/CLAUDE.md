@@ -35,7 +35,7 @@ Core abstraction is `td_t` — a 32-byte block header. Every object (atom, vecto
 
 **Graph engine**: CSR edge indices (`td_csr_t`, `td_rel_t`) alongside columnar tables.
 - Storage: double-indexed CSR (forward + reverse), persisted as `.col` files, supports mmap
-- Opcodes: `OP_EXPAND` (1-hop), `OP_VAR_EXPAND` (BFS), `OP_SHORTEST_PATH`, `OP_WCO_JOIN` (LFTJ)
+- Opcodes: `OP_EXPAND` (1-hop), `OP_VAR_EXPAND` (BFS), `OP_SHORTEST_PATH`, `OP_ASTAR` (A*), `OP_K_SHORTEST` (Yen's), `OP_CLUSTER_COEFF`, `OP_RANDOM_WALK`, `OP_WCO_JOIN` (LFTJ), `OP_BETWEENNESS` (Brandes), `OP_CLOSENESS` (closeness centrality), `OP_MST` (Kruskal)
 - Factorized execution: `td_fvec_t` / `td_ftable_t` avoid materializing cross-products
 - Optimizer: SIP pass propagates `TD_SEL` bitmaps backward through `OP_EXPAND` chains
 
@@ -65,7 +65,7 @@ src/store/fileio.{h,c}     Cross-platform file I/O — locking (flock/LockFileEx
 src/table/sym.{h,c}        Global sym intern table — arena-backed string atoms, save/load, append-only persistence, file locking
 src/mem/arena.{h,c}        Arena (bump) allocator — td_arena_t, bulk alloc for sym table
 test/test_arena.c           Arena allocator tests (alloc, reset, destroy, sym integration)
-test/test_csr.c             Graph engine tests (42 tests)
+test/test_csr.c             Graph engine tests (56 tests)
 test/test_opt.c             Optimizer pass tests (filter reorder, predicate pushdown)
 test/test_store.c           Storage tests (file I/O, sym persistence, col bounds validation)
 test/test_sym.c             Sym table tests (save/load roundtrip, append-only, corruption)

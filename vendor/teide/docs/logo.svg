@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" font-family="'Inter','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="lbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0e1b24"/>
+      <stop offset="100%" stop-color="#162a36"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6b8a9e"/>
+      <stop offset="100%" stop-color="#8ba8b8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="360" height="120" rx="12" fill="url(#lbg)"/>
+
+  <!-- Stylized peak mark — represents the Teide volcano -->
+  <g transform="translate(48, 22)">
+    <polygon points="36,0 60,56 12,56" fill="none" stroke="url(#accent)" stroke-width="2.5" stroke-linejoin="round"/>
+    <line x1="24" y1="28" x2="48" y2="28" stroke="#3a5261" stroke-width="1.2"/>
+    <circle cx="36" cy="14" r="2" fill="#6b8a9e" opacity="0.6"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="130" y="68" fill="#dce8ee" font-size="42" font-weight="700" letter-spacing="4">TEIDE</text>
+
+  <!-- Tagline -->
+  <text x="134" y="92" fill="#4b6777" font-size="12" letter-spacing="1.5">COLUMNAR ENGINE</text>
+</svg>

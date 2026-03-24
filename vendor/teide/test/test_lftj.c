@@ -64,7 +64,7 @@ static void init_enum_output(lftj_enum_ctx_t* ctx, int64_t** col_ptrs) {
 static MunitResult test_lftj_triangle(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Bidirectional triangle: 0↔1, 0↔2, 1↔2 */
     int64_t src[] = {0, 0, 1, 1, 2, 2};
@@ -101,7 +101,7 @@ static MunitResult test_lftj_triangle(const void* params, void* data) {
 static MunitResult test_lftj_no_results(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Linear graph: 0→1→2 (no triangles) */
     int64_t src[] = {0, 1};

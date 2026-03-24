@@ -22,6 +22,7 @@
  */
 
 #include "col.h"
+#include "store/fileio.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -414,104 +415,128 @@ td_err_t td_col_save(td_t* vec, const char* path) {
     if (!vec || TD_IS_ERR(vec)) return TD_ERR_TYPE;
     if (!path) return TD_ERR_IO;
 
+    /* Build temp path for crash-safe write: write tmp, fsync, atomic rename */
+    char tmp_path[1024];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path))
+        return TD_ERR_IO;
+
     /* String list: TD_LIST of TD_ATOM_STR atoms */
     if (is_str_list(vec)) {
-        FILE* f = fopen(path, "wb");
+        FILE* f = fopen(tmp_path, "wb");
         if (!f) return TD_ERR_IO;
         td_err_t err = col_save_str_list(vec, f);
         fclose(f);
-        return err;
+        if (err != TD_OK) { remove(tmp_path); return err; }
+        goto fsync_and_rename;
     }
 
     /* Generic list */
     if (vec->type == TD_LIST) {
-        FILE* f = fopen(path, "wb");
+        FILE* f = fopen(tmp_path, "wb");
         if (!f) return TD_ERR_IO;
         td_err_t err = col_save_list(vec, f);
         fclose(f);
-        return err;
+        if (err != TD_OK) { remove(tmp_path); return err; }
+        goto fsync_and_rename;
     }
 
     /* Table */
     if (vec->type == TD_TABLE) {
-        FILE* f = fopen(path, "wb");
+        FILE* f = fopen(tmp_path, "wb");
         if (!f) return TD_ERR_IO;
         td_err_t err = col_save_table(vec, f);
         fclose(f);
-        return err;
+        if (err != TD_OK) { remove(tmp_path); return err; }
+        goto fsync_and_rename;
     }
 
     /* Explicit allowlist of serializable types */
     if (!is_serializable_type(vec->type))
         return TD_ERR_NYI;
 
-    FILE* f = fopen(path, "wb");
-    if (!f) return TD_ERR_IO;
+    {
+        FILE* f = fopen(tmp_path, "wb");
+        if (!f) return TD_ERR_IO;
 
-    /* Write a clean header (mmod=0, rc=0) */
-    td_t header;
-    memcpy(&header, vec, 32);
-    header.mmod = 0;
-    header.order = 0;
-    /* For TD_SYM: store sym count in rc field (always 0 on disk otherwise).
-     * This serves as O(1) fast-reject metadata on load. */
-    atomic_store_explicit(&header.rc,
-        (vec->type == TD_SYM) ? td_sym_count() : 0,
-        memory_order_relaxed);
+        /* Write a clean header (mmod=0, rc=0) */
+        td_t header;
+        memcpy(&header, vec, 32);
+        header.mmod = 0;
+        header.order = 0;
+        /* For TD_SYM: store sym count in rc field (always 0 on disk otherwise).
+         * This serves as O(1) fast-reject metadata on load. */
+        atomic_store_explicit(&header.rc,
+            (vec->type == TD_SYM) ? td_sym_count() : 0,
+            memory_order_relaxed);
 
-    /* Clear slice field; preserve ext_nullmap flag for bitmap append */
-    header.attrs &= ~TD_ATTR_SLICE;
-    if (!(header.attrs & TD_ATTR_HAS_NULLS)) {
-        memset(header.nullmap, 0, 16);
-        header.attrs &= ~TD_ATTR_NULLMAP_EXT;
-    } else if (header.attrs & TD_ATTR_NULLMAP_EXT) {
-        /* Ext bitmap appended after data; zero pointer bytes in header */
-        memset(header.nullmap, 0, 16);
-    }
+        /* Clear slice field; preserve ext_nullmap flag for bitmap append */
+        header.attrs &= ~TD_ATTR_SLICE;
+        if (!(header.attrs & TD_ATTR_HAS_NULLS)) {
+            memset(header.nullmap, 0, 16);
+            header.attrs &= ~TD_ATTR_NULLMAP_EXT;
+        } else if (header.attrs & TD_ATTR_NULLMAP_EXT) {
+            /* Ext bitmap appended after data; zero pointer bytes in header */
+            memset(header.nullmap, 0, 16);
+        }
 
-    size_t written = fwrite(&header, 1, 32, f);
-    if (written != 32) { fclose(f); return TD_ERR_IO; }
+        size_t written = fwrite(&header, 1, 32, f);
+        if (written != 32) { fclose(f); remove(tmp_path); return TD_ERR_IO; }
 
-    /* Write data */
-    if (vec->len < 0) { fclose(f); return TD_ERR_CORRUPT; }
-    uint8_t esz = td_sym_elem_size(vec->type, vec->attrs);
-    if (esz == 0 && vec->len > 0) { fclose(f); return TD_ERR_TYPE; }
-    /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
-    if ((uint64_t)vec->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
-        fclose(f);
-        return TD_ERR_IO;
-    }
-    size_t data_size = (size_t)vec->len * esz;
-
-    void* data;
-    if (vec->attrs & TD_ATTR_SLICE) {
-        /* Validate slice bounds before computing data pointer */
-        td_t* parent = vec->slice_parent;
-        if (!parent || vec->slice_offset < 0 ||
-            vec->slice_offset + vec->len > parent->len) {
+        /* Write data */
+        if (vec->len < 0) { fclose(f); remove(tmp_path); return TD_ERR_CORRUPT; }
+        uint8_t esz = td_sym_elem_size(vec->type, vec->attrs);
+        if (esz == 0 && vec->len > 0) { fclose(f); remove(tmp_path); return TD_ERR_TYPE; }
+        /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
+        if ((uint64_t)vec->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
             fclose(f);
+            remove(tmp_path);
             return TD_ERR_IO;
         }
-        data = (char*)td_data(parent) + vec->slice_offset * esz;
-    } else {
-        data = td_data(vec);
+        size_t data_size = (size_t)vec->len * esz;
+
+        void* data;
+        if (vec->attrs & TD_ATTR_SLICE) {
+            /* Validate slice bounds before computing data pointer */
+            td_t* parent = vec->slice_parent;
+            if (!parent || vec->slice_offset < 0 ||
+                vec->slice_offset + vec->len > parent->len) {
+                fclose(f);
+                remove(tmp_path);
+                return TD_ERR_IO;
+            }
+            data = (char*)td_data(parent) + vec->slice_offset * esz;
+        } else {
+            data = td_data(vec);
+        }
+
+        if (data_size > 0) {
+            written = fwrite(data, 1, data_size, f);
+            if (written != data_size) { fclose(f); remove(tmp_path); return TD_ERR_IO; }
+        }
+
+        /* Append external nullmap bitmap after data */
+        if ((vec->attrs & TD_ATTR_HAS_NULLS) &&
+            (vec->attrs & TD_ATTR_NULLMAP_EXT) && vec->ext_nullmap) {
+            size_t bitmap_len = ((size_t)vec->len + 7) / 8;
+            written = fwrite(td_data(vec->ext_nullmap), 1, bitmap_len, f);
+            if (written != bitmap_len) { fclose(f); remove(tmp_path); return TD_ERR_IO; }
+        }
+
+        fclose(f);
     }
 
-    if (data_size > 0) {
-        written = fwrite(data, 1, data_size, f);
-        if (written != data_size) { fclose(f); return TD_ERR_IO; }
-    }
+fsync_and_rename:;
+    /* Fsync temp file for durability */
+    td_fd_t tmp_fd = td_file_open(tmp_path, TD_OPEN_READ | TD_OPEN_WRITE);
+    if (tmp_fd == TD_FD_INVALID) { remove(tmp_path); return TD_ERR_IO; }
+    td_err_t err = td_file_sync(tmp_fd);
+    td_file_close(tmp_fd);
+    if (err != TD_OK) { remove(tmp_path); return err; }
 
-    /* Append external nullmap bitmap after data */
-    if ((vec->attrs & TD_ATTR_HAS_NULLS) &&
-        (vec->attrs & TD_ATTR_NULLMAP_EXT) && vec->ext_nullmap) {
-        size_t bitmap_len = ((size_t)vec->len + 7) / 8;
-        written = fwrite(td_data(vec->ext_nullmap), 1, bitmap_len, f);
-        if (written != bitmap_len) { fclose(f); return TD_ERR_IO; }
-    }
+    /* Atomic rename: tmp -> final path */
+    err = td_file_rename(tmp_path, path);
+    if (err != TD_OK) { remove(tmp_path); return err; }
 
-    /* No fsync; durability not guaranteed on power failure. */
-    fclose(f);
     return TD_OK;
 }
 

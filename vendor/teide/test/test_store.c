@@ -37,7 +37,7 @@
 static void* store_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     return NULL;
 }
 
@@ -1158,7 +1158,7 @@ static MunitResult test_sym_col_count_mismatch(const void* params, void* fixture
     /* Destroy sym table and re-init with fewer symbols.
      * This simulates loading a column against a smaller sym table. */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
     td_sym_intern("only_one", 8);
     uint32_t new_sc = td_sym_count();
     munit_assert_uint(new_sc, <, sc);
@@ -1277,7 +1277,7 @@ static MunitResult test_splay_load_with_sym(const void* params, void* fixture) {
 
     /* Reset sym table, then load via td_splay_load with sym_path */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
     munit_assert_uint(td_sym_count(), ==, 0);
 
     td_t* loaded = td_splay_load(TMP_SPLAY_SYM_DIR, TMP_SYM_PATH);
@@ -1326,7 +1326,7 @@ static MunitResult test_splay_load_sym_missing_corrupt(const void* params, void*
 
     /* Reset sym table — simulate loading without sym */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
     munit_assert_uint(td_sym_count(), ==, 0);
 
     /* Load with NULL sym_path — should fail because TD_SYM column exists

@@ -31,7 +31,7 @@
 static void* sym_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
     return NULL;
 }
 
@@ -251,7 +251,7 @@ static MunitResult test_sym_save_load_roundtrip(const void* params, void* fixtur
 
     /* Destroy and re-init sym table */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
     munit_assert_uint(td_sym_count(), ==, 0);
 
     /* Load */
@@ -317,7 +317,7 @@ static MunitResult test_sym_save_append_only(const void* params, void* fixture) 
 
     /* Destroy and reload */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
     err = td_sym_load(sym_path);
     munit_assert_int(err, ==, TD_OK);
     munit_assert_uint(td_sym_count(), ==, 4);
@@ -400,7 +400,7 @@ static MunitResult test_sym_load_truncated(const void* params, void* fixture) {
 
     /* Destroy and re-init */
     td_sym_destroy();
-    td_sym_init();
+    (void)td_sym_init();
 
     /* Load should fail */
     err = td_sym_load(sym_path);

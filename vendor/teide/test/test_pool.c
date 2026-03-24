@@ -36,7 +36,7 @@
 static MunitResult test_parallel_sum(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 100000;
     td_t* vec = td_vec_new(TD_I64, n);
@@ -78,7 +78,7 @@ static MunitResult test_parallel_sum(const void* params, void* data) {
 static MunitResult test_parallel_add(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 100000;
     td_t* a_vec = td_vec_new(TD_I64, n);
@@ -131,7 +131,7 @@ static MunitResult test_parallel_add(const void* params, void* data) {
 static MunitResult test_parallel_group_sum(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 100000;
     td_t* id_vec = td_vec_new(TD_I64, n);
@@ -218,7 +218,7 @@ static MunitResult test_parallel_group_sum(const void* params, void* data) {
 static MunitResult test_parallel_min_max(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 100000;
     td_t* vec = td_vec_new(TD_F64, n);
@@ -272,7 +272,7 @@ static MunitResult test_parallel_min_max(const void* params, void* data) {
 static MunitResult test_cancel(const void* params, void* data) {
     (void)params; (void)data;
     td_heap_init();
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t n = 100000;
     td_t* vec = td_vec_new(TD_I64, n);

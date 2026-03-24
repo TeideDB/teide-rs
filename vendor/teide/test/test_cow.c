@@ -185,7 +185,7 @@ extern td_t* td_block_copy(td_t* src);
 static MunitResult test_block_copy_retains_children(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
-    td_sym_init();
+    (void)td_sym_init();
 
     int64_t vals[] = {1, 2, 3};
     td_t* vec = td_vec_from_raw(TD_I64, vals, 3);

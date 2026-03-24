@@ -7,7 +7,7 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     td_heap_init();
-    td_sym_init();
+    assert(td_sym_init() == TD_OK);
 
     char path[] = "/tmp/fuzz_csv_XXXXXX";
     int fd = mkstemp(path);

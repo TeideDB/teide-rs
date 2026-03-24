@@ -726,7 +726,8 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
 
         /* Pre-grow: upper bound is n_rows unique strings */
         uint32_t current = td_sym_count();
-        td_sym_ensure_cap(current + (uint32_t)(n_rows < UINT32_MAX ? n_rows : UINT32_MAX));
+        if (!td_sym_ensure_cap(current + (uint32_t)(n_rows < UINT32_MAX ? n_rows : UINT32_MAX)))
+            return false;  /* OOM: cannot grow sym table */
 
         for (int64_t r = 0; r < n_rows; r++) {
             if (nm && (nm[r >> 3] & (1u << (r & 7)))) {
@@ -1078,7 +1079,7 @@ td_t* td_read_csv_opts(const char* path, char delimiter, bool header,
     }
     if (ncols > CSV_MAX_COLS) {
         munmap(buf, file_size);
-        close(fd);
+        /* fd already closed after mmap (line 1044) — do not close again */
         return TD_ERR_PTR(TD_ERR_RANGE);  /* too many columns */
     }
 
@@ -1312,8 +1313,13 @@ td_t* td_read_csv_opts(const char* path, char delimiter, bool header,
 
     /* ---- 9b. Batch-intern string columns ---- */
     if (has_str_cols) {
-        csv_intern_strings(str_ref_bufs, ncols, parse_types,
+        bool intern_ok = csv_intern_strings(str_ref_bufs, ncols, parse_types,
                            col_data, n_rows, sym_max_ids, col_nullmaps);
+        if (!intern_ok) {
+            for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
+            for (int c = 0; c < ncols; c++) td_release(col_vecs[c]);
+            goto fail_offsets;
+        }
     }
 
     /* Free strref buffers */
